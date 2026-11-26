@@ -8,6 +8,7 @@ import { call as sculpt } from '../build/sculpt.mjs';
 import { call as marks } from '../build/marks.mjs';
 import { call as noise } from '../build/noise.mjs';
 import { call as brush } from '../build/brush.mjs';
+import { call as trees } from '../build/trees.mjs';
 
 const point = (x, y, z) => ({ x, y, z });
 const origin = point(0, 0, 0);
@@ -15,6 +16,7 @@ const none = { None: null };
 const frames = [];
 const strokes = [];
 const brushes = [];
+const treeCases = [];
 const normalize = state => JSON.parse(JSON.stringify(state));
 function check(call, tests, pure, args, reference) {
   const output = call(pure, args);
@@ -25,6 +27,7 @@ function check(call, tests, pure, args, reference) {
 const shape = (pure, args, reference) => check(sculpt, frames, pure, args, reference);
 const stroke = (pure, args, reference) => check(marks, strokes, pure, args, reference);
 const paint = (pure, args, reference) => check(brush, brushes, pure, args, reference);
+const tree = (pure, args) => check(trees, treeCases, pure, args);
 
 const rotation = { Some: { x: point(0, 0, -1), y: point(0, 1, 0), z: point(1, 0, 0) } };
 const box = shape('boxed', [origin, rotation, Math.sqrt(6), point(2, 1, 1), 0.1]);
@@ -86,9 +89,34 @@ assert.equal(feather.random, advanced(2));
 assert.equal(feather.marks[0].along, 0.32);
 assert.equal(paint('brush_splats', [full, [0, 0, 0, 0, 10, 20, 30, 40]]).length, 3);
 
+const maple = { base: origin, height: 5.5, radius: .3, lean: { x: .1, z: -.2 }, spacing: .1,
+  roots: 3, limbs: 5, spread: 3, cluster_scale: 1, leaf_scale: 0, leaf_count: 72, leafy: true };
+const growth = tree('grow_tree', [maple, random, false]);
+const collision = tree('grow_tree', [maple, random, true]);
+assert(growth.wood.length > collision.wood.length);
+assert.equal(collision.wood.length, maple.roots + 1);
+assert.deepEqual(collision.clusters, growth.clusters);
+assert.equal(collision.random, growth.random);
+const trunk = tree('wood_tube', [growth.wood[0]]);
+assert.equal(trunk.segments.length, 10);
+assert.deepEqual(trunk.start.center, growth.wood[0].points[0]);
+assert.deepEqual(trunk.end.center, growth.top);
+const crownOptions = { sun: point(.45, .72, .52), basic: [4, 4, 5], lit: [5, 6, 7], local: [20],
+  lamps: [{ position: point(0, 5, 0), radius: 50, strength: 1 }], scale: growth.scale };
+const crown = tree('paint_crown', [growth.clusters, crownOptions, growth.leaf_count, none, growth.random]);
+assert.equal(crown.leaves.length, maple.leaf_count);
+assert(crown.leaves.every(leaf => leaf.mark.pigment === 20));
+const outside = { Some: { x0: 10, z0: 10, x1: 15, z1: 15 } };
+const clipped = tree('paint_crown', [growth.clusters, crownOptions, growth.leaf_count, outside, growth.random]);
+assert.equal(clipped.leaves.length, 0);
+assert.notEqual(clipped.random, crown.random);
+const falling = tree('falling_leaves', [{ center: growth.top, radius: 3, colors: [22, 23, 26] }, 14, crown.random]);
+assert.equal(falling.leaves.length, 14);
+assert.equal(falling.random, (crown.random + 14 * 8 * 1831565813) >>> 0);
+
 const scratch = mkdtempSync(join(tmpdir(), 'ink-studio-sculpt-'));
 try {
-  for (const [project, cases] of [['sculpt', frames], ['marks', strokes], ['brush', brushes]]) {
+  for (const [project, cases] of [['sculpt', frames], ['marks', strokes], ['brush', brushes], ['trees', treeCases]]) {
     const requests = join(scratch, 'requests.json');
     writeFileSync(requests, JSON.stringify(cases.map(({ pure, args }) => ({ pure, args }))));
     const manifest = fileURLToPath(new URL(`../build/${project}-rust/Cargo.toml`, import.meta.url));
@@ -96,10 +124,10 @@ try {
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     const actual = JSON.parse(result);
     const expected = cases.map(({ output }) => output);
-    if (project === 'brush') assert.deepEqual(normalize(actual), normalize(expected));
+    if (project === 'brush' || project === 'trees') assert.deepEqual(normalize(actual), normalize(expected));
     else assert.deepEqual(actual, expected);
   }
 } finally {
   rmSync(scratch, { recursive: true, force: true });
 }
-console.log('Sculpt distances, splat covariances, and procedural brush strokes matched on JavaScript and Rust.');
+console.log('Sculpt distances, splat covariances, brush strokes and tree generation matched on JavaScript and Rust.');
