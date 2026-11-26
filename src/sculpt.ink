@@ -8,6 +8,9 @@ record Box { half: math.Point, rounding: f64, }
 record Lathe { height: f64, base: f64, slope: f64, }
 record PowerLathe { height: f64, base: f64, slope: f64, exponent: f64, }
 record RippleLathe { height: f64, base: f64, taper: f64, amplitude: f64, frequency: f64, }
+record PowerRippleLathe {
+    height: f64, radius: f64, tip: f64, exponent: f64, amplitude: f64, frequency: f64, phase: f64,
+}
 record Torus { major: f64, minor: f64, }
 
 record Segment {
@@ -19,7 +22,7 @@ record Segment {
 }
 
 enum Form { Boxed(Box), Ellipsoid(math.Point), Turned(Lathe), Tube(List<Segment>), Ring(Torus), TurnedFromTip(Lathe),
-    TurnedPower(PowerLathe), TurnedRipple(RippleLathe), }
+    TurnedPower(PowerLathe), TurnedRipple(RippleLathe), TurnedPowerRipple(PowerRippleLathe), }
 
 record Model {
     center: math.Point,
@@ -56,6 +59,13 @@ pub fn turned_power(center: math.Point, frame: Option<math.Matrix>, height: f64,
 
 pub fn turned_ripple(center: math.Point, frame: Option<math.Matrix>, bound: f64, profile: RippleLathe) -> Model {
     return Model { center: center, frame: frame, bound: bound, form: Form.TurnedRipple(profile) };
+}
+
+pub fn turned_power_ripple(center: math.Point, frame: Option<math.Matrix>, profile: PowerRippleLathe) -> Model {
+    let radius = profile.tip + profile.radius * (1.0f64 + abs(profile.amplitude));
+    let half = profile.height * 0.5f64;
+    return Model { center: center, frame: frame, bound: sqrt(radius * radius + half * half),
+        form: Form.TurnedPowerRipple(profile) };
 }
 
 pub fn tube(center: math.Point, bound: f64, segments: List<Segment>) -> Model {
@@ -138,6 +148,11 @@ fn ripple_radius(profile: RippleLathe, t: f64) -> f64 {
         (1.0f64 + profile.amplitude * math.sin(t * profile.frequency));
 }
 
+fn power_ripple_radius(profile: PowerRippleLathe, t: f64) -> f64 {
+    return profile.radius * unit_power(1.0f64 - t, profile.exponent) *
+        (1.0f64 + profile.amplitude * math.sin(t * profile.frequency + profile.phase)) + profile.tip;
+}
+
 fn lathe_distance(height: f64, radius: f64, p: math.Point) -> f64 {
     let dr = (sqrt(p.x * p.x + p.z * p.z) - radius) * 0.8f64;
     let dy = abs(p.y) - height * 0.5f64;
@@ -158,6 +173,11 @@ fn power_distance(profile: PowerLathe, p: math.Point) -> f64 {
 
 fn ripple_distance(profile: RippleLathe, p: math.Point) -> f64 {
     let radius = ripple_radius(profile, math.sat(p.y / profile.height + 0.5f64));
+    return lathe_distance(profile.height, radius, p);
+}
+
+fn power_ripple_distance(profile: PowerRippleLathe, p: math.Point) -> f64 {
+    let radius = power_ripple_radius(profile, math.sat(p.y / profile.height + 0.5f64));
     return lathe_distance(profile.height, radius, p);
 }
 
@@ -195,6 +215,7 @@ pub fn solid_distance(model: Model, p: math.Point) -> f64 {
         Form.TurnedFromTip(profile) => turned_distance(profile, local_point(model, p), true),
         Form.TurnedPower(profile) => power_distance(profile, local_point(model, p)),
         Form.TurnedRipple(profile) => ripple_distance(profile, local_point(model, p)),
+        Form.TurnedPowerRipple(profile) => power_ripple_distance(profile, local_point(model, p)),
         Form.Tube(segments) => tube_distance(segments, p),
         Form.Ring(ring) => torus_distance(ring, local_point(model, p)),
     };

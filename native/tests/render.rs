@@ -89,6 +89,13 @@ fn computes_and_draws_from_the_same_device_buffer() {
     assert_eq!(&data[..4], &[16, 24, 32, 255]);
     assert_eq!(&data[31 * 256 + 32 * 4..31 * 256 + 33 * 4], &[255, 0, 0, 255]);
     assert!(data.chunks_exact(4).any(|pixel| pixel[0] > 16 && pixel[0] < 255));
+    contour.set_contour_grade(Some(&[[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]])).unwrap();
+    let graded = draw_fixture(&device, &queue, &texture, &readback, &contour);
+    assert_eq!(&graded[..4], &[0, 0, 0, 255]);
+    assert_eq!(&graded[31 * 256 + 32 * 4..31 * 256 + 33 * 4], &[0, 255, 0, 255]);
+    assert!(contour.set_contour_grade(Some(&[[0.0, 0.0, 1.0]])).is_err());
+    contour.set_contour_grade(None).unwrap();
+    assert_eq!(draw_fixture(&device, &queue, &texture, &readback, &contour), data);
 }
 
 fn draw_fixture(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture,

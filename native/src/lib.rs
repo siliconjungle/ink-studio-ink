@@ -118,7 +118,7 @@ impl GaussianRenderer {
             usage: wgpu::BufferUsages::UNIFORM,
         });
         let raster = if let Some(settings) = contours {
-            Raster::Contours(Box::new(ContourRaster::new(device, format, size, settings)?))
+            Raster::Contours(Box::new(ContourRaster::new(device, queue, format, size, settings)?))
         } else {
             let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("Ink Studio Gaussian raster"),
@@ -260,6 +260,14 @@ impl GaussianRenderer {
 
     pub fn stage_ranges(&mut self, ranges: &[(usize, Value)]) -> Result<Value, String> {
         self.engine.write_ranges(self.session, "splats", ranges)
+    }
+
+    /// Replaces the display colors, or restores the original grade with `None`.
+    pub fn set_contour_grade(&self, grade: Option<&[[f32; 3]]>) -> Result<(), String> {
+        match &self.raster {
+            Raster::Contours(contour) => contour.set_grade(grade),
+            Raster::Smooth(_) => Err("A contour grade requires Colored Contours".into()),
+        }
     }
 
     pub fn update_camera(

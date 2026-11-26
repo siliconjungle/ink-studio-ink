@@ -50,6 +50,13 @@ for (const t of [0.1, 0.3, 0.5, 0.7, 0.9]) {
   const radius = ripple.base * (1 - ripple.taper * t) * (1 + ripple.amplitude * Math.sin(ripple.frequency * t));
   assert(Math.abs(shape('solid_distance', [rippleModel, point(radius, (t - 0.5) * ripple.height, 0)]) < 1e-14));
 }
+const powerRipple = { height: 3.2, radius: 1.4, tip: 0.05, exponent: 0.72, amplitude: 0.14, frequency: 10, phase: 1.3 };
+const powerRippleModel = shape('turned_power_ripple', [origin, none, powerRipple]);
+for (const t of [0, 0.125, 0.5, 0.9375, 1]) {
+  const { height, radius, tip, exponent, amplitude, frequency, phase } = powerRipple;
+  const edge = radius * (1 - t) ** exponent * (1 + amplitude * Math.sin(t * frequency + phase)) + tip;
+  assert(Math.abs(shape('solid_distance', [powerRippleModel, point(edge, (t - 0.5) * height, 0)])) < 1e-13);
+}
 const tube = shape('tube', [origin, 4, [
   { start: point(0, -1, 0), delta: point(0, 2, 0), length_squared: 4, base: 1.5, tip: 0.5 },
 ]]);

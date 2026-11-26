@@ -4,7 +4,7 @@ This repository ports Ink Studio's Gaussian splat toolkit to [Ink Lang](https://
 
 `src/gaussian.ink` builds to native Rust, JavaScript and WGSL. The GPU path produces a packed buffer of ellipses. The native and browser renderers bind that buffer directly and share `shaders/gaussian.wgsl` for rasterization. WebGPU and native wgpu on Metal, Vulkan, and Direct3D 12 use the packed row count to draw only projected splats, with the draw count staying on the GPU. The caller creates the device and render target. Screen-space inputs use the supplied compositing order. World-space inputs use the supplied camera pose and keep splat data resident across camera changes. A renderer retains a single target size and an input capacity determined by the initial rows.
 
-Colored Contours is available for sorted world and skinned views. One Ink projection and depth sort supplies the native grid and a double-resolution grid. The native grid snaps splats to pixel centers. Solid coverage on the finer grid determines the silhouette, and the shared WGSL resolve applies the palette and ordered dither. Use Rust's `with_contours` or the browser renderer's `contours` option. Each palette uses packed `0xRRGGBB` colors and begins with its background.
+Colored Contours is available for sorted world and skinned views. One Ink projection and depth sort supplies the native grid and a double-resolution grid. The native grid snaps splats to pixel centers. Solid coverage on the finer grid determines the silhouette, and the shared WGSL resolve applies the palette and ordered dither. Use Rust's `with_contours` or the browser renderer's `contours` option. Each palette uses packed `0xRRGGBB` colors and begins with its background. Rust's `set_contour_grade` and JavaScript's `setContourGrade` update the displayed colors of resident geometry.
 
 Both hosts can stage changes to disjoint row ranges and project them on the next camera update or explicit `project` call. The `wide-green` scene uses this path to retain the original field cells as the view moves. `import_builder_splats` reads position, covariance, pigment and opacity from the Studio builder’s sixteen-float rows. Native clients can present an art-resolution texture with `PixelPresenter`, which uses centered nearest-neighbor scaling and supports sRGB surfaces.
 
@@ -48,9 +48,9 @@ The same module reflects a world-space splat across a horizontal water plane, in
 
 `src/rig_bake.ink` bakes a character's rest sculpt into the renderer's bind splats. It projects the blended and carved forms, then uses each visible surface's joint tags to bind the splat. Tags can blend two joints by height or mark a splat as a blinking eye. The bake preserves palette ramps, ambient occlusion, and seeded shade variation. Power-law lathe profiles support curved forms such as Hex's robe.
 
-Lathe profiles can also ripple as they taper. The same profile drives the signed-distance field and ring sampling, as used by the sculpted figures around Rebirth's Green Flame.
+Lathe profiles can ripple as they taper, including the phase-shifted power profile used for the stalagmites in Rebirth's Drake cave. The same profile drives the signed-distance field and ring sampling.
 
-`src/rail.ink` measures authored 3D polylines by arc length and finds the nearest point in the horizontal plane. It preserves the first segment on equal-distance hits and handles repeated points. Rebirth uses the same Ink implementation on both targets for rail boarding, steering, and handoffs in the Crypt’s Works wing.
+`src/rail.ink` samples Catmull–Rom splines and measures authored 3D polylines by arc length. Its nearest-point query preserves the first segment on equal-distance hits and handles repeated points. Rebirth uses the same Ink implementation on both targets for rail boarding, steering, and handoffs in the Crypt’s Works wing.
 
 ## Build and check
 

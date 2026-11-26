@@ -16,10 +16,14 @@ pub struct ContourSettings<'a> {
 }
 
 const INTERMEDIATE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+const MAX_COLORS: usize = 64;
+const GRADE_WORD: usize = 8 + MAX_COLORS * 4;
 
 pub(crate) struct ContourRaster {
     pub layout: wgpu::BindGroupLayout,
     pub palette: wgpu::Buffer,
+    queue: wgpu::Queue,
+    initial_grade: Vec<[f32; 3]>,
     native: Grid,
     high: Grid,
     resolve: wgpu::RenderPipeline,
@@ -113,13 +117,14 @@ impl Grid {
 impl ContourRaster {
     pub fn new(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
         size: [u32; 2],
         settings: ContourSettings<'_>,
     ) -> Result<Self, String> {
         let count = settings.colors.len();
         if count == 0
-            || count > 64
+            || count > MAX_COLORS
             || settings.colors.iter().any(|color| *color > 0xff_ffff)
             || ![
                 settings.dither,
@@ -148,7 +153,7 @@ impl ContourRaster {
                 include_str!("../../shaders/gaussian-contours.wgsl").into(),
             ),
         });
-        let mut words = [0.0f32; 8 + 64 * 8];
+        let mut words = [0.0f32; 8 + MAX_COLORS * 8];
         words[..8].copy_from_slice(&[
             count as f32,
             settings.dither,
@@ -159,11 +164,14 @@ impl ContourRaster {
             f32::from(settings.hard),
             0.0,
         ]);
+        let mut initial_grade = Vec::with_capacity(count);
         for (i, color) in settings.colors.iter().enumerate() {
             let rgb = [16, 8, 0].map(|shift| ((color >> shift) & 255u32) as f32 / 255.0);
             let graded = settings.grade.map_or(rgb, |colors| colors[i]);
             words[8 + i * 4..11 + i * 4].copy_from_slice(&rgb);
-            words[264 + i * 4..267 + i * 4].copy_from_slice(&graded);
+            let at = GRADE_WORD + i * 4;
+            words[at..at + 3].copy_from_slice(&graded);
+            initial_grade.push(graded);
         }
         let palette = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Contour palette"),
@@ -171,7 +179,7 @@ impl ContourRaster {
                 .iter()
                 .flat_map(|value| value.to_le_bytes())
                 .collect::<Vec<_>>(),
-            usage: wgpu::BufferUsages::UNIFORM,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let buffer = |binding, visibility, ty| wgpu::BindGroupLayoutEntry {
             binding,
@@ -260,12 +268,28 @@ impl ContourRaster {
         Ok(Self {
             layout,
             palette,
+            queue: queue.clone(),
+            initial_grade,
             native,
             high,
             resolve,
             inputs,
             background,
         })
+    }
+
+    pub fn set_grade(&self, grade: Option<&[[f32; 3]]>) -> Result<(), String> {
+        let grade = grade.unwrap_or(&self.initial_grade);
+        if grade.len() != self.initial_grade.len() || grade.iter().flatten().any(|value| !value.is_finite()) {
+            return Err("Invalid contour grade".into());
+        }
+        let bytes: Vec<u8> = grade
+            .iter()
+            .flat_map(|&[r, g, b]| [r, g, b, 0.0f32])
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        self.queue.write_buffer(&self.palette, (GRADE_WORD * 4) as u64, &bytes);
+        Ok(())
     }
 
     pub fn draw(

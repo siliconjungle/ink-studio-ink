@@ -9,6 +9,44 @@ record Projection { distance: f64, arc: f64, point: Point, }
 
 fn clamp01(x: f64) -> f64 { return math.max(0.0f64, math.min(1.0f64, x)); }
 
+record SplineSegment { a: math.Point, b: math.Point, c: math.Point, d: math.Point, }
+
+fn spline_axis(a: f64, b: f64, c: f64, d: f64, t: f64) -> f64 {
+    let square = t * t;
+    let cube = square * t;
+    return 0.5f64 * (2.0f64 * b + (c - a) * t +
+        (2.0f64 * a - 5.0f64 * b + 4.0f64 * c - d) * square +
+        (3.0f64 * b - a - 3.0f64 * c + d) * cube);
+}
+
+fn spline_sample(span: SplineSegment, t: f64) -> math.Point {
+    let a = span.a;
+    let b = span.b;
+    let c = span.c;
+    let d = span.d;
+    return math.point(spline_axis(a.x, b.x, c.x, d.x, t), spline_axis(a.y, b.y, c.y, d.y, t), spline_axis(a.z, b.z, c.z, d.z, t));
+}
+
+fn spline_span(knots: List<math.Point>, i: u32) -> SplineSegment {
+    let b = knots.at_or(i, math.zero());
+    let c = knots.at_or(i + 1, b);
+    return SplineSegment { a: if i == 0 { b } else { knots.at_or(i - 1, b) },
+        b: b, c: c, d: knots.at_or(i + 2, c) };
+}
+
+fn append_samples(out: Buffer<math.Point>, span: SplineSegment, per: u32) -> Buffer<math.Point> {
+    return repeat_until(per, out, fn(rows) => false,
+        fn(i) => fn(rows) => rows.push(spline_sample(span, f64_from_u32(i) / f64_from_u32(per))));
+}
+
+pub fn sample_spline(knots: List<math.Point>, per: u32) -> List<math.Point> {
+    let count = length(knots);
+    if count == 0 { return []; }
+    let start: Buffer<math.Point> = Buffer.empty();
+    let points = repeat_until(count - 1, start, fn(rows) => false, fn(i) => fn(rows) => append_samples(rows, spline_span(knots, i), per));
+    return points.push(knots.at_or(count - 1, math.zero())).freeze();
+}
+
 fn extend(path: Path, a: math.Point, b: math.Point) -> Path {
     let delta = math.sub(b, a);
     let span = sqrt(math.dot(delta, delta));

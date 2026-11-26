@@ -200,6 +200,13 @@ fn ripple_lathe_points(lathe: sculpt.RippleLathe, spacing: f64) -> List<math.Poi
     return lathe_points(lathe.height, side, sculpt.ripple_radius(lathe, 0.0f64), sculpt.ripple_radius(lathe, 1.0f64), spacing);
 }
 
+fn power_ripple_lathe_points(lathe: sculpt.PowerRippleLathe, spacing: f64) -> List<math.Point> {
+    let rows = lathe_rows(lathe.height, spacing);
+    let side = indexed(rows).map(fn(i) =>
+        sculpt.power_ripple_radius(lathe, (f64_from_u32(i) + 0.5f64) / f64_from_u32(rows)));
+    return lathe_points(lathe.height, side, sculpt.power_ripple_radius(lathe, 0.0f64), lathe.tip, spacing);
+}
+
 fn ring_point(ring: sculpt.Torus, i: u32, j: u32, width: u32, height: u32) -> math.Point {
     let a = circle(f64_from_u32(i) / f64_from_u32(width) * math.tau());
     let b = circle(f64_from_u32(j) / f64_from_u32(height) * math.tau());
@@ -296,6 +303,7 @@ pub fn model_candidates(model: sculpt.Model, spacing: f64) -> List<math.Point> {
         sculpt.Form.TurnedFromTip(lathe) => to_world(turned_points(lathe, spacing, true), model.center, model.frame),
         sculpt.Form.TurnedPower(lathe) => to_world(power_lathe_points(lathe, spacing), model.center, model.frame),
         sculpt.Form.TurnedRipple(lathe) => to_world(ripple_lathe_points(lathe, spacing), model.center, model.frame),
+        sculpt.Form.TurnedPowerRipple(lathe) => to_world(power_ripple_lathe_points(lathe, spacing), model.center, model.frame),
         sculpt.Form.Tube(segments) => tube_points(segments, spacing),
         sculpt.Form.Ring(ring) => to_world(torus_points(ring, spacing), model.center, model.frame),
     };

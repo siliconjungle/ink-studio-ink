@@ -22,6 +22,9 @@ const step = (position, direction) => ({ position, direction });
 const some = Some => ({ Some });
 const none = { None: null };
 const requests = [
+  ['sample_spline', [[], 4], []],
+  ['sample_spline', [[a], 4], [a]],
+  ['sample_spline', [[a, b, c], 2], [a, point(2, 1.5, -0.25), b, point(4.25, 3.1875, 2), c]],
   ['prepare_rail', [nodes], path],
   ['prepare_rail', [[]], empty],
   ['prepare_rail', [[a, a]], empty],

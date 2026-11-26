@@ -1,5 +1,6 @@
 const shaderUrl = new URL('../shaders/gaussian-contours.wgsl', import.meta.url);
 const maxColors = 64;
+const gradeWord = 8 + maxColors * 4;
 const over = { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' };
 
 export async function createContourRaster(device, format, width, height, {
@@ -46,7 +47,7 @@ export async function createContourRaster(device, format, width, height, {
   for (let i = 0; i < count; i++) {
     const rgb = [16, 8, 0].map(shift => (colors[i] >>> shift & 255) / 255);
     words.set(rgb, 8 + i * 4);
-    words.set(graded ? graded.slice(i * 3, i * 3 + 3) : rgb, 8 + (maxColors + i) * 4);
+    words.set(graded ? graded.slice(i * 3, i * 3 + 3) : rgb, gradeWord + i * 4);
   }
   const palette = device.createBuffer({ label: 'Contour palette', size: words.byteLength,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -76,6 +77,17 @@ export async function createContourRaster(device, format, width, height, {
     pass.end();
   }
   return {
+    setGrade(grade) {
+      const channels = grade == null ? null : Array.from(grade);
+      if (channels && (channels.length !== count * 3 || channels.some(channel => !Number.isFinite(channel)))) {
+        throw new Error('Invalid contour grade');
+      }
+      const mapped = words.slice(gradeWord, gradeWord + count * 4);
+      if (channels) {
+        for (let i = 0; i < count; i++) mapped.set(channels.slice(i * 3, i * 3 + 3), i * 4);
+      }
+      device.queue.writeBuffer(palette, gradeWord * 4, mapped);
+    },
     bind(buffer, viewport) {
       return device.createBindGroup({ layout: rasterResources, entries: [
         { binding: 3, resource: { buffer: palette } },

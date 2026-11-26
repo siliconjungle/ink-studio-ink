@@ -83,7 +83,26 @@
         !colors.some((value, i) => i % 4 === red && value > 16 && value < 255)) {
       throw new Error('Colored Contours missed the background, interior, or silhouette');
     }
+    const originalGrade = colors.slice();
     readback.unmap();
+    async function contourPixels(grade) {
+      contour.setContourGrade(grade);
+      const target = context.getCurrentTexture();
+      const encoder = device.createCommandEncoder();
+      contour.draw(encoder, target.createView());
+      encoder.copyTextureToBuffer({ texture: target }, { buffer: readback, bytesPerRow: 256 }, [64, 64]);
+      device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const pixels = new Uint8Array(readback.getMappedRange()).slice();
+      readback.unmap();
+      return pixels;
+    }
+    const graded = await contourPixels([0, 0, 0, 0, 1, 0]);
+    if (graded[red] !== 0 || graded[31 * 256 + 32 * 4 + 1] !== 255 || graded[31 * 256 + 32 * 4 + red] !== 0) {
+      throw new Error('Changing the contour grade did not recolor the current splats');
+    }
+    const restoredGrade = await contourPixels(null);
+    if (restoredGrade.some((value, i) => value !== originalGrade[i])) throw new Error('Contour grade did not restore');
     await contour.close();
     readback.destroy();
     const bone = { axis_x: [1, 0, 0], axis_y: [0, 1, 0], axis_z: [0, 0, 1], offset: [0, 0, 0] };

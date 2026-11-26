@@ -112,6 +112,10 @@ export async function createGaussianRenderer(device, format, { width, height, sp
         if (placement) await session.write('actor', placement);
         return project();
       },
+      setContourGrade(grade) {
+        if (!contourRaster) throw new Error('A contour grade requires Colored Contours');
+        contourRaster.setGrade(grade);
+      },
       async updateSkinCamera(value, { bones, light }) {
         if (!hasSkin) throw new Error('Skin updates require a skinned world view');
         const boneWrite = await session.writeChanged('bones', bones);
