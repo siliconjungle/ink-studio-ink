@@ -52,6 +52,8 @@ Lathe profiles can ripple as they taper, including the phase-shifted power profi
 
 `src/rail.ink` samples Catmull–Rom splines and measures authored 3D polylines by arc length. Its nearest-point query preserves the first segment on equal-distance hits and handles repeated points. Rebirth uses the same Ink implementation on both targets for rail boarding, steering, and handoffs in the Crypt’s Works wing.
 
+`src/textured_surface.ink` generates indexed triangle grids with normalized texture coordinates. Heightfields query the triangles used by the mesh, and attachments use the same split to recover position and surface normal. A profile sweep accepts authored frames or samples an Ink rail by distance. Closed sweeps join at the first frame while preserving both ends of the UV range. These functions build to native Rust and JavaScript.
+
 ## Build and check
 
 Use [Ink Lang commit `765c615`](https://github.com/siliconjungle/ink-lang/commit/765c61589e1f418c7c1a2229df79257792fd59cc) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for the bake's immutable geometry inputs, including optional geometry. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
@@ -63,6 +65,7 @@ node tests/sculpt.mjs
 node tests/frost.mjs
 node tests/locomotion.mjs
 node tests/rail.mjs
+node tests/textured-surface.mjs
 node tests/walk-translation.mjs
 node tests/native-bake.mjs
 cargo test --release --locked --manifest-path native/Cargo.toml
