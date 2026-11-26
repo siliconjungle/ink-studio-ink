@@ -14,6 +14,10 @@ Callers that already own the correct far-to-near order can use `WorldOrder::Preo
 
 `src/frost.ink` ports the seasonal ice clock, local spell timers, collision threshold, and GPU packing of the ice channel from the shared ecology rules. The packed GPU output preserves the fire, heat and ground-height channels.
 
+## Procedural terrain
+
+`src/noise.ink` implements the builder's seeded value noise and octave blending. `src/terrain.ink` evaluates a bilinear height grid as a signed-distance field, derives the contact elevation for a distance threshold, and samples a world-space staggered lattice across rectangular cell boundaries. Both compile to Rust and JavaScript with the original numeric precision. Rebirth uses these modules to generate ground collision and to supply terrain samples to the original styling and sculpting pass.
+
 ## Build and check
 
 Use [Ink Lang commit `ca9f42c3`](https://github.com/siliconjungle/ink-lang/commit/ca9f42c376a326e666807525423bbf0cd6548ef3) from `codex/resident-range-writes` with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
@@ -30,4 +34,4 @@ Open `/tests/webgpu.html` on the local server to check browser dispatch, residen
 
 Open `/bench/camera.html` on the same server to run the camera probe.
 
-Current scope includes Gaussian projection, depth sorting, range updates, rasterization, biped locomotion and frost. SDF baking, additional rig types, idle gaze, animation clips, the remaining art and streaming features, simulation tools, editors, and the CLI remain part of the ongoing port.
+Current scope includes Gaussian projection, depth sorting, range updates, rasterization, biped locomotion and frost. General sculpting primitives and baking, additional rig types, idle gaze, animation clips, the remaining art and streaming features, simulation tools, editors, and the CLI remain part of the ongoing port.
