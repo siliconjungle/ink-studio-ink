@@ -50,6 +50,8 @@ The same module reflects a world-space splat across a horizontal water plane, in
 
 Lathe profiles can also ripple as they taper. The same profile drives the signed-distance field and ring sampling, as used by the sculpted figures around Rebirth's Green Flame.
 
+`src/rail.ink` measures authored 3D polylines by arc length and finds the nearest point in the horizontal plane. It preserves the first segment on equal-distance hits and handles repeated points. Rebirth uses the same Ink implementation on both targets for rail boarding, steering, and handoffs in the Crypt’s Works wing.
+
 ## Build and check
 
 Use [Ink Lang commit `ca47d82`](https://github.com/siliconjungle/ink-lang/commit/ca47d82e898fe28345f6b397f48bc0ec848c4d23) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build uses Node.js to request checked Rust borrows for the bake's immutable geometry inputs. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
@@ -60,6 +62,7 @@ node tests/projection.mjs
 node tests/sculpt.mjs
 node tests/frost.mjs
 node tests/locomotion.mjs
+node tests/rail.mjs
 node tests/walk-translation.mjs
 cargo test --release --locked --manifest-path native/Cargo.toml
 python3 -m http.server --bind 127.0.0.1

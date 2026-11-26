@@ -7,7 +7,7 @@ mkdir -p build
 "$ink" build src/gaussian.ink --target rust -o build/rust
 "$ink" build src/walker.ink --target javascript -o build/walker.mjs
 "$ink" build src/walker.ink --target rust -o build/walker-rust
-for module in noise terrain sculpt marks sampling bake edit brush material trees rig_bake locomotion; do
+for module in noise terrain sculpt marks sampling bake edit brush material trees rig_bake locomotion rail; do
     "$ink" build "src/$module.ink" --target javascript -o "build/$module.mjs"
     case "$module" in
         bake|rig_bake) node scripts/build-native-bake.mjs "$ink" "src/$module.ink" "build/$module-rust" ;;
