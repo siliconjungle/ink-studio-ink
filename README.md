@@ -4,13 +4,15 @@ This repository ports Ink Studio's Gaussian splat toolkit to [Ink Lang](https://
 
 `src/gaussian.ink` builds to native Rust, JavaScript and WGSL. The GPU path produces a packed buffer of ellipses. The native and browser renderers bind that buffer directly and share `shaders/gaussian.wgsl` for rasterization. The caller creates the device and render target. Screen-space inputs use the supplied compositing order. World-space inputs use the supplied camera pose and keep splat data resident across camera changes. A renderer retains a single target size and an input capacity determined by the initial rows.
 
+Both hosts can stage changes to disjoint row ranges and project them on the next camera update or explicit `project` call. The `wide-green` scene uses this path to retain the original field cells as the view moves. `import_builder_splats` reads position, covariance, pigment and opacity from the Studio builder’s sixteen-float rows. Native clients can present an art-resolution texture with `PixelPresenter`, which uses centered nearest-neighbor scaling and supports sRGB surfaces.
+
 Callers that already own the correct far-to-near order can use `WorldOrder::Preordered` in Rust or `preordered: true` in JavaScript. The camera update then runs only projection. One Chrome probe at 480 × 270 with 4,096 synthetic splats used 1 compute dispatch per frame with preordered rows, compared with 60 with GPU sorting. Completion p95 was 12.2 ms and 19.4 ms respectively over 30 measured frames after warmup. This measures camera update, draw submission, and GPU completion with resident inputs.
 
 `src/frost.ink` ports the seasonal ice clock, local spell timers, collision threshold, and GPU packing of the ice channel from the shared ecology rules. The packed GPU output preserves the fire, heat and ground-height channels.
 
 ## Build and check
 
-The compiler is Ink Lang commit `758fd41b3ecd2415b9434b5dde03533c615190de` with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
+Use [Ink Lang commit `ca9f42c3`](https://github.com/siliconjungle/ink-lang/commit/ca9f42c376a326e666807525423bbf0cd6548ef3) from `codex/resident-range-writes` with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
 
 ```sh
 ./scripts/build.sh --gpu
@@ -24,4 +26,4 @@ Open `/tests/webgpu.html` on the local server to check browser dispatch, residen
 
 Open `/bench/camera.html` on the same server to run the camera probe.
 
-Current scope is Gaussian projection, depth sorting, and basic rasterization. Ink Studio's styled footprints, art passes, streaming, SDF baking, rigs, simulation, editors, and CLI remain part of the ongoing port. The fixtures exercise hardware execution and buffer residency. Full-scene performance still needs measurement.
+Current scope includes Gaussian projection, depth sorting, range updates, basic rasterization and frost. Styled footprints, the remaining art and streaming features, SDF baking, rigs, simulation, editors, and CLI remain part of the ongoing port.

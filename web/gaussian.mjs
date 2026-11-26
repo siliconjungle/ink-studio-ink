@@ -73,6 +73,10 @@ export async function createGaussianRenderer(device, format, { width, height, sp
     const initialCounters = await project();
     return {
       initialCounters,
+      stageRanges(ranges) {
+        return session.writeRanges('splats', ranges);
+      },
+      project,
       async update(rows) {
         await session.write('splats', rows);
         count = rows.length;

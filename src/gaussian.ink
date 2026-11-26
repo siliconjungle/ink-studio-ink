@@ -194,3 +194,24 @@ pub fn project_sorted_world(splats: List<WorldGaussian>, camera: Camera) -> List
     return keys.map(fn(key) =>
         project_world_one(splats.at_or(word_narrow_u64_to_u32(key), fallback), camera));
 }
+
+fn legacy_color(value: f32) -> u32 {
+    return u32_from_f32(value).fold(fn(rgb) => word_and(rgb, 16777215), fn(unit) => 0);
+}
+
+fn legacy_row(data: List<f32>, offset: u32) -> WorldGaussian {
+    return WorldGaussian {
+        position: vec3(data.at_or(offset, 0.0), data.at_or(offset + 1, 0.0), data.at_or(offset + 2, 0.0)),
+        covariance0: vec3(data.at_or(offset + 4, 0.0), data.at_or(offset + 5, 0.0), data.at_or(offset + 6, 0.0)),
+        covariance1: vec3(data.at_or(offset + 8, 0.0), data.at_or(offset + 9, 0.0), data.at_or(offset + 10, 0.0)),
+        reach: 3.0,
+        rgb: legacy_color(data.at_or(offset + 7, 0.0)),
+        alpha: data.at_or(offset + 3, 0.0),
+    };
+}
+
+// Import the static attributes of complete sixteen-float Studio builder rows.
+pub fn import_builder_splats(data: List<f32>) -> List<WorldGaussian> {
+    let rows = buffer_fill(quot_or(length(data), 16, 0), 0).freeze();
+    return rows.map_indexed(fn(index) => fn(unused) => legacy_row(data, index * 16));
+}

@@ -2,6 +2,9 @@ use ink_gpu_program::{Backend, Engine, View};
 use serde_json::{Value, json};
 use wgpu::util::DeviceExt;
 
+mod present;
+pub use present::PixelPresenter;
+
 pub struct GaussianRenderer {
     engine: Engine,
     session: u64,
@@ -132,7 +135,7 @@ impl GaussianRenderer {
         Ok(renderer)
     }
 
-    fn project(&mut self, device: &wgpu::Device) -> Result<Value, String> {
+    pub fn project(&mut self, device: &wgpu::Device) -> Result<Value, String> {
         let outcomes = self.engine.step(self.session, 1)?;
         let view = self.engine.view(self.session, "ellipses")?;
         assert_ellipse_layout(&view)?;
@@ -164,6 +167,10 @@ impl GaussianRenderer {
         self.engine.write(self.session, "splats", splats)?;
         self.count = count;
         self.project(device)
+    }
+
+    pub fn stage_ranges(&mut self, ranges: &[(usize, Value)]) -> Result<Value, String> {
+        self.engine.write_ranges(self.session, "splats", ranges)
     }
 
     pub fn update_camera(

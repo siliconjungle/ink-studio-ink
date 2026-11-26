@@ -49,6 +49,10 @@ const colors = [255, 65280, 16711680, 65535];
 const unordered = [4, 7, 4, 6].map((depth, i) => ({ ...world, position: [0, 0, -depth], rgb: colors[i] }));
 const ordered = call('project_sorted_world', [unordered, camera]);
 assert.deepEqual(ordered.map((splat) => splat.rgb), [65280, 65535, 255, 16711680]);
+const sourceRow = [1, 2, 3, 0.5, 4, 5, 6, 0xf08010, 7, 8, 9, 128, 11, 12, 13, 14];
+const imported = [{ position: [1, 2, 3], covariance0: [4, 5, 6], covariance1: [7, 8, 9],
+  reach: 3, rgb: 0xf08010, alpha: 0.5 }];
+assert.deepEqual(call('import_builder_splats', [new Float32Array(sourceRow)]), imported);
 
 const directory = mkdtempSync(join(tmpdir(), 'ink-projection-'));
 function run(cmd, args) {
@@ -75,6 +79,7 @@ try {
     { pure: 'project_world', args: [worldRows, camera], expected: orthographic },
     { pure: 'project_world', args: [worldRows, perspective], expected: orthographic },
     { pure: 'project_sorted_world', args: [unordered, camera], expected: ordered },
+    { pure: 'import_builder_splats', args: [sourceRow], expected: imported, cpuOnly: true },
   ];
   writeFileSync(requestsPath, JSON.stringify(tests.map(({ pure, args }) => ({ pure, args }))));
   const native = fileURLToPath(new URL('../build/rust/Cargo.toml', import.meta.url));
@@ -82,7 +87,7 @@ try {
   assert.equal(rust.length, tests.length);
   for (const [i, test] of tests.entries()) {
     assert.deepEqual(bitsToValue(rust[i]), test.expected);
-    if (process.env.INK_WGPU_PROGRAM) {
+    if (process.env.INK_WGPU_PROGRAM && !test.cpuOnly) {
       writeFileSync(argsPath, JSON.stringify(test.args));
       const gpu = run(process.env.INK_WGPU_PROGRAM, [test.pure, argsPath, '--backend', 'gpu-required']);
       assert.equal(gpu.backend, 'gpu');
