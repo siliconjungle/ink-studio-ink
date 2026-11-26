@@ -32,9 +32,11 @@ Rebirth uses this projection and lighting in the visual field export. Its Lupine
 
 `src/marks.ink` computes the covariance of round splats, axial discs and sticks, and oriented surface dabs. Rebirth uses the compiled mark geometry during field export, with the original styling pass supplying colors and shading.
 
+`src/brush.ink` generates seed-driven grass blades, foliage, and feathers. It takes a projected surface, material settings, a pigment ramp, and a random state. It returns the marks and the advanced random state. Rebirth uses these brushes during field export. Studio tests the same strokes, noise, and splat shapes in Rust and JavaScript.
+
 ## Build and check
 
-Use [Ink Lang commit `ca9f42c3`](https://github.com/siliconjungle/ink-lang/commit/ca9f42c376a326e666807525423bbf0cd6548ef3) from `codex/resident-range-writes` with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
+Use [Ink Lang commit `b3170c4`](https://github.com/siliconjungle/ink-lang/commit/b3170c4f1af17c23e1f15b380be7018e1663f6a7) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build uses Node.js to request checked Rust borrows for the bake's immutable geometry inputs. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
 
 ```sh
 ./scripts/build.sh --gpu
