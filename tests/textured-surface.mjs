@@ -63,6 +63,13 @@ assert('Err' in check('textured_grid', divisions, 12, [...points.slice(0, -1), v
 const bounds = { x0: -3, x1: 1, z0: -2, z1: 4 };
 const heights = [0, 1, 1, 5];
 const hill = okay('textured_heightfield', bounds, { columns: 1, rows: 1 }, 2, heights);
+const texels = { width: 2, height: 2, pixels: [[1,0,0,1], [0,1,0,1], [0,0,1,1], [1,1,1,1]] };
+const filtering = { filter: 'linear', horizontal: 'clamp', vertical: 'clamp' };
+const painted = okay('surface_material_at', hill.surface, texels, filtering, 0.5, 0.5);
+assert.equal(painted.attachment.position.y, 1);
+assert.deepEqual(painted.color, { red: 0.5, green: 0.5, blue: 0.5, alpha: 1 });
+assert('Err' in check('surface_material_at', hill.surface, { ...texels, pixels: [] }, filtering, 0.5, 0.5));
+assert('Err' in check('surface_material_at', hill.surface, texels, { ...filtering, vertical: 'invalid' }, 0.5, 0.5));
 const heightRef = original?.heightfield({ bounds: [-3, 1, -2, 4], segments: [1, 1], height: heights });
 meshParity(hill.surface, heightRef);
 for (const [x, z, expected] of [[-1, 1, 1], [-2, 2.5, 0.5], [0, -0.5, 3], [-6, 9, 0], [8, -3, 5]]) {

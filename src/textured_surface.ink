@@ -2,6 +2,7 @@ module StudioTexturedSurface;
 
 import "rig.ink" as math;
 import "rail.ink" as rail;
+import "texture_address.ink" as texture;
 
 record GridSize { columns: u32, rows: u32, }
 record Triangle { a: u32, b: u32, c: u32, }
@@ -11,6 +12,8 @@ record Surface {
 record Bounds { x0: f64, x1: f64, z0: f64, z1: f64, }
 record Heightfield { bounds: Bounds, surface: Surface, }
 record Attachment { position: math.Point, normal: math.Point, }
+record MaterialSample { attachment: Attachment, color: texture.Rgba, }
+record Sampling { filter: String, horizontal: String, vertical: String, }
 record ProfilePoint { x: f64, y: f64, }
 record SweepFrame { position: math.Point, tangent: math.Point, right: Option<math.Point>, up: Option<math.Point>, }
 record SweepAxes { position: math.Point, right: math.Point, up: math.Point, }
@@ -107,6 +110,19 @@ pub fn surface_at(surface: Surface, u: f64, v: f64) -> Result<Attachment, String
         mix_triangle(at(surface, address.d), at(surface, address.c), at(surface, address.b), math.point(s + t - 1.0f64, 1.0f64 - s, 1.0f64 - t), surface.flip)
     };
     return Ok(attachment);
+}
+
+pub fn surface_material_at(surface: Surface, image: texture.Raster, sampling: Sampling,
+    u: f64, v: f64) -> Result<MaterialSample, String> {
+    return texture.texture_settings(sampling.filter, sampling.horizontal, sampling.vertical).fold(fn(settings) =>
+        painted_attachment(surface_at(surface, u, v), image, settings, u, v),
+        fn(error) => Err(error));
+}
+
+fn painted_attachment(attachment: Result<Attachment, String>, image: texture.Raster, settings: texture.Settings,
+    u: f64, v: f64) -> Result<MaterialSample, String> {
+    return attachment.fold(fn(hit) => texture.sample_texture(image, settings, u, v).fold(
+        fn(color) => Ok(MaterialSample { attachment: hit, color: color }), fn(error) => Err(error)), fn(error) => Err(error));
 }
 
 fn valid_bounds(box: Bounds) -> Bool {
