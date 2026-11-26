@@ -95,6 +95,7 @@ const growth = tree('grow_tree', [maple, random, false]);
 const collision = tree('grow_tree', [maple, random, true]);
 assert(growth.wood.length > collision.wood.length);
 assert.equal(collision.wood.length, maple.roots + 1);
+assert.deepEqual(tree('tree_colliders', [maple, random]), collision.wood);
 assert.deepEqual(collision.clusters, growth.clusters);
 assert.equal(collision.random, growth.random);
 const trunk = tree('wood_tube', [growth.wood[0]]);

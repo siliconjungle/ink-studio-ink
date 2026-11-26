@@ -143,12 +143,24 @@ fn grow_limb(tree: Tree, twist: f64, i: u32, out: Branches, collide: Bool, lobe:
     return Branches { wood: sub.wood, tips: sub.tips, clusters: sub.clusters.push(cluster), random: advance(sub.random, 1) };
 }
 
-pub fn grow_tree(tree: Tree, random: u32, collide: Bool) -> Growth {
+record TreeBase { wood: List<Wood>, twist: f64, random: u32, }
+
+fn tree_base(tree: Tree, random: u32) -> TreeBase {
     let twist = draw(random, 0) * 6.0f64;
     let after_twist = advance(random, 1);
-    let base = [stem(tree, twist)].concat(sampling.indexed(tree.roots).map(fn(i) => root(tree, advance(after_twist, i * 2), i)));
+    let wood = [stem(tree, twist)].concat(sampling.indexed(tree.roots).map(fn(i) => root(tree, advance(after_twist, i * 2), i)));
+    return TreeBase { wood: wood, twist: twist, random: advance(after_twist, tree.roots * 2) };
+}
+
+pub fn tree_colliders(tree: Tree, random: u32) -> List<Wood> {
+    return tree_base(tree, random).wood;
+}
+
+pub fn grow_tree(tree: Tree, random: u32, collide: Bool) -> Growth {
+    let base = tree_base(tree, random);
+    let twist = base.twist;
     let lobe = tree.spread * 0.8f64 * tree.cluster_scale;
-    let initial = Branches { wood: buffer(base), tips: Buffer.empty(), clusters: Buffer.empty(), random: advance(after_twist, tree.roots * 2) };
+    let initial = Branches { wood: buffer(base.wood), tips: Buffer.empty(), clusters: Buffer.empty(), random: base.random };
     let result = repeat_until(tree.limbs, initial, fn(out) => false, fn(i) => fn(out) => grow_limb(tree, twist, i, out, collide, lobe));
     let top = trunk(tree, twist, 1.0f64);
     let top_cluster = Cluster { center: math.point(top.x, top.y + lobe * 0.32f64, top.z),

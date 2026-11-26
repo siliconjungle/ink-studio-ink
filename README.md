@@ -38,7 +38,7 @@ The same module reflects a world-space splat across a horizontal water plane, in
 
 `src/material.ink` turns projected normals, ambient occlusion, and sun and lamp visibility into diffuse paint. It also provides palette ramps, moss placement on upward-facing surfaces, masonry courses, and the final dab. Rebirth uses it with the brush module to paint the two cells affected by the Wide Green bush at run time.
 
-`src/trees.ink` grows the trunk, roots, limbs and twigs from a seed, computes the tapered tube segments, and paints the crown and falling leaves. The crown uses the cell’s clipping bounds, sun and lamp settings, and an authored pigment ramp. A tree can also grow just the trunk and roots for collision. Rebirth uses the same tree generator during field export and live cell baking.
+`src/trees.ink` grows the trunk, roots, limbs and twigs from a seed, computes the tapered tube segments, and paints the crown and falling leaves. The crown uses the cell’s clipping bounds, sun and lamp settings, and an authored pigment ramp. `tree_colliders` generates the trunk and roots directly for collision. Rebirth uses the same tree module during field export, live cell baking, and collision generation.
 
 ## Build and check
 
