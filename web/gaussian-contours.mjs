@@ -1,4 +1,3 @@
-import { createRenderFrame } from '../build/contour-render/render.mjs';
 const maxColors = 64;
 const gradeWord = 8 + maxColors * 4;
 const lightingWord = gradeWord + maxColors * 4;
@@ -22,6 +21,7 @@ export async function createContourRaster(device, format, width, height, {
     words.set(graded ? graded.slice(i * 3, i * 3 + 3) : rgb, gradeWord + i * 4);
   }
   const background = { r: words[8], g: words[9], b: words[10], a: 1 };
+  const { createRenderFrame } = await import('../build/contour-render/render.mjs');
   const frame = await createRenderFrame(device, format, width, height, { background });
   const palette = device.createBuffer({ label: 'Contour palette', size: words.byteLength,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
