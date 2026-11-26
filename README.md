@@ -64,6 +64,7 @@ node tests/frost.mjs
 node tests/locomotion.mjs
 node tests/rail.mjs
 node tests/walk-translation.mjs
+node tests/native-bake.mjs
 cargo test --release --locked --manifest-path native/Cargo.toml
 python3 -m http.server --bind 127.0.0.1
 ```
