@@ -54,7 +54,7 @@ Lathe profiles can also ripple as they taper. The same profile drives the signed
 
 ## Build and check
 
-Use [Ink Lang commit `3769737`](https://github.com/siliconjungle/ink-lang/commit/3769737c6f86459dbf66d10ab77fa5c243d76f2e) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build uses Node.js to request checked Rust borrows for the bake's immutable geometry inputs, including optional geometry. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
+Use [Ink Lang commit `765c615`](https://github.com/siliconjungle/ink-lang/commit/765c61589e1f418c7c1a2229df79257792fd59cc) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for the bake's immutable geometry inputs, including optional geometry. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
 
 ```sh
 ./scripts/build.sh --gpu
