@@ -34,6 +34,8 @@ Rebirth uses this projection and lighting in the visual field export. Its Lupine
 
 `src/brush.ink` generates seed-driven grass blades, foliage, and feathers. It takes a projected surface, material settings, a pigment ramp, and a random state. It returns the marks and the advanced random state. Rebirth uses these brushes during field export. Studio tests the same strokes, noise, and splat shapes in Rust and JavaScript.
 
+`src/material.ink` turns projected normals, ambient occlusion, and sun and lamp visibility into diffuse paint. It also provides palette ramps, moss placement on upward-facing surfaces, masonry courses, and the final dab. Rebirth uses it with the brush module to paint the two cells affected by the Wide Green bush at run time.
+
 ## Build and check
 
 Use [Ink Lang commit `b3170c4`](https://github.com/siliconjungle/ink-lang/commit/b3170c4f1af17c23e1f15b380be7018e1663f6a7) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build uses Node.js to request checked Rust borrows for the bake's immutable geometry inputs. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
