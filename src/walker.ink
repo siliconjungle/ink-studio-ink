@@ -90,6 +90,18 @@ pub fn begin_walk(spec: Walker, origin: rig.Point) -> WalkState {
     };
 }
 
+fn translate_tail(tail: TailMotion, offset: rig.Point) -> TailMotion {
+    return TailMotion { current: tail.current.map(fn(point) => rig.add(point, offset)),
+        previous: tail.previous.map(fn(point) => rig.add(point, offset)) };
+}
+
+pub fn translate_walk(walk: WalkState, offset: rig.Point) -> WalkState {
+    return WalkState { time: walk.time, phase: walk.phase, move_mix: walk.move_mix, run_mix: walk.run_mix,
+        air_mix: walk.air_mix, yaw: walk.yaw, land_age: walk.land_age, land_strength: walk.land_strength,
+        springs: walk.springs, pose: walk.pose, hem: rig.add(walk.hem, offset), hem_velocity: walk.hem_velocity,
+        tails: walk.tails.map(fn(tail) => translate_tail(tail, offset)) };
+}
+
 record Gait {
     phase: f64,
     move_mix: f64,

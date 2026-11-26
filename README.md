@@ -12,6 +12,8 @@ The skinned path uploads a character's bind splats once. `src/walker.ink` evalua
 
 Walkers can add an action pose to the joint palette. The pose controls torso lean and stretch, head nod, and hem flare while retaining the current gait and cloth state. Rebirth uses this for Hex's slash.
 
+`translate_walk` moves the hem and both cloth position buffers by a world offset. The next tick keeps the previous gait phase and velocity when an actor crosses between coordinate spaces.
+
 `src/locomotion.ink` supplies the character controller's grounded, airborne, and low-traction acceleration. Low traction uses separate rates for speeding up, coasting, and reversing direction. Rebirth applies it after downhill acceleration on the Dry Reach.
 
 Callers that already own the correct far-to-near order can use `WorldOrder::Preordered` in Rust or `preordered: true` in JavaScript. The camera update then runs only projection. One Chrome probe at 480 × 270 with 4,096 synthetic splats used 1 compute dispatch per frame with preordered rows, compared with 60 with GPU sorting. Completion p95 was 12.2 ms and 19.4 ms respectively over 30 measured frames after warmup. This measures camera update, draw submission, and GPU completion with resident inputs.
@@ -56,6 +58,7 @@ node tests/projection.mjs
 node tests/sculpt.mjs
 node tests/frost.mjs
 node tests/locomotion.mjs
+node tests/walk-translation.mjs
 cargo test --release --locked --manifest-path native/Cargo.toml
 python3 -m http.server --bind 127.0.0.1
 ```
