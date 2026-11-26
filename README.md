@@ -10,7 +10,7 @@ Both hosts can stage changes to disjoint row ranges and project them on the next
 
 A world view can reserve its final splat range for one moving actor. Ink applies the actor's yaw and translation to the centers and rotates their covariances on the GPU. Actor and scene rows share the same stable depth sort. Moving the actor updates its placement without replacing its pose rows. Rust exposes the mode through `WorldOrder::Actor` and `update_actor_camera`, and JavaScript accepts `actor` when creating the renderer and updating its camera.
 
-The skinned path uploads a character's bind splats once. `src/walker.ink` evaluates a biped's gait, lean and nod springs, landing squash, and cloth joints at each simulation tick. `skin_world` blends the joint transforms, applies them to splat centers and covariances, and shades the transformed normals. The GPU projects and compacts terrain and character splats before the shared stable depth sort. Rust exposes this through `WorldOrder::Skinned` and `update_skin_camera`. The browser renderer takes a `skin` option and exposes `updateSkinCamera`. After the first pose update, both hosts keep unchanged leading and trailing joint transforms resident and upload only the span between changed joints. A repeated pose uploads the light alone.
+The skinned path uploads a character's bind splats once. `src/walker.ink` evaluates a biped's gait, lean and nod springs, landing squash, and cloth joints at each simulation tick. It also provides seeded gaze and blink timing for character rigs. `skin_world` blends the joint transforms, applies them to splat centers and covariances, and shades the transformed normals. The GPU projects and compacts terrain and character splats before the shared stable depth sort. Rust exposes this through `WorldOrder::Skinned` and `update_skin_camera`. The browser renderer takes a `skin` option and exposes `updateSkinCamera`. After the first pose update, both hosts keep unchanged leading and trailing joint transforms resident and upload only the span between changed joints. A repeated pose uploads the light alone.
 
 Walkers can add an action pose to the joint palette. The pose controls torso lean and stretch, head nod, and hem flare while retaining the current gait and cloth state. Rebirth uses this for Hex's slash.
 
@@ -72,4 +72,4 @@ Open `/tests/webgpu.html` on the local server to check browser dispatch, residen
 
 Open `/bench/camera.html` on the same server to run the camera probe.
 
-The ongoing port includes additional shape recipes, textured materials, additional rig types, idle gaze, animation clips, the remaining art and streaming features, simulation tools, additional editor tools, and the CLI.
+The ongoing port includes additional shape recipes, textured materials, additional rig types, animation clips, the remaining art and streaming features, simulation tools, additional editor tools, and the CLI.

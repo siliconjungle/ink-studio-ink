@@ -1,6 +1,7 @@
 module StudioWalker;
 
 import "rig.ink" as rig;
+import "noise.ink" as noise;
 
 record Tail {
     anchor: rig.Point,
@@ -49,6 +50,44 @@ record Pose {
 }
 
 record TailMotion { current: List<rig.Point>, previous: List<rig.Point>, }
+
+record Attention {
+    look: f64,
+    target: f64,
+    look_in: f64,
+    blink_in: f64,
+    seed: u32,
+    draws: u32,
+}
+
+pub fn begin_attention(seed: u32) -> Attention {
+    return Attention { look: 0.0f64, target: 0.0f64, look_in: 1.5f64, blink_in: 2.0f64, seed: seed, draws: 0 };
+}
+
+fn attention_draw(seed: u32, index: u32) -> f64 {
+    return noise.fraction(noise.random_word(seed, index));
+}
+
+pub fn step_attention(old: Attention, move_mix: f64, dt: f64) -> Attention {
+    let moving = move_mix > 0.2f64;
+    let look_in = old.look_in - dt;
+    let choose = look_in <= 0.0f64;
+    let idle_draw = choose && !moving;
+    let target = if idle_draw { -0.5f64 + 1.1f64 * attention_draw(old.seed, old.draws + 1) }
+        else { if choose { 0.0f64 } else { old.target } };
+    let after_look = old.draws + (if idle_draw { 2 } else { if choose { 1 } else { 0 } });
+    let blink_in = old.blink_in - dt;
+    let blink_done = blink_in < -0.11f64;
+    let wanted = if moving { 0.0f64 } else { target };
+    return Attention { ..old, look: rig.mix(old.look, wanted, rig.min(1.0f64, dt * 5.0f64)),
+        target: target, look_in: if choose { 1.4f64 + 2.0f64 * attention_draw(old.seed, old.draws) } else { look_in },
+        blink_in: if blink_done { 1.8f64 + (4.2f64 - 1.8f64) * attention_draw(old.seed, after_look) } else { blink_in },
+        draws: after_look + (if blink_done { 1 } else { 0 }) };
+}
+
+pub fn eye_open(attention: Attention) -> f32 {
+    return if attention.blink_in < 0.0f64 { 0.15 } else { 1.0 };
+}
 
 record WalkState {
     time: f64,
@@ -216,7 +255,7 @@ fn impact_pose(p: Pose, height: f64, land_age: f64, strength: f64, launch_age: f
 
 record Body { hip: rig.Transform, chest: rig.Transform, hem: rig.Transform, head: rig.Transform, }
 
-fn body_frame(spec: Walker, pose: Pose, spring: Springs) -> Body {
+fn body_frame(spec: Walker, pose: Pose, spring: Springs, look: f64) -> Body {
     let width = 1.0f64 / sqrt(pose.stretch);
     let body = rig.multiply(rig.rotate_z(-spring.lean), rig.diagonal(width, pose.stretch, width));
     let hip = rig.pivot(body, spec.hip, rig.add(spec.hip, rig.point(0.0f64, pose.hip_offset, 0.0f64)));
@@ -225,7 +264,7 @@ fn body_frame(spec: Walker, pose: Pose, spring: Springs) -> Body {
     let hem = rig.pivot(rig.multiply(body, rig.diagonal(pose.flare, 1.0f64, pose.flare)), spec.hem, rig.place(hip, spec.hem));
     let head_y = rig.mix(1.0f64, pose.stretch, 0.6f64);
     let head_width = 1.0f64 / sqrt(head_y);
-    let head_axes = rig.multiply(rig.multiply(rig.rotate_z(-spring.lean * 0.5f64 - pose.bend), rig.rotate_y(pose.twist * 0.4f64)),
+    let head_axes = rig.multiply(rig.multiply(rig.rotate_z(-spring.lean * 0.5f64 - pose.bend), rig.rotate_y(look + pose.twist * 0.4f64)),
         rig.multiply(rig.rotate_z(-spring.nod), rig.diagonal(head_width, head_y, head_width)));
     let head = rig.pivot(head_axes, spec.neck, rig.place(chest, spec.neck));
     return Body { hip: hip, chest: chest, hem: hem, head: head };
@@ -316,7 +355,7 @@ pub fn step_walk(spec: Walker, old: WalkState, input: Motion, dt: f64) -> WalkSt
     let pose = impact_pose(target.pose, spec.height, land_age, strength, input.launch_age);
     let spring = settle(old.springs, target, dt);
     let yaw = follow_yaw(old.yaw, input.face, dt);
-    let follow = secondary(spec, old, input, body_frame(spec, pose, spring), yaw, dt);
+    let follow = secondary(spec, old, input, body_frame(spec, pose, spring, 0.0f64), yaw, dt);
     return WalkState { time: old.time + dt, phase: cycle.phase, move_mix: cycle.move_mix, run_mix: cycle.run_mix,
         air_mix: cycle.air_mix, yaw: yaw, land_age: land_age, land_strength: strength, springs: spring,
         pose: pose, hem: follow.hem.point, hem_velocity: follow.hem.velocity, tails: follow.tails };
@@ -348,19 +387,27 @@ fn tail_bone(tail: Tail, points: TailMotion, index: u32) -> rig.Transform {
 }
 
 pub fn palette(spec: Walker, walk: WalkState, origin: rig.Point) -> List<rig.Bone> {
-    return articulated_palette(spec, walk, origin, body_frame(spec, walk.pose, walk.springs));
+    return palette_with_gaze(spec, walk, origin, 0.0f64);
+}
+
+pub fn palette_with_gaze(spec: Walker, walk: WalkState, origin: rig.Point, look: f64) -> List<rig.Bone> {
+    return articulated_palette(spec, walk, origin, body_frame(spec, walk.pose, walk.springs, look));
 }
 
 record BodyPose { lean: f64, nod: f64, stretch: f64, flare: f64, }
 
 pub fn posed_palette(spec: Walker, walk: WalkState, origin: rig.Point, action: BodyPose) -> List<rig.Bone> {
+    return posed_palette_with_gaze(spec, walk, origin, action, 0.0f64);
+}
+
+pub fn posed_palette_with_gaze(spec: Walker, walk: WalkState, origin: rig.Point, action: BodyPose, look: f64) -> List<rig.Bone> {
     let p = walk.pose;
     let springs = walk.springs;
     let pose = Pose { stretch: p.stretch * action.stretch, flare: p.flare + action.flare,
         hip_offset: p.hip_offset, bend: p.bend, twist: p.twist, feet: p.feet };
     let posed = Springs { lean: springs.lean + action.lean, nod: springs.nod + action.nod,
         lean_velocity: springs.lean_velocity, nod_velocity: springs.nod_velocity };
-    return articulated_palette(spec, walk, origin, body_frame(spec, pose, posed));
+    return articulated_palette(spec, walk, origin, body_frame(spec, pose, posed, look));
 }
 
 fn articulated_palette(spec: Walker, walk: WalkState, origin: rig.Point, frame: Body) -> List<rig.Bone> {
