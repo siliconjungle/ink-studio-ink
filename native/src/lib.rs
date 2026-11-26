@@ -13,12 +13,18 @@ pub struct GaussianRenderer {
     half_viewport: [f32; 2],
     bindings: Option<(wgpu::Buffer, wgpu::BindGroup)>,
     count: u32,
+    skin_rows: u32,
 }
 
 pub enum WorldOrder {
     Sort,
     Preordered,
     Actor(Value),
+    Skinned {
+        rest: Value,
+        bones: Value,
+        light: Value,
+    },
 }
 
 impl GaussianRenderer {
@@ -105,6 +111,8 @@ impl GaussianRenderer {
         let mut engine = Engine::with_device(device.clone(), queue.clone());
         let mut inputs = json!({"splats": splats});
         let mut args = vec![json!({"input": "splats"})];
+        let mut steps = Vec::new();
+        let mut skin_rows = 0;
         let function = if let Some((camera, ordering)) = camera {
             inputs["camera"] = camera_input(camera, half_viewport)?;
             args.push(json!({"input": "camera"}));
@@ -116,16 +124,24 @@ impl GaussianRenderer {
                     args.push(json!({"input": "actor"}));
                     "project_sorted_actor"
                 }
+                WorldOrder::Skinned { rest, bones, light } => {
+                    skin_rows = splat_count(&rest)?;
+                    inputs["rest"] = rest;
+                    inputs["bones"] = bones;
+                    inputs["light"] = light;
+                    steps.push(json!({"id": "posed", "call": "skin_world",
+                        "args": [{"input": "rest"}, {"input": "bones"}, {"input": "light"}]}));
+                    args.insert(1, json!({"step": "posed"}));
+                    "project_sorted_scene"
+                }
             }
         } else {
             args.push(json!(half_viewport));
             "project"
         };
-        let plan = json!({
-            "inputs": inputs,
-            "steps": [{"id": "ellipses", "call": function, "args": args}],
-            "outputs": ["ellipses"]
-        });
+        steps.push(json!({"id": "ellipses", "call": function, "args": args}));
+        let plan = json!({"inputs": inputs, "steps": steps, "outputs": ["ellipses"]});
+        let count = count.checked_add(skin_rows).ok_or("Too many splats")?;
         let session = engine.open(&plan, Backend::GpuRequired)?["session"]
             .as_u64()
             .ok_or("Missing Ink GPU session")?;
@@ -137,6 +153,7 @@ impl GaussianRenderer {
             half_viewport,
             bindings: None,
             count,
+            skin_rows,
         };
         renderer.project(device)?;
         Ok(renderer)
@@ -170,7 +187,9 @@ impl GaussianRenderer {
     }
 
     pub fn update(&mut self, device: &wgpu::Device, splats: &Value) -> Result<Value, String> {
-        let count = splat_count(splats)?;
+        let count = splat_count(splats)?
+            .checked_add(self.skin_rows)
+            .ok_or("Too many splats")?;
         self.engine.write(self.session, "splats", splats)?;
         self.count = count;
         self.project(device)
@@ -201,6 +220,26 @@ impl GaussianRenderer {
     ) -> Result<Value, String> {
         self.engine.write(self.session, "actor", placement)?;
         self.update_camera(device, camera)
+    }
+
+    pub fn update_skin_camera(
+        &mut self,
+        device: &wgpu::Device,
+        camera: &Value,
+        bones: &Value,
+        light: &Value,
+    ) -> Result<u64, String> {
+        let camera = camera_input(camera, self.half_viewport)?;
+        let bone_write = self.engine.write(self.session, "bones", bones)?;
+        let light_write = self.engine.write(self.session, "light", light)?;
+        self.engine.write(self.session, "camera", &camera)?;
+        self.project(device)?;
+        let upload_bytes = |result: &Value| {
+            result["counters"]["upload_bytes"]
+                .as_u64()
+                .ok_or("Missing rig upload count")
+        };
+        Ok(upload_bytes(&bone_write)? + upload_bytes(&light_write)?)
     }
 
     pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {

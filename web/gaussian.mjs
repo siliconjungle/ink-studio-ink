@@ -14,13 +14,15 @@ function assertEllipseLayout(view) {
   }
 }
 
-export async function createGaussianRenderer(device, format, { width, height, splats, camera, preordered = false, actor }) {
+export async function createGaussianRenderer(device, format, { width, height, splats, camera, preordered = false, actor, skin }) {
   const halfViewport = [width / 2, height / 2];
   if (!halfViewport.every((dimension) => Number.isFinite(dimension) && dimension > 0)) {
     throw new Error('Gaussian render target must have positive dimensions');
   }
   const cameraInput = (value) => ({ ...value, half_viewport: halfViewport });
-  if (actor && (!camera || preordered)) throw new Error('An actor requires a depth-sorted world view');
+  if ((actor || skin) && (!camera || preordered || (actor && skin))) {
+    throw new Error('Choose one actor mode with a depth-sorted world view');
+  }
   const projection = camera
     ? { call: preordered ? 'project_world' : 'project_sorted_world',
       input: { camera: cameraInput(camera) }, view: [{ input: 'camera' }] }
@@ -29,6 +31,17 @@ export async function createGaussianRenderer(device, format, { width, height, sp
     projection.call = 'project_sorted_actor';
     projection.input.actor = actor;
     projection.view.push({ input: 'actor' });
+  }
+  const steps = [{ id: 'ellipses', call: projection.call, args: [{ input: 'splats' }, ...projection.view] }];
+  const hasSkin = Boolean(skin);
+  const skinRows = skin?.rest.length ?? 0;
+  if (skin) {
+    const { rest, bones, light } = skin;
+    Object.assign(projection.input, { rest, bones, light });
+    steps[0] = { id: 'ellipses', call: 'project_sorted_scene',
+      args: [{ input: 'splats' }, { step: 'posed' }, { input: 'camera' }] };
+    steps.unshift({ id: 'posed', call: 'skin_world',
+      args: [{ input: 'rest' }, { input: 'bones' }, { input: 'light' }] });
   }
   const shaderResponse = await fetch(shaderURL);
   if (!shaderResponse.ok) throw new Error(`Gaussian shader could not load (${shaderResponse.status})`);
@@ -50,7 +63,7 @@ export async function createGaussianRenderer(device, format, { width, height, sp
   try {
     session = await ink.open({
       inputs: { splats, ...projection.input },
-      steps: [{ id: 'ellipses', call: projection.call, args: [{ input: 'splats' }, ...projection.view] }],
+      steps,
       outputs: ['ellipses'],
     }, { backend: 'gpu-required' });
     viewport = device.createBuffer({ size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -58,7 +71,7 @@ export async function createGaussianRenderer(device, format, { width, height, sp
 
     let bindings;
     let boundBuffer;
-    let count = splats.length;
+    let count = splats.length + skinRows;
     async function project() {
       const { counters } = await session.step(1);
       const view = await session.buffer('ellipses');
@@ -85,7 +98,7 @@ export async function createGaussianRenderer(device, format, { width, height, sp
       project,
       async update(rows) {
         await session.write('splats', rows);
-        count = rows.length;
+        count = rows.length + skinRows;
         return project();
       },
       async updateCamera(value, placement) {
@@ -94,6 +107,15 @@ export async function createGaussianRenderer(device, format, { width, height, sp
         await session.write('camera', cameraInput(value));
         if (placement) await session.write('actor', placement);
         return project();
+      },
+      async updateSkinCamera(value, { bones, light }) {
+        if (!hasSkin) throw new Error('Skin updates require a skinned world view');
+        const boneWrite = await session.write('bones', bones);
+        const lightWrite = await session.write('light', light);
+        const rigUploadBytes = boneWrite.counters.upload_bytes + lightWrite.counters.upload_bytes;
+        await session.write('camera', cameraInput(value));
+        const counters = await project();
+        return { counters, rigUploadBytes };
       },
       draw(encoder, target) {
         const pass = encoder.beginRenderPass({

@@ -57,6 +57,22 @@ const placed = call('project_sorted_world', [[scenery, rotated], camera]);
 const actorArgs = [[scenery, local], camera, actor];
 assert.deepEqual(call('project_sorted_actor', actorArgs), placed);
 assert.deepEqual(placed.map(splat => splat.rgb), [local.rgb, scenery.rgb]);
+const bindSplat = { center: [1, 0, -4], covariance0: [1, 0, 0], covariance1: [4, 0.25, 1],
+  normal: [1, 0, 0], joints: [0, 1], weight: 0.5, shade: 0,
+  palette: [255, 65280, 16711680, 16711680], tones: 3, eye: true, alpha: 0.5 };
+const firstBone = { axis_x: [1, 0, 0], axis_y: [0, 1, 0], axis_z: [0, 0, 1], offset: [0, 0, 0] };
+const secondBone = { ...firstBone, axis_x: [3, 0, 0], offset: [2, 0, 0] };
+const skinArgs = [[bindSplat], [firstBone, secondBone], { sun: [1, 0, 0], ambient: 0, diffuse: 1, blink: 0.5 }];
+const skinned = [{ position: [3, 0, -4], covariance0: [4, 0, 0], covariance1: [1, 0.125, 1], reach: 3,
+  rgb: 16711680, alpha: 0.5 }];
+assert.deepEqual(call('skin_world', skinArgs), skinned);
+const sceneArgs = [[{ ...world, alpha: 0 }, scenery, world], skinned, camera];
+const visible = call('project_sorted_world', [sceneArgs[0].concat(skinned), camera]).filter(row => row.alpha > 0);
+assert.deepEqual(call('project_sorted_scene', sceneArgs), visible);
+assert.deepEqual(visible.map(row => row.rgb), [scenery.rgb, world.rgb, skinned[0].rgb]);
+assert.deepEqual(call('project_sorted_scene', [[], [], camera]), []);
+const hiddenScene = [[{ ...world, alpha: 0 }], [{ ...world, position: [100, 0, -4] }], camera];
+assert.deepEqual(call('project_sorted_scene', hiddenScene), []);
 const sourceRow = [1, 2, 3, 0.5, 4, 5, 6, 0xf08010, 7, 8, 9, 128, 11, 12, 13, 14];
 const imported = [{ position: [1, 2, 3], covariance0: [4, 5, 6], covariance1: [7, 8, 9],
   reach: 3, rgb: 0xf08010, alpha: 0.5 }];
@@ -88,6 +104,9 @@ try {
     { pure: 'project_world', args: [worldRows, perspective], expected: orthographic },
     { pure: 'project_sorted_world', args: [unordered, camera], expected: ordered },
     { pure: 'project_sorted_actor', args: actorArgs, expected: placed },
+    { pure: 'skin_world', args: skinArgs, expected: skinned },
+    { pure: 'project_sorted_scene', args: sceneArgs, expected: visible },
+    { pure: 'project_sorted_scene', args: hiddenScene, expected: [] },
     { pure: 'import_builder_splats', args: [sourceRow], expected: imported, cpuOnly: true },
   ];
   writeFileSync(requestsPath, JSON.stringify(tests.map(({ pure, args }) => ({ pure, args }))));

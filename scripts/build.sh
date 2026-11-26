@@ -5,6 +5,8 @@ ink=${INK:-ink}
 mkdir -p build
 "$ink" build src/gaussian.ink --target javascript -o build/gaussian.mjs
 "$ink" build src/gaussian.ink --target rust -o build/rust
+"$ink" build src/walker.ink --target javascript -o build/walker.mjs
+"$ink" build src/walker.ink --target rust -o build/walker-rust
 "$ink" build src/frost.ink --target javascript -o build/frost.mjs
 "$ink" build src/frost.ink --target rust -o build/frost-rust
 if [ "${1:-}" = "--gpu" ]; then

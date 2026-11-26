@@ -1,5 +1,7 @@
 module Gaussian;
 
+import "rig.ink" as rig;
+
 record Gaussian {
     center: Vec2<f32>,
     xx: f32,
@@ -164,7 +166,7 @@ pub fn project_world(splats: List<WorldGaussian>, camera: Camera) -> List<Ellips
     return splats.map(fn(splat) => project_world_one(splat, camera));
 }
 
-fn depth_order(center: Vec3<f32>, camera: Camera, index: u32) -> u64 {
+fn depth_rank(center: Vec3<f32>, camera: Camera) -> u32 {
     let position = vec3(
         center.x - camera.eye.x,
         center.y - camera.eye.y,
@@ -175,8 +177,15 @@ fn depth_order(center: Vec3<f32>, camera: Camera, index: u32) -> u64 {
     let ascending = if word_and(bits, 2147483648) != 0 {
         4294967295 - bits
     } else { bits + 2147483648 };
-    let depth_key = if is_finite(depth) { 4294967295 - ascending } else { 4294967295 };
-    return word_widen_u32_to_u64(depth_key) * 4294967296 + word_widen_u32_to_u64(index);
+    return if is_finite(depth) { 4294967295 - ascending } else { 4294967295 };
+}
+
+fn indexed_depth(depth: u32, index: u32) -> u64 {
+    return word_widen_u32_to_u64(depth) * 4294967296 + word_widen_u32_to_u64(index);
+}
+
+fn depth_order(center: Vec3<f32>, camera: Camera, index: u32) -> u64 {
+    return indexed_depth(depth_rank(center, camera), index);
 }
 
 fn absent_world() -> WorldGaussian {
@@ -261,4 +270,91 @@ fn project_actor_key(splats: List<WorldGaussian>, camera: Camera, actor: ActorPl
     let index = word_narrow_u64_to_u32(key);
     let splat = splats.at_or(index, absent_world());
     return project_world_one(if index >= actor.first { yaw_one(splat, actor) } else { splat }, camera);
+}
+
+record SkinPoint {
+    center: Vec3<f32>,
+    covariance0: Vec3<f32>,
+    covariance1: Vec3<f32>,
+    normal: Vec3<f32>,
+    joints: Vec2<u32>,
+    weight: f32,
+    shade: f32,
+    palette: Vec4<u32>,
+    tones: u32,
+    eye: Bool,
+    alpha: f32,
+}
+
+fn identity_bone() -> rig.Bone {
+    return rig.Bone { axis_x: vec3(1.0, 0.0, 0.0), axis_y: vec3(0.0, 1.0, 0.0),
+        axis_z: vec3(0.0, 0.0, 1.0), offset: vec3(0.0, 0.0, 0.0) };
+}
+
+fn blend_vector(a: Vec3<f32>, b: Vec3<f32>, w: f32) -> Vec3<f32> {
+    let u = 1.0 - w;
+    return vec3(a.x * u + b.x * w, a.y * u + b.y * w, a.z * u + b.z * w);
+}
+
+fn blend_bones(a: rig.Bone, b: rig.Bone, w: f32) -> rig.Bone {
+    return rig.Bone { axis_x: blend_vector(a.axis_x, b.axis_x, w), axis_y: blend_vector(a.axis_y, b.axis_y, w),
+        axis_z: blend_vector(a.axis_z, b.axis_z, w), offset: blend_vector(a.offset, b.offset, w) };
+}
+
+fn skin_color(splat: SkinPoint, bone: rig.Bone, light: rig.RigLight) -> u32 {
+    if splat.tones <= 1 { return splat.palette.x; }
+    let n = vec3(dot3(bone.axis_x, splat.normal), dot3(bone.axis_y, splat.normal), dot3(bone.axis_z, splat.normal));
+    let length = sqrt(dot3(n, n));
+    let lit = light.ambient + light.diffuse * (0.5 + 0.5 * if length > 0.0 { dot3(n, light.sun) / length } else { 0.0 }) + splat.shade;
+    let tone = lit * f32_from_u32(splat.tones);
+    if tone < 1.0 { return splat.palette.x; }
+    if tone < 2.0 { return splat.palette.y; }
+    return if tone < 3.0 { splat.palette.z } else { splat.palette.w };
+}
+
+fn skin_one(splat: SkinPoint, bones: List<rig.Bone>, light: rig.RigLight) -> WorldGaussian {
+    let a = bones.at_or(splat.joints.x, identity_bone());
+    let bone = if splat.weight > 0.0 { blend_bones(a, bones.at_or(splat.joints.y, a), splat.weight) } else { a };
+    let x = bone.axis_x;
+    let y = bone.axis_y;
+    let z = bone.axis_z;
+    let cx = covariance_product(splat.covariance0, splat.covariance1, x);
+    let cy = covariance_product(splat.covariance0, splat.covariance1, y);
+    let cz = covariance_product(splat.covariance0, splat.covariance1, z);
+    let eye = if splat.eye { light.blink } else { 1.0 };
+    return WorldGaussian {
+        position: vec3(dot3(x, splat.center) + bone.offset.x, dot3(y, splat.center) + bone.offset.y,
+            dot3(z, splat.center) + bone.offset.z),
+        covariance0: vec3(dot3(x, cx), dot3(x, cy) * eye, dot3(x, cz)),
+        covariance1: vec3(dot3(y, cy) * eye * eye, dot3(y, cz) * eye, dot3(z, cz)),
+        reach: 3.0, rgb: skin_color(splat, bone, light), alpha: splat.alpha,
+    };
+}
+
+pub fn skin_world(rest: List<SkinPoint>, bones: List<rig.Bone>, light: rig.RigLight) -> List<WorldGaussian> {
+    return rest.map(fn(splat) => skin_one(splat, bones, light));
+}
+
+record DepthEllipse {
+    depth: u32,
+    ellipse: Ellipse,
+}
+
+fn project_tagged(splat: WorldGaussian, camera: Camera) -> DepthEllipse {
+    let ellipse = project_world_one(splat, camera);
+    return DepthEllipse { depth: if ellipse.alpha > 0.0 { depth_rank(splat.position, camera) } else { 0 },
+        ellipse: ellipse };
+}
+
+fn visible_world(splats: List<WorldGaussian>, camera: Camera) -> List<DepthEllipse> {
+    return splats.map(fn(splat) => project_tagged(splat, camera)).filter(fn(entry) => entry.ellipse.alpha > 0.0);
+}
+
+// Project and compact each resident input ahead of the shared depth sort.
+// Stable compaction preserves the scene's original order for tied depths.
+pub fn project_sorted_scene(terrain: List<WorldGaussian>, actors: List<WorldGaussian>, camera: Camera) -> List<Ellipse> {
+    let visible = visible_world(terrain, camera).concat(visible_world(actors, camera));
+    let keys = visible.map_indexed(fn(index) => fn(row) => indexed_depth(row.depth, index)).sort();
+    let fallback = DepthEllipse { depth: 0, ellipse: hidden() };
+    return keys.map(fn(key) => visible.at_or(word_narrow_u64_to_u32(key), fallback).ellipse);
 }
