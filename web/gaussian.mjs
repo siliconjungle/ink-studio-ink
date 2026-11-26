@@ -76,10 +76,12 @@ export async function createGaussianRenderer(device, format, { width, height, sp
     }, { backend: 'gpu-required' });
     viewport = device.createBuffer({ size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(viewport, 0, new Float32Array(halfViewport));
-    drawArgs = device.createBuffer({
-      label: 'Visible splat draw arguments', size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT,
-    });
-    device.queue.writeBuffer(drawArgs, 0, new Uint32Array([4, 0, 0, 0]));
+    if (!contours) {
+      drawArgs = device.createBuffer({
+        label: 'Visible splat draw arguments', size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT,
+      });
+      device.queue.writeBuffer(drawArgs, 0, new Uint32Array([4, 0, 0, 0]));
+    }
 
     let bindings;
     let boundBuffer;
@@ -140,9 +142,9 @@ export async function createGaussianRenderer(device, format, { width, height, sp
         return { counters, rigUploadBytes };
       },
       draw(encoder, target) {
+        if (contourRaster) return contourRaster.draw(encoder, target, bindings);
         // Ink's list header is the compacted row count. A GPU copy patches instanceCount.
         encoder.copyBufferToBuffer(boundBuffer, 0, drawArgs, 4, 4);
-        if (contourRaster) return contourRaster.draw(encoder, target, bindings, drawArgs);
         const pass = encoder.beginRenderPass({
           colorAttachments: [{ view: target, loadOp: 'clear', storeOp: 'store',
             clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
@@ -154,7 +156,7 @@ export async function createGaussianRenderer(device, format, { width, height, sp
       },
       async close() {
         viewport.destroy();
-        drawArgs.destroy();
+        drawArgs?.destroy();
         contourRaster?.close();
         await ink.close();
       },

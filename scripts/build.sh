@@ -17,6 +17,7 @@ done
 "$ink" build src/frost.ink --target javascript -o build/frost.mjs
 "$ink" build src/frost.ink --target rust -o build/frost-rust
 if [ "${1:-}" = "--gpu" ]; then
+    "$ink" build-render src/contour_render.ink frame --shader shaders/gaussian-contours.wgsl -o build/contour-render
     "$ink" build src/gaussian.ink --target webgpu -o build/gpu
     "$ink" build src/frost.ink --target webgpu -o build/frost-gpu
 fi

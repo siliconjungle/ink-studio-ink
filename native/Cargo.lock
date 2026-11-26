@@ -353,6 +353,7 @@ version = "0.1.0"
 dependencies = [
  "ink-gpu-program",
  "pollster",
+ "serde",
  "serde_json",
  "wgpu",
 ]

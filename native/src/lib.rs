@@ -4,6 +4,8 @@ use wgpu::util::DeviceExt;
 
 mod contours;
 mod present;
+#[path = "../../build/contour-render/render.rs"]
+mod render;
 pub use contours::ContourSettings;
 use contours::ContourRaster;
 pub use present::PixelPresenter;
@@ -14,7 +16,7 @@ pub struct GaussianRenderer {
     raster: Raster,
     viewport: wgpu::Buffer,
     half_viewport: [f32; 2],
-    bindings: Option<(wgpu::Buffer, wgpu::BindGroup)>,
+    bindings: Option<(wgpu::Buffer, Bindings)>,
     draw_args: Option<wgpu::Buffer>,
     count: u32,
     skin_rows: u32,
@@ -24,6 +26,11 @@ pub struct GaussianRenderer {
 enum Raster {
     Smooth(wgpu::RenderPipeline),
     Contours(Box<ContourRaster>),
+}
+
+enum Bindings {
+    Smooth(wgpu::BindGroup),
+    Contours(render::RenderBindings),
 }
 
 enum SplatDraw<'a> {
@@ -231,8 +238,8 @@ impl GaussianRenderer {
         let session = engine.open(&plan, Backend::GpuRequired)?["session"]
             .as_u64()
             .ok_or("Missing Ink GPU session")?;
-        let draw_args = match device.adapter_info().backend {
-            wgpu::Backend::Vulkan | wgpu::Backend::Metal | wgpu::Backend::Dx12 | wgpu::Backend::BrowserWebGpu => {
+        let draw_args = match (contour, device.adapter_info().backend) {
+            (false, wgpu::Backend::Vulkan | wgpu::Backend::Metal | wgpu::Backend::Dx12 | wgpu::Backend::BrowserWebGpu) => {
                 let args = wgpu::util::DrawIndirectArgs { vertex_count: 4, ..Default::default() };
                 Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("Visible splat draw arguments"),
@@ -266,20 +273,14 @@ impl GaussianRenderer {
             return Err("Insufficient ellipse capacity".into());
         }
         if self.bindings.as_ref().map(|(buffer, _)| buffer) != Some(&view.buffer) {
-            let plain_layout;
-            let (layout, entries) = match &self.raster {
-                Raster::Smooth(pipeline) => {
-                    plain_layout = pipeline.get_bind_group_layout(0);
-                    (&plain_layout, vec![buffer_entry(0, &view.buffer), buffer_entry(1, &self.viewport)])
-                }
-                Raster::Contours(contour) => (&contour.layout,
-                    vec![buffer_entry(3, &contour.palette), buffer_entry(5, &view.buffer), buffer_entry(6, &self.viewport)]),
+            let bindings = match &self.raster {
+                Raster::Smooth(pipeline) => Bindings::Smooth(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Resident Ink ellipse output"),
+                    layout: &pipeline.get_bind_group_layout(0),
+                    entries: &[buffer_entry(0, &view.buffer), buffer_entry(1, &self.viewport)],
+                })),
+                Raster::Contours(contour) => Bindings::Contours(contour.bind(device, &view.buffer, &self.viewport)?),
             };
-            let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Resident Ink ellipse output"),
-                layout,
-                entries: &entries,
-            });
             self.bindings = Some((view.buffer, bindings));
         }
         Ok(outcomes["counters"].clone())
@@ -379,19 +380,20 @@ impl GaussianRenderer {
 
     pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         let (ellipses, bindings) = self.bindings.as_ref().expect("renderer prepared");
+        let (pipeline, bindings) = match (&self.raster, bindings) {
+            (Raster::Smooth(pipeline), Bindings::Smooth(bindings)) => (pipeline, bindings),
+            (Raster::Contours(contour), Bindings::Contours(bindings)) => {
+                contour.draw(encoder, target, bindings, self.count);
+                return;
+            }
+            _ => unreachable!("bindings have the same raster as their renderer"),
+        };
         let draw = if let Some(args) = &self.draw_args {
             // Ink's list header is the compacted row count. A GPU copy patches instance_count.
             encoder.copy_buffer_to_buffer(ellipses, 0, args, 4, 4);
             SplatDraw::Visible(args)
         } else {
             SplatDraw::Capacity(self.count)
-        };
-        let pipeline = match &self.raster {
-            Raster::Smooth(pipeline) => pipeline,
-            Raster::Contours(contour) => {
-                contour.draw(encoder, target, bindings, &draw);
-                return;
-            }
         };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Ink Studio Gaussian raster"),

@@ -6,6 +6,8 @@ This repository ports Ink Studio's Gaussian splat toolkit to [Ink Lang](https://
 
 Colored Contours is available for sorted world and skinned views. One Ink projection and depth sort supplies the native grid and a double-resolution grid. The native grid snaps splats to pixel centers. Solid coverage on the finer grid determines the silhouette, and the shared WGSL resolve applies the palette and ordered dither. Use Rust's `with_contours` or the browser renderer's `contours` option. Each palette uses packed `0xRRGGBB` colors and begins with its background. Rust's `set_contour_grade` and JavaScript's `setContourGrade` update the displayed colors of resident geometry.
 
+`src/contour_render.ink` declares both raster grids and the resolve pass for wgpu and WebGPU. The GPU build compiles the pass sequence with the shared WGSL. Both renderers bind the resident projection buffer and reuse one GPU-side count for the two grid draws.
+
 Use `with_directional_contours` in Rust or `directional: true` in the browser contour options to pass ambient and directional light to the same renderer. Ink projects the visible splats, estimates normals from their covariance, and keeps each base pigment for the contour palette vote. Stage a light with `stage_contour_lighting` or `stageContourLighting` before the next projection. The existing color and depth passes carry the light to the image without restaging geometry.
 
 Both hosts can stage changes to disjoint row ranges and project them on the next camera update or explicit `project` call. The `wide-green` scene uses this path to retain the original field cells as the view moves. `import_builder_splats` reads position, covariance, pigment and opacity from the Studio builder’s sixteen-float rows. Native clients can present an art-resolution texture with `PixelPresenter`, which uses centered nearest-neighbor scaling and supports sRGB surfaces.
@@ -60,7 +62,7 @@ Lathe profiles can ripple as they taper, including the phase-shifted power profi
 
 ## Build and check
 
-Use [Ink Lang commit `3bda1fd`](https://github.com/siliconjungle/ink-lang/commit/3bda1fd29881a89de2482252f330b182da03bd13) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for the bake's immutable geometry inputs, including optional geometry. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
+Use [Ink Lang commit `84dd406`](https://github.com/siliconjungle/ink-lang/commit/84dd4065f1ed683c654564d9c38e66bfdb91816e) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for the bake's immutable geometry inputs, including optional geometry. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
 
 ```sh
 ./scripts/build.sh --gpu
