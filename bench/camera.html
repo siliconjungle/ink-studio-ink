@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Ink Studio camera benchmark</title></head>
+<body>
+<pre id="result">Measuring camera updates and GPU completion</pre>
+<script type="module">
+  import { createGaussianRenderer } from '../web/gaussian.mjs';
+
+  const output = document.getElementById('result');
+  async function measure() {
+    const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) throw new Error('Browser WebGPU adapter unavailable');
+    const device = await adapter.requestDevice();
+    device.pushErrorScope('validation');
+    const width = 480, height = 270, format = 'rgba8unorm';
+    const target = device.createTexture({ size: [width, height], format, usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    const targetView = target.createView();
+    const camera = {
+      eye: [0, 0, 0], right: [1, 0, 0], up: [0, 1, 0], back: [0, 0, 1],
+      focal: 160, near_clip: 0.2, far_clip: 100, variance: 0.3, perspective: true,
+    };
+    const results = [];
+    for (const count of [1024, 4096, 16384]) {
+      const rows = Array.from({ length: count }, (_, i) => ({
+        position: [((i * 6143) % 4099) / 64 - 32, ((i * 1471) % 4099) / 128 - 16, -8 - ((i * 951) % 4099) / 128],
+        covariance0: [0.045, 0, 0], covariance1: [0.08, 0, 0.045], reach: 3, rgb: 13479686, alpha: 0.53,
+      }));
+      for (const preordered of [false, true]) {
+        const splats = preordered ? rows.toSorted((a, b) => a.position[2] - b.position[2]) : rows;
+        const renderer = await createGaussianRenderer(device, format, { width, height, splats, camera, preordered });
+        const elapsed = [];
+        let dispatches;
+        for (let frame = 0; frame < 38; frame++) {
+          const start = performance.now();
+          ({ dispatches } = await renderer.updateCamera({ ...camera, eye: [frame / 256, 0, 0] }));
+          const encoder = device.createCommandEncoder();
+          renderer.draw(encoder, targetView);
+          device.queue.submit([encoder.finish()]);
+          await device.queue.onSubmittedWorkDone();
+          if (frame >= 8) elapsed.push(performance.now() - start);
+        }
+        elapsed.sort((a, b) => a - b);
+        results.push({ count, preordered, dispatches, p50_ms: elapsed[14], p95_ms: elapsed[28] });
+        await renderer.close();
+      }
+    }
+    target.destroy();
+    const error = await device.popErrorScope();
+    if (error) throw error;
+    return { width, height, measured_frames: 30, results };
+  }
+  try {
+    output.textContent = JSON.stringify(await measure(), null, 2);
+    output.dataset.result = 'passed';
+  } catch (error) {
+    output.textContent = error.stack || error.message || String(error);
+    output.dataset.result = 'failed';
+  }
+</script>
+</body>
+</html>

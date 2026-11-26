@@ -7,8 +7,14 @@ pub struct GaussianRenderer {
     session: u64,
     pipeline: wgpu::RenderPipeline,
     viewport: wgpu::Buffer,
+    half_viewport: [f32; 2],
     bindings: Option<(wgpu::Buffer, wgpu::BindGroup)>,
     count: u32,
+}
+
+pub enum WorldOrder {
+    Sort,
+    Preordered,
 }
 
 impl GaussianRenderer {
@@ -18,6 +24,36 @@ impl GaussianRenderer {
         format: wgpu::TextureFormat,
         size: [u32; 2],
         splats: &Value,
+    ) -> Result<Self, String> {
+        Self::create(device, queue, format, size, splats, None)
+    }
+
+    pub fn with_camera(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        size: [u32; 2],
+        splats: &Value,
+        camera: &Value,
+        ordering: WorldOrder,
+    ) -> Result<Self, String> {
+        Self::create(
+            device,
+            queue,
+            format,
+            size,
+            splats,
+            Some((camera, ordering)),
+        )
+    }
+
+    fn create(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        size: [u32; 2],
+        splats: &Value,
+        camera: Option<(&Value, WorldOrder)>,
     ) -> Result<Self, String> {
         if size.contains(&0) {
             return Err("Gaussian render target must have positive dimensions".into());
@@ -63,9 +99,21 @@ impl GaussianRenderer {
             cache: None,
         });
         let mut engine = Engine::with_device(device.clone(), queue.clone());
+        let (function, inputs, view) = if let Some((camera, ordering)) = camera {
+            (
+                match ordering {
+                    WorldOrder::Sort => "project_sorted_world",
+                    WorldOrder::Preordered => "project_world",
+                },
+                json!({"splats": splats, "camera": camera_input(camera, half_viewport)?}),
+                json!({"input": "camera"}),
+            )
+        } else {
+            ("project", json!({"splats": splats}), json!(half_viewport))
+        };
         let plan = json!({
-            "inputs": {"splats": splats},
-            "steps": [{"id": "ellipses", "call": "project", "args": [{"input": "splats"}, half_viewport]}],
+            "inputs": inputs,
+            "steps": [{"id": "ellipses", "call": function, "args": [{"input": "splats"}, view]}],
             "outputs": ["ellipses"]
         });
         let session = engine.open(&plan, Backend::GpuRequired)?["session"]
@@ -76,6 +124,7 @@ impl GaussianRenderer {
             session,
             pipeline,
             viewport,
+            half_viewport,
             bindings: None,
             count,
         };
@@ -117,6 +166,19 @@ impl GaussianRenderer {
         self.project(device)
     }
 
+    pub fn update_camera(
+        &mut self,
+        device: &wgpu::Device,
+        camera: &Value,
+    ) -> Result<Value, String> {
+        self.engine.write(
+            self.session,
+            "camera",
+            &camera_input(camera, self.half_viewport)?,
+        )?;
+        self.project(device)
+    }
+
     pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Ink Studio Gaussian raster"),
@@ -139,6 +201,15 @@ impl GaussianRenderer {
         );
         pass.draw(0..4, 0..self.count);
     }
+}
+
+fn camera_input(camera: &Value, half_viewport: [f32; 2]) -> Result<Value, String> {
+    let mut camera = camera
+        .as_object()
+        .ok_or("Expected a camera object")?
+        .clone();
+    camera.insert("half_viewport".into(), json!(half_viewport));
+    Ok(Value::Object(camera))
 }
 
 fn splat_count(splats: &Value) -> Result<u32, String> {

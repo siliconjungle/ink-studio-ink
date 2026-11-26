@@ -14,8 +14,16 @@ function assertEllipseLayout(view) {
   }
 }
 
-export async function createGaussianRenderer(device, format, { width, height, splats }) {
+export async function createGaussianRenderer(device, format, { width, height, splats, camera, preordered = false }) {
   const halfViewport = [width / 2, height / 2];
+  if (!halfViewport.every((dimension) => Number.isFinite(dimension) && dimension > 0)) {
+    throw new Error('Gaussian render target must have positive dimensions');
+  }
+  const cameraInput = (value) => ({ ...value, half_viewport: halfViewport });
+  const projection = camera
+    ? { call: preordered ? 'project_world' : 'project_sorted_world',
+      input: { camera: cameraInput(camera) }, view: { input: 'camera' } }
+    : { call: 'project', input: {}, view: halfViewport };
   const shaderResponse = await fetch(shaderURL);
   if (!shaderResponse.ok) throw new Error(`Gaussian shader could not load (${shaderResponse.status})`);
   const shader = device.createShaderModule({ code: await shaderResponse.text() });
@@ -35,8 +43,8 @@ export async function createGaussianRenderer(device, format, { width, height, sp
   let viewport;
   try {
     session = await ink.open({
-      inputs: { splats },
-      steps: [{ id: 'ellipses', call: 'project', args: [{ input: 'splats' }, halfViewport] }],
+      inputs: { splats, ...projection.input },
+      steps: [{ id: 'ellipses', call: projection.call, args: [{ input: 'splats' }, projection.view] }],
       outputs: ['ellipses'],
     }, { backend: 'gpu-required' });
     viewport = device.createBuffer({ size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -68,6 +76,11 @@ export async function createGaussianRenderer(device, format, { width, height, sp
       async update(rows) {
         await session.write('splats', rows);
         count = rows.length;
+        return project();
+      },
+      async updateCamera(value) {
+        if (!camera) throw new Error('Camera updates require world-space splats');
+        await session.write('camera', cameraInput(value));
         return project();
       },
       draw(encoder, target) {

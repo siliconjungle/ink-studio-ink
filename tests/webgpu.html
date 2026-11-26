@@ -6,6 +6,7 @@
 <pre id="status" role="status">Running WebGPU check</pre>
 <script type="module">
   import { createGaussianRenderer } from '../web/gaussian.mjs';
+  import { loadInk } from '../build/frost-gpu/ink-gpu.mjs';
 
   const status = document.getElementById('status');
   async function check() {
@@ -18,36 +19,57 @@
     const format = navigator.gpu.getPreferredCanvasFormat();
     context.configure({ device, format, alphaMode: 'opaque',
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
-    const rows = [{ center: [0, 0], xx: 16, xy: 0, yy: 16, variance: 0, reach: 3, rgb: 255, alpha: 0.8 }];
-    const renderer = await createGaussianRenderer(device, format, { width: 64, height: 64, splats: rows });
+    const near = { position: [0, 0, -2], covariance0: [16, 0, 0], covariance1: [16, 0, 0],
+      reach: 3, rgb: 255, alpha: 0.8 };
+    const rows = [near, { ...near, position: [0, 0, -3], rgb: 65280 }];
+    const camera = { eye: [0, 0, 0], right: [1, 0, 0], up: [0, 1, 0], back: [0, 0, 1],
+      focal: 1, near_clip: 0.1, far_clip: 10, variance: 0, perspective: false };
     const readback = device.createBuffer({ size: 64 * 64 * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    for (const [color, litX, darkX] of [[0, 32, 54], [1, 54, 32]]) {
-      const counters = color === 0 ? renderer.initialCounters : await renderer.update([
-        { ...rows[0], center: [22, 0], rgb: 65280 },
-      ]);
-      if (!(counters.dispatches > 0) || (counters.readback_bytes ?? 0) !== 0) {
-        throw new Error(`Unexpected GPU counters ${JSON.stringify(counters)}`);
+    const reference = new Map();
+    for (const preordered of [false, true]) {
+      const splats = preordered ? rows.toReversed() : rows;
+      const renderer = await createGaussianRenderer(device, format, { width: 64, height: 64, splats, camera, preordered });
+      for (const [litX, darkX] of [[32, 54], [54, 32]]) {
+        const counters = litX === 32 ? renderer.initialCounters : await renderer.updateCamera({ ...camera, eye: [-22, 0, 0] });
+        const expectedDispatch = preordered ? counters.dispatches === 1 : counters.dispatches > 1;
+        if (!expectedDispatch || (counters.readback_bytes ?? 0) !== 0) {
+          throw new Error(`Unexpected GPU counters ${JSON.stringify(counters)}`);
+        }
+        const target = context.getCurrentTexture();
+        const encoder = device.createCommandEncoder();
+        renderer.draw(encoder, target.createView());
+        encoder.copyTextureToBuffer({ texture: target }, { buffer: readback, bytesPerRow: 256 }, [64, 64]);
+        device.queue.submit([encoder.finish()]);
+        await readback.mapAsync(GPUMapMode.READ);
+        const data = new Uint8Array(readback.getMappedRange());
+        const channel = format.startsWith('bgra') ? 2 : 0;
+        if (data[32 * 256 + litX * 4 + channel] <= 170 || data[32 * 256 + litX * 4 + 1] >= 60 ||
+            data.slice(32 * 256 + darkX * 4, 32 * 256 + darkX * 4 + 3).some(Boolean)) {
+          throw new Error('Gaussian render did not match expected pixels');
+        }
+        if (preordered && data.some((value, i) => value !== reference.get(litX)[i])) {
+          throw new Error('Sorted and preordered frames differ');
+        }
+        if (!preordered) reference.set(litX, data.slice());
+        readback.unmap();
       }
-      const target = context.getCurrentTexture();
-      const encoder = device.createCommandEncoder();
-      renderer.draw(encoder, target.createView());
-      encoder.copyTextureToBuffer({ texture: target }, { buffer: readback, bytesPerRow: 256 }, [64, 64]);
-      device.queue.submit([encoder.finish()]);
-      await readback.mapAsync(GPUMapMode.READ);
-      const data = new Uint8Array(readback.getMappedRange());
-      const channel = color === 0 && format.startsWith('bgra') ? 2 : color;
-      if (data[32 * 256 + litX * 4 + channel] <= 170 ||
-          data.slice(32 * 256 + darkX * 4, 32 * 256 + darkX * 4 + 3).some(Boolean)) {
-        throw new Error('Gaussian render did not match expected pixels');
-      }
-      readback.unmap();
+      await renderer.close();
     }
     readback.destroy();
-    await renderer.close();
+    const frost = await loadInk(new URL('../build/frost-gpu/', import.meta.url), { device });
+    const ice = await frost.pipeline({
+      inputs: { colors: [0x11223344, 0x11223344, 0x11223344], timers: [3, 0, -8] },
+      steps: [{ id: 'ice', call: 'pack_ice', args: [{ input: 'colors' }, { input: 'timers' }, 128] }],
+      outputs: ['ice'],
+    }, { backend: 'gpu-required' });
+    if (ice.backend !== 'gpu' || Array.from(ice.values.ice).join() !== [0x11ff3344, 0x11803344, 0x11003344].join()) {
+      throw new Error('GPU ice packing changed a material channel');
+    }
+    await frost.close();
     const error = await device.popErrorScope();
     if (error) throw error;
     status.dataset.result = 'passed';
-    status.textContent = 'Browser GPU projection and resident rendering passed.';
+    status.textContent = 'Browser GPU projection, resident rendering, and frost packing passed.';
   }
   check().catch((error) => {
     status.dataset.result = 'failed';

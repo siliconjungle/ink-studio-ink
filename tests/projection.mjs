@@ -27,6 +27,29 @@ assert.ok(Math.abs(result[3].axis_x[0] - result[3].axis_x[1]) < 1e-6);
 for (const i of [1, 4, 5]) assert.equal(result[i].alpha, 0);
 assert.deepEqual(call('project', [[], viewport]), []);
 
+const camera = {
+  eye: [0, 0, 0], right: [1, 0, 0], up: [0, 1, 0], back: [0, 0, 1],
+  half_viewport: viewport, focal: 2, near_clip: 0.1, far_clip: 9, variance: 0, perspective: false,
+};
+const world = {
+  position: [1, 0, -4], covariance0: [4, 0, 0], covariance1: [1, 0, 0],
+  reach: 3, rgb: 255, alpha: 0.5,
+};
+const worldRows = [world, { ...world, position: [0, 0, -10] }];
+const orthographic = call('project_world', [worldRows, camera]);
+assert.deepEqual(orthographic[0], {
+  center: [2, 0], axis_x: [12, 0], axis_y: [-0, 6], rgb: 255, alpha: 0.5,
+});
+assert.equal(orthographic[1].alpha, 0);
+const perspective = { ...camera, focal: 8, perspective: true };
+assert.deepEqual(call('project_world', [worldRows, perspective]), orthographic);
+const deep = { ...world, covariance1: [1, 0, 1] };
+assert.ok(call('project_world', [[deep], perspective])[0].axis_x[0] > 12);
+const colors = [255, 65280, 16711680, 65535];
+const unordered = [4, 7, 4, 6].map((depth, i) => ({ ...world, position: [0, 0, -depth], rgb: colors[i] }));
+const ordered = call('project_sorted_world', [unordered, camera]);
+assert.deepEqual(ordered.map((splat) => splat.rgb), [65280, 65535, 255, 16711680]);
+
 const directory = mkdtempSync(join(tmpdir(), 'ink-projection-'));
 function run(cmd, args) {
   const result = spawnSync(cmd, args, { encoding: 'utf8' });
@@ -47,15 +70,24 @@ function bitsToValue(value) {
 try {
   const argsPath = join(directory, 'args.json');
   const requestsPath = join(directory, 'requests.json');
-  writeFileSync(argsPath, JSON.stringify(args));
-  writeFileSync(requestsPath, JSON.stringify([{ pure: 'project', args }]));
+  const tests = [
+    { pure: 'project', args, expected: result },
+    { pure: 'project_world', args: [worldRows, camera], expected: orthographic },
+    { pure: 'project_world', args: [worldRows, perspective], expected: orthographic },
+    { pure: 'project_sorted_world', args: [unordered, camera], expected: ordered },
+  ];
+  writeFileSync(requestsPath, JSON.stringify(tests.map(({ pure, args }) => ({ pure, args }))));
   const native = fileURLToPath(new URL('../build/rust/Cargo.toml', import.meta.url));
-  const [rust] = run('cargo', ['run', '--quiet', '--manifest-path', native, '--', requestsPath]);
-  assert.deepEqual(bitsToValue(rust), result);
-  if (process.env.INK_WGPU_PROGRAM) {
-    const gpu = run(process.env.INK_WGPU_PROGRAM, ['project', argsPath, '--backend', 'gpu-required']);
-    assert.equal(gpu.backend, 'gpu');
-    assert.deepEqual(bitsToValue(gpu.value), result);
+  const rust = run('cargo', ['run', '--quiet', '--manifest-path', native, '--', requestsPath]);
+  assert.equal(rust.length, tests.length);
+  for (const [i, test] of tests.entries()) {
+    assert.deepEqual(bitsToValue(rust[i]), test.expected);
+    if (process.env.INK_WGPU_PROGRAM) {
+      writeFileSync(argsPath, JSON.stringify(test.args));
+      const gpu = run(process.env.INK_WGPU_PROGRAM, [test.pure, argsPath, '--backend', 'gpu-required']);
+      assert.equal(gpu.backend, 'gpu');
+      assert.deepEqual(bitsToValue(gpu.value), test.expected);
+    }
   }
 } finally {
   rmSync(directory, { recursive: true, force: true });

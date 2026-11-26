@@ -1,4 +1,4 @@
-use ink_studio_wgpu::GaussianRenderer;
+use ink_studio_wgpu::{GaussianRenderer, WorldOrder};
 use serde_json::json;
 
 #[test]
@@ -32,15 +32,32 @@ fn computes_and_draws_from_the_same_device_buffer() {
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-    let mut rows = json!([{"center": [0, 0], "xx": 16, "xy": 0, "yy": 16,
-        "variance": 0, "reach": 3, "rgb": 255, "alpha": 0.8}]);
-    let mut renderer = GaussianRenderer::new(&device, &queue, format, [64, 64], &rows)
-        .expect("resident Gaussian projection");
-    for (color, lit_x, dark_x) in [(0, 32, 54), (1, 54, 32)] {
-        if color == 1 {
-            rows[0]["center"] = json!([22, 0]);
-            rows[0]["rgb"] = json!(65280);
-            renderer.update(&device, &rows).expect("resident update");
+    let rows = json!([
+        {"position": [0, 0, -2], "covariance0": [16, 0, 0],
+            "covariance1": [16, 0, 0], "reach": 3, "rgb": 255, "alpha": 0.8},
+        {"position": [0, 0, -3], "covariance0": [16, 0, 0],
+            "covariance1": [16, 0, 0], "reach": 3, "rgb": 65280, "alpha": 0.8}
+    ]);
+    let mut camera = json!({"eye": [0, 0, 0], "right": [1, 0, 0], "up": [0, 1, 0],
+        "back": [0, 0, 1], "focal": 1, "near_clip": 0.1, "far_clip": 10, "variance": 0,
+        "perspective": false});
+    let mut renderer = GaussianRenderer::with_camera(
+        &device,
+        &queue,
+        format,
+        [64, 64],
+        &rows,
+        &camera,
+        WorldOrder::Sort,
+    )
+    .expect("resident world projection");
+    for (lit_x, dark_x) in [(32, 54), (54, 32)] {
+        if lit_x == 54 {
+            camera["eye"] = json!([-22, 0, 0]);
+            let counters = renderer
+                .update_camera(&device, &camera)
+                .expect("resident camera update");
+            assert!(counters["dispatches"].as_u64().unwrap() > 0);
         }
         let mut encoder = device.create_command_encoder(&Default::default());
         renderer.draw(&mut encoder, &texture.create_view(&Default::default()));
@@ -64,7 +81,8 @@ fn computes_and_draws_from_the_same_device_buffer() {
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         rx.recv().unwrap().unwrap();
         let data = readback.slice(..).get_mapped_range().unwrap();
-        assert!(data[32 * 256 + lit_x * 4 + color] > 170);
+        assert!(data[32 * 256 + lit_x * 4] > 170);
+        assert!(data[32 * 256 + lit_x * 4 + 1] < 60);
         assert_eq!(
             &data[32 * 256 + dark_x * 4..32 * 256 + dark_x * 4 + 4],
             &[0, 0, 0, 255]
