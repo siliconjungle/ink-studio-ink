@@ -18,6 +18,12 @@ Callers that already own the correct far-to-near order can use `WorldOrder::Preo
 
 `src/noise.ink` implements the builder's seeded value noise and octave blending. `src/terrain.ink` evaluates a bilinear height grid as a signed-distance field, derives the contact elevation for a distance threshold, and samples a world-space staggered lattice across rectangular cell boundaries. Both compile to Rust and JavaScript with the original numeric precision. Rebirth uses these modules to generate ground collision and to supply terrain samples to the original styling and sculpting pass.
 
+## Sculpting and splat marks
+
+`src/sculpt.ink` evaluates rounded boxes, ellipsoids, linear-profile lathes, tapered tube segments, and tori. It applies local frames, seeded surface bumps, smooth unions within each group, and subtractive cuts. Vertical ray queries select nearby shapes once for the ray, with each shape's vertical range used to skip probes outside its bounds. Rebirth uses this path for live field collision.
+
+`src/marks.ink` computes the covariance of round splats, axial discs and sticks, and oriented surface dabs. Rebirth uses the compiled mark geometry during field export, with the original styling pass supplying colors and shading.
+
 ## Build and check
 
 Use [Ink Lang commit `ca9f42c3`](https://github.com/siliconjungle/ink-lang/commit/ca9f42c376a326e666807525423bbf0cd6548ef3) from `codex/resident-range-writes` with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
@@ -25,6 +31,7 @@ Use [Ink Lang commit `ca9f42c3`](https://github.com/siliconjungle/ink-lang/commi
 ```sh
 ./scripts/build.sh --gpu
 node tests/projection.mjs
+node tests/sculpt.mjs
 node tests/frost.mjs
 cargo test --release --locked --manifest-path native/Cargo.toml
 python3 -m http.server --bind 127.0.0.1
@@ -34,4 +41,4 @@ Open `/tests/webgpu.html` on the local server to check browser dispatch, residen
 
 Open `/bench/camera.html` on the same server to run the camera probe.
 
-Current scope includes Gaussian projection, depth sorting, range updates, rasterization, biped locomotion and frost. General sculpting primitives and baking, additional rig types, idle gaze, animation clips, the remaining art and streaming features, simulation tools, editors, and the CLI remain part of the ongoing port.
+Current scope includes Gaussian projection, depth sorting, range updates, rasterization, biped locomotion and frost. Additional shape recipes, complete surface sampling and baking, additional rig types, idle gaze, animation clips, the remaining art and streaming features, simulation tools, editors, and the CLI remain part of the ongoing port.

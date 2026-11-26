@@ -36,8 +36,10 @@ pub fn surface_height(grid: HeightGrid, x: f64, z: f64) -> f64 {
     return low * (1.0f64 - fv) + high * fv;
 }
 
+fn distance_from_height(y: f64, ground: f64) -> f64 { return (y - ground) * 0.7f64; }
+
 pub fn terrain_sdf(grid: HeightGrid, x: f64, y: f64, z: f64) -> f64 {
-    return (y - surface_height(grid, x, z)) * 0.7f64;
+    return distance_from_height(y, surface_height(grid, x, z));
 }
 
 pub fn contact_height(grid: HeightGrid, x: f64, z: f64, distance: f64) -> f64 {

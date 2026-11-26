@@ -1,0 +1,331 @@
+module StudioSculpt;
+
+import "rig.ink" as math;
+import "noise.ink" as noise;
+import "terrain.ink" as terrain;
+
+record Box { half: math.Point, rounding: f64, }
+record Lathe { height: f64, base: f64, slope: f64, }
+record Torus { major: f64, minor: f64, }
+
+record Segment {
+    start: math.Point,
+    delta: math.Point,
+    length_squared: f64,
+    base: f64,
+    tip: f64,
+}
+
+enum Form { Boxed(Box), Ellipsoid(math.Point), Turned(Lathe), Tube(List<Segment>), Ring(Torus), }
+
+record Model {
+    center: math.Point,
+    frame: Option<math.Matrix>,
+    bound: f64,
+    form: Form,
+}
+
+pub fn boxed(center: math.Point, frame: Option<math.Matrix>, bound: f64, half: math.Point, rounding: f64) -> Model {
+    return Model { center: center, frame: frame, bound: bound, form: Form.Boxed(Box { half: half, rounding: rounding }) };
+}
+
+pub fn ellipsoid(center: math.Point, frame: Option<math.Matrix>, bound: f64, radii: math.Point) -> Model {
+    return Model { center: center, frame: frame, bound: bound, form: Form.Ellipsoid(radii) };
+}
+
+pub fn turned(center: math.Point, frame: Option<math.Matrix>, bound: f64, height: f64, base: f64, slope: f64) -> Model {
+    return Model { center: center, frame: frame, bound: bound,
+        form: Form.Turned(Lathe { height: height, base: base, slope: slope }) };
+}
+
+pub fn tube(center: math.Point, bound: f64, segments: List<Segment>) -> Model {
+    return Model { center: center, frame: None, bound: bound, form: Form.Tube(segments) };
+}
+
+pub fn ring(center: math.Point, frame: Option<math.Matrix>, bound: f64, major: f64, minor: f64) -> Model {
+    return Model { center: center, frame: frame, bound: bound, form: Form.Ring(Torus { major: major, minor: minor }) };
+}
+
+record Member {
+    model: u32,
+    group: u32,
+    blend: f64,
+    bump: f64,
+    frequency: f64,
+}
+
+record SceneSpec {
+    positive: List<Member>,
+    negative: List<Member>,
+}
+
+fn abs(value: f64) -> f64 { return math.max(value, -value); }
+
+fn box_distance(box: Box, p: math.Point) -> f64 {
+    let x = abs(p.x) - box.half.x + box.rounding;
+    let y = abs(p.y) - box.half.y + box.rounding;
+    let z = abs(p.z) - box.half.z + box.rounding;
+    let outside = math.magnitude(math.point(math.max(x, 0.0f64), math.max(y, 0.0f64), math.max(z, 0.0f64)));
+    return outside + math.min(math.max(math.max(x, y), z), 0.0f64) - box.rounding;
+}
+
+fn ellipsoid_distance(r: math.Point, p: math.Point) -> f64 {
+    if r.x == r.y && r.y == r.z { return math.magnitude(p) - r.x; }
+    let k0 = math.magnitude(math.point(p.x / r.x, p.y / r.y, p.z / r.z));
+    let k1 = math.magnitude(math.point(p.x / (r.x * r.x), p.y / (r.y * r.y), p.z / (r.z * r.z)));
+    return if k1 > 1e-9f64 { k0 * (k0 - 1.0f64) / k1 } else { -math.min(math.min(r.x, r.y), r.z) };
+}
+
+fn turned_distance(profile: Lathe, p: math.Point) -> f64 {
+    let radius = profile.base + profile.slope * math.sat(p.y / profile.height + 0.5f64);
+    let dr = (sqrt(p.x * p.x + p.z * p.z) - radius) * 0.8f64;
+    let dy = abs(p.y) - profile.height * 0.5f64;
+    let outside_r = math.max(dr, 0.0f64);
+    let outside_y = math.max(dy, 0.0f64);
+    return math.min(math.max(dr, dy), 0.0f64) + sqrt(outside_r * outside_r + outside_y * outside_y);
+}
+
+fn tube_distance(segments: List<Segment>, p: math.Point) -> f64 {
+    return foldl(segments, 1e9f64, fn(segment) => fn(best) => math.min(best, segment_distance(segment, p)));
+}
+
+fn segment_distance(segment: Segment, p: math.Point) -> f64 {
+    let delta = math.sub(p, segment.start);
+    let t = math.sat(math.dot(delta, segment.delta) / segment.length_squared);
+    return math.magnitude(math.sub(delta, math.scale(segment.delta, t))) - math.mix(segment.base, segment.tip, t);
+}
+
+fn torus_distance(ring: Torus, p: math.Point) -> f64 {
+    let q = sqrt(p.x * p.x + p.z * p.z) - ring.major;
+    return sqrt(q * q + p.y * p.y) - ring.minor;
+}
+
+fn local_point(model: Model, p: math.Point) -> math.Point {
+    let offset = math.sub(p, model.center);
+    return model.frame.fold(fn(frame) => math.apply(frame, offset), fn(unit) => offset);
+}
+
+pub fn solid_distance(model: Model, p: math.Point) -> f64 {
+    return match model.form {
+        Form.Boxed(box) => box_distance(box, local_point(model, p)),
+        Form.Ellipsoid(radii) => ellipsoid_distance(radii, local_point(model, p)),
+        Form.Turned(profile) => turned_distance(profile, local_point(model, p)),
+        Form.Tube(segments) => tube_distance(segments, p),
+        Form.Ring(ring) => torus_distance(ring, local_point(model, p)),
+    };
+}
+
+fn bumped_distance(model: Model, member: Member, tables: noise.Noise, p: math.Point) -> f64 {
+    let distance = solid_distance(model, p);
+    if member.bump <= 0.0f64 { return distance; }
+    if distance > member.bump + 0.25f64 { return distance - member.bump; }
+    let n = member.frequency;
+    let texture = noise.noise3(tables, p.x * n + f64_from_u32(member.group) * 3.7f64, p.y * n, p.z * n);
+    return distance - member.bump * (texture * 1.5f64 - 0.75f64);
+}
+
+record Placed { geometry: Model, member: Member, }
+record Bounds { low: math.Point, high: math.Point, }
+record Index { x: u32, y: u32, z: u32, }
+record Grid {
+    origin: math.Point,
+    stride: f64,
+    size: Index,
+}
+record Candidate {
+    shape: Placed,
+    low: Index,
+    high: Index,
+}
+record Scene {
+    positive: List<Candidate>,
+    negative: List<Placed>,
+    grid: Grid,
+}
+record Column {
+    positive: List<Candidate>,
+    negative: List<Placed>,
+    grid: Grid,
+}
+
+fn no_model() -> Model {
+    return Model { center: math.zero(), frame: None, bound: 0.0f64, form: Form.Tube([]) };
+}
+fn empty_placed() -> Placed {
+    return Placed { geometry: no_model(), member: Member { model: 0, group: 0, blend: 0.0f64, bump: 0.0f64, frequency: 0.0f64 } };
+}
+
+fn placed(models: List<Model>, member: Member) -> Placed {
+    return Placed { geometry: models.at_or(member.model, no_model()), member: member };
+}
+
+fn min_point(a: math.Point, b: math.Point) -> math.Point {
+    return math.point(math.min(a.x, b.x), math.min(a.y, b.y), math.min(a.z, b.z));
+}
+fn max_point(a: math.Point, b: math.Point) -> math.Point {
+    return math.point(math.max(a.x, b.x), math.max(a.y, b.y), math.max(a.z, b.z));
+}
+
+fn padded(placed: Placed) -> math.Point {
+    let radius = placed.geometry.bound + placed.member.blend + 1.0f64;
+    return math.point(radius, radius, radius);
+}
+
+fn union_bounds(row: Placed, current: Bounds) -> Bounds {
+    let r = padded(row);
+    return Bounds { low: min_point(math.sub(row.geometry.center, r), current.low),
+        high: max_point(math.add(row.geometry.center, r), current.high) };
+}
+
+fn enclosing(rows: List<Placed>) -> Bounds {
+    if length(rows) == 0 {
+        return Bounds { low: math.zero(), high: math.point(1.0f64, 1.0f64, 1.0f64) };
+    }
+    let first = rows.at_or(0, empty_placed());
+    return foldl(rows, Bounds { low: first.geometry.center, high: first.geometry.center },
+        fn(row) => fn(bounds) => union_bounds(row, bounds));
+}
+
+fn index(x: f64) -> u32 { return u32_from_f64(x).fold(fn(value) => value, fn(unit) => 0); }
+
+fn cube_root(value: f64) -> f64 {
+    let initial = math.max(0.9f64, sqrt(value));
+    return repeat(16, initial, fn(step) => fn(guess) =>
+        (2.0f64 * guess + value / (guess * guess)) / 3.0f64);
+}
+
+fn dimension(extent: f64, step: f64) -> u32 {
+    return index(math.max(1.0f64, ceil(extent / step)));
+}
+
+fn grid_geometry(bounds: Bounds) -> Grid {
+    let extent = math.sub(bounds.high, bounds.low);
+    let volume = extent.x * extent.y * extent.z / 50000.0f64;
+    let step = if volume > 0.729f64 { math.max(0.9f64, cube_root(volume)) } else { 0.9f64 };
+    let size = Index { x: dimension(extent.x, step), y: dimension(extent.y, step), z: dimension(extent.z, step) };
+    return Grid { origin: bounds.low, stride: step, size: size };
+}
+
+fn bounded_index(value: f64, extent: u32) -> u32 {
+    return index(math.max(0.0f64, math.min(value, f64_from_u32(extent - 1))));
+}
+
+fn bucket_point(grid: Grid, p: math.Point) -> math.Point {
+    let delta = math.sub(p, grid.origin);
+    return math.point(floor(delta.x / grid.stride), floor(delta.y / grid.stride), floor(delta.z / grid.stride));
+}
+
+fn bucket_limit(grid: Grid, p: math.Point) -> Index {
+    let cell = bucket_point(grid, p);
+    return Index { x: bounded_index(cell.x, grid.size.x), y: bounded_index(cell.y, grid.size.y),
+        z: bounded_index(cell.z, grid.size.z) };
+}
+
+fn cover(grid: Grid, row: Placed) -> Candidate {
+    let radius = padded(row);
+    return Candidate { shape: row, low: bucket_limit(grid, math.sub(row.geometry.center, radius)),
+        high: bucket_limit(grid, math.add(row.geometry.center, radius)) };
+}
+
+fn ordered(models: List<Model>, members: List<Member>) -> List<Placed> {
+    let keys = members.map_indexed(fn(id) => fn(member) =>
+        word_widen_u32_to_u64(member.group) * 4294967296 + word_widen_u32_to_u64(id)).sort();
+    return keys.map(fn(key) => placed(models, members.at_or(word_narrow_u64_to_u32(key), empty_placed().member)));
+}
+
+pub fn prepare_scene(models: List<Model>, spec: SceneSpec) -> Scene {
+    let positive = ordered(models, spec.positive);
+    let negative = spec.negative.map(fn(member) => placed(models, member));
+    let grid = grid_geometry(enclosing(positive));
+    return Scene { positive: positive.map(fn(shape) => cover(grid, shape)), negative: negative, grid: grid };
+}
+
+fn horizontal_overlap(candidate: Candidate, x: f64, z: f64) -> Bool {
+    return x >= f64_from_u32(candidate.low.x) && x <= f64_from_u32(candidate.high.x)
+        && z >= f64_from_u32(candidate.low.z) && z <= f64_from_u32(candidate.high.z);
+}
+
+// A vertical ray stays in one horizontal bucket. Store each solid's inclusive
+// bucket range and select its column once, without allocating a dense 3D grid.
+fn scene_column(scene: Scene, x: f64, z: f64) -> Column {
+    let grid = scene.grid;
+    let cell = bucket_point(grid, math.point(x, grid.origin.y, z));
+    let positive = scene.positive.filter(fn(candidate) => horizontal_overlap(candidate, cell.x, cell.z));
+    return Column { positive: positive, negative: scene.negative, grid: grid };
+}
+
+record Blend {
+    best: f64,
+    group: u32,
+    local: f64,
+    width: f64,
+}
+
+fn push_group(current: Blend, member: Member) -> Blend {
+    if current.group == member.group { return current; }
+    return Blend { best: math.min(current.best, current.local), group: member.group, local: 1e9f64, width: member.blend };
+}
+
+fn local_join(a: f64, b: f64, width: f64) -> f64 {
+    if width <= 0.0f64 || a >= 1e8f64 { return math.min(a, b); }
+    let h = math.max(width - abs(a - b), 0.0f64) / width;
+    return math.min(a, b) - h * h * width * 0.25f64;
+}
+
+fn touches(model: Model, p: math.Point, reach: f64) -> Bool {
+    if reach <= 0.0f64 { return false; }
+    let delta = math.sub(p, model.center);
+    return math.dot(delta, delta) <= reach * reach;
+}
+
+fn union_one(tables: noise.Noise, point: math.Point, current: Blend, row: Placed) -> Blend {
+    let next = push_group(current, row.member);
+    let reach = math.min(next.best, next.local) + next.width + row.geometry.bound;
+    if !touches(row.geometry, point, reach) { return next; }
+    let d = bumped_distance(row.geometry, row.member, tables, point);
+    if is_nan(d) { return next; }
+    return Blend { best: next.best, group: next.group, local: local_join(next.local, d, next.width), width: next.width };
+}
+
+fn cut_one(tables: noise.Noise, point: math.Point, distance: f64, row: Placed) -> f64 {
+    if !touches(row.geometry, point, row.geometry.bound + 0.5f64) { return distance; }
+    let cut = -bumped_distance(row.geometry, row.member, tables, point);
+    return if cut > distance { cut } else { distance };
+}
+
+fn union_at(tables: noise.Noise, point: math.Point, bucket: f64, current: Blend, candidate: Candidate) -> Blend {
+    if bucket < f64_from_u32(candidate.low.y) || bucket > f64_from_u32(candidate.high.y) { return current; }
+    return union_one(tables, point, current, candidate.shape);
+}
+
+fn column_distance(column: Column, tables: noise.Noise, point: math.Point, ground: f64) -> f64 {
+    let seed = Blend { best: ground, local: 1e9f64, group: 0, width: 0.0f64 };
+    let bucket = floor((point.y - column.grid.origin.y) / column.grid.stride);
+    let combined = foldl(column.positive, seed, fn(candidate) => fn(current) =>
+        union_at(tables, point, bucket, current, candidate));
+    let bounded = math.min(1.0f64, math.min(combined.best, combined.local));
+    return foldl(column.negative, bounded, fn(row) => fn(distance) => cut_one(tables, point, distance, row));
+}
+
+pub fn scene_distance(scene: Scene, tables: noise.Noise, point: math.Point, ground: f64) -> f64 {
+    return column_distance(scene_column(scene, point.x, point.z), tables, point, ground);
+}
+
+record Ray { y: f64, distance: f64, }
+
+fn vertical(column: Column, tables: noise.Noise, x: f64, z: f64, floor_y: f64, y: f64) -> Ray {
+    let point = math.point(x, y, z);
+    let height = terrain.distance_from_height(y, floor_y);
+    return Ray { y: y, distance: column_distance(column, tables, point, height) };
+}
+
+// A solid start and a miss use the source sculptor's sentinel values.
+pub fn trace_height(scene: Scene, tables: noise.Noise, x: f64, z: f64, floor_y: f64, origin: f64, depth: f64) -> f64 {
+    let column = scene_column(scene, x, z);
+    let start = vertical(column, tables, x, z, floor_y, origin);
+    if start.distance < 0.02f64 { return 1e9f64; }
+    let end = origin - depth;
+    let ray = repeat_until(320, start, fn(ray) => ray.distance < 0.02f64 || ray.y <= end,
+        fn(step) => fn(ray) => vertical(column, tables, x, z, floor_y, ray.y - math.max(ray.distance * 0.9f64, 0.02f64)));
+    return if ray.distance < 0.02f64 { ray.y } else { -1e9f64 };
+}
