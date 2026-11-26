@@ -124,7 +124,7 @@ fn bumped_distance(model: Model, member: Member, tables: noise.Noise, p: math.Po
     return distance - member.bump * (texture * 1.5f64 - 0.75f64);
 }
 
-record Placed { geometry: Model, member: Member, }
+record Placed { geometry: Model, member: Member, id: u32, }
 record Bounds { low: math.Point, high: math.Point, }
 record Index { x: u32, y: u32, z: u32, }
 record Grid {
@@ -152,11 +152,11 @@ fn no_model() -> Model {
     return Model { center: math.zero(), frame: None, bound: 0.0f64, form: Form.Tube([]) };
 }
 fn empty_placed() -> Placed {
-    return Placed { geometry: no_model(), member: Member { model: 0, group: 0, blend: 0.0f64, bump: 0.0f64, frequency: 0.0f64 } };
+    return Placed { geometry: no_model(), id: 0, member: Member { model: 0, group: 0, blend: 0.0f64, bump: 0.0f64, frequency: 0.0f64 } };
 }
 
-fn placed(models: List<Model>, member: Member) -> Placed {
-    return Placed { geometry: models.at_or(member.model, no_model()), member: member };
+fn placed(models: List<Model>, member: Member, id: u32) -> Placed {
+    return Placed { geometry: models.at_or(member.model, no_model()), member: member, id: id };
 }
 
 fn min_point(a: math.Point, b: math.Point) -> math.Point {
@@ -230,12 +230,16 @@ fn cover(grid: Grid, row: Placed) -> Candidate {
 fn ordered(models: List<Model>, members: List<Member>) -> List<Placed> {
     let keys = members.map_indexed(fn(id) => fn(member) =>
         word_widen_u32_to_u64(member.group) * 4294967296 + word_widen_u32_to_u64(id)).sort();
-    return keys.map(fn(key) => placed(models, members.at_or(word_narrow_u64_to_u32(key), empty_placed().member)));
+    return keys.map(fn(key) => placed_id(models, members, word_narrow_u64_to_u32(key)));
+}
+
+fn placed_id(models: List<Model>, members: List<Member>, id: u32) -> Placed {
+    return placed(models, members.at_or(id, empty_placed().member), id + 1);
 }
 
 pub fn prepare_scene(models: List<Model>, spec: SceneSpec) -> Scene {
     let positive = ordered(models, spec.positive);
-    let negative = spec.negative.map(fn(member) => placed(models, member));
+    let negative = spec.negative.map_indexed(fn(i) => fn(member) => placed(models, member, i + 1));
     let grid = grid_geometry(enclosing(positive));
     return Scene { positive: positive.map(fn(shape) => cover(grid, shape)), negative: negative, grid: grid };
 }
@@ -254,16 +258,20 @@ fn scene_column(scene: Scene, x: f64, z: f64) -> Column {
     return Column { positive: positive, negative: scene.negative, grid: grid };
 }
 
+record Owner { id: u32, distance: f64, }
 record Blend {
-    best: f64,
+    best: Owner,
     group: u32,
-    local: f64,
+    local: Owner,
     width: f64,
 }
 
+fn nearer(a: Owner, b: Owner) -> Owner { return if b.distance < a.distance { b } else { a }; }
+
 fn push_group(current: Blend, member: Member) -> Blend {
     if current.group == member.group { return current; }
-    return Blend { best: math.min(current.best, current.local), group: member.group, local: 1e9f64, width: member.blend };
+    return Blend { best: nearer(current.best, current.local), group: member.group,
+        local: Owner { id: 0, distance: 1e9f64 }, width: member.blend };
 }
 
 fn local_join(a: f64, b: f64, width: f64) -> f64 {
@@ -280,17 +288,23 @@ fn touches(model: Model, p: math.Point, reach: f64) -> Bool {
 
 fn union_one(tables: noise.Noise, point: math.Point, current: Blend, row: Placed) -> Blend {
     let next = push_group(current, row.member);
-    let reach = math.min(next.best, next.local) + next.width + row.geometry.bound;
+    let reach = math.min(next.best.distance, next.local.distance) + next.width + row.geometry.bound;
     if !touches(row.geometry, point, reach) { return next; }
     let d = bumped_distance(row.geometry, row.member, tables, point);
     if is_nan(d) { return next; }
-    return Blend { best: next.best, group: next.group, local: local_join(next.local, d, next.width), width: next.width };
+    let winner = if d < next.local.distance { row.id } else { next.local.id };
+    let surface = Owner { id: winner, distance: local_join(next.local.distance, d, next.width) };
+    return Blend { best: next.best, group: next.group, local: surface, width: next.width };
 }
 
-fn cut_one(tables: noise.Noise, point: math.Point, distance: f64, row: Placed) -> f64 {
-    if !touches(row.geometry, point, row.geometry.bound + 0.5f64) { return distance; }
+// Surface zero is the terrain. Positive and cut IDs are separate lists
+// with one-based indices in the author's SceneSpec.
+record SurfaceHit { distance: f64, surface: u32, cut: u32, }
+
+fn cut_one(tables: noise.Noise, point: math.Point, current: SurfaceHit, row: Placed) -> SurfaceHit {
+    if !touches(row.geometry, point, row.geometry.bound + 0.5f64) { return current; }
     let cut = -bumped_distance(row.geometry, row.member, tables, point);
-    return if cut > distance { cut } else { distance };
+    return if cut > current.distance { SurfaceHit { distance: cut, surface: current.surface, cut: row.id } } else { current };
 }
 
 fn union_at(tables: noise.Noise, point: math.Point, bucket: f64, current: Blend, candidate: Candidate) -> Blend {
@@ -298,17 +312,24 @@ fn union_at(tables: noise.Noise, point: math.Point, bucket: f64, current: Blend,
     return union_one(tables, point, current, candidate.shape);
 }
 
-fn column_distance(column: Column, tables: noise.Noise, point: math.Point, ground: f64) -> f64 {
-    let seed = Blend { best: ground, local: 1e9f64, group: 0, width: 0.0f64 };
+fn column_hit(column: Column, tables: noise.Noise, point: math.Point, ground: f64) -> SurfaceHit {
+    let ground_id: u32 = if ground < 1e8f64 { 0 } else { 4294967295 };
+    let seed = Blend { best: Owner { id: ground_id, distance: ground },
+        local: Owner { id: ground_id, distance: 1e9f64 }, group: 0, width: 0.0f64 };
     let bucket = floor((point.y - column.grid.origin.y) / column.grid.stride);
     let combined = foldl(column.positive, seed, fn(candidate) => fn(current) =>
         union_at(tables, point, bucket, current, candidate));
-    let bounded = math.min(1.0f64, math.min(combined.best, combined.local));
-    return foldl(column.negative, bounded, fn(row) => fn(distance) => cut_one(tables, point, distance, row));
+    let winner = nearer(combined.best, combined.local);
+    let hit = SurfaceHit { distance: math.min(1.0f64, winner.distance), surface: winner.id, cut: 0 };
+    return foldl(column.negative, hit, fn(row) => fn(current) => cut_one(tables, point, current, row));
+}
+
+pub fn scene_hit(scene: Scene, tables: noise.Noise, point: math.Point, ground: f64) -> SurfaceHit {
+    return column_hit(scene_column(scene, point.x, point.z), tables, point, ground);
 }
 
 pub fn scene_distance(scene: Scene, tables: noise.Noise, point: math.Point, ground: f64) -> f64 {
-    return column_distance(scene_column(scene, point.x, point.z), tables, point, ground);
+    return scene_hit(scene, tables, point, ground).distance;
 }
 
 record Ray { y: f64, distance: f64, }
@@ -316,7 +337,7 @@ record Ray { y: f64, distance: f64, }
 fn vertical(column: Column, tables: noise.Noise, x: f64, z: f64, floor_y: f64, y: f64) -> Ray {
     let point = math.point(x, y, z);
     let height = terrain.distance_from_height(y, floor_y);
-    return Ray { y: y, distance: column_distance(column, tables, point, height) };
+    return Ray { y: y, distance: column_hit(column, tables, point, height).distance };
 }
 
 // A solid start and a miss use the source sculptor's sentinel values.
