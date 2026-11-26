@@ -336,7 +336,22 @@ fn tail_bone(tail: Tail, points: TailMotion, index: u32) -> rig.Transform {
 }
 
 pub fn palette(spec: Walker, walk: WalkState, origin: rig.Point) -> List<rig.Bone> {
-    let frame = body_frame(spec, walk.pose, walk.springs);
+    return articulated_palette(spec, walk, origin, body_frame(spec, walk.pose, walk.springs));
+}
+
+record BodyPose { lean: f64, nod: f64, stretch: f64, flare: f64, }
+
+pub fn posed_palette(spec: Walker, walk: WalkState, origin: rig.Point, action: BodyPose) -> List<rig.Bone> {
+    let p = walk.pose;
+    let springs = walk.springs;
+    let pose = Pose { stretch: p.stretch * action.stretch, flare: p.flare + action.flare,
+        hip_offset: p.hip_offset, bend: p.bend, twist: p.twist, feet: p.feet };
+    let posed = Springs { lean: springs.lean + action.lean, nod: springs.nod + action.nod,
+        lean_velocity: springs.lean_velocity, nod_velocity: springs.nod_velocity };
+    return articulated_palette(spec, walk, origin, body_frame(spec, pose, posed));
+}
+
+fn articulated_palette(spec: Walker, walk: WalkState, origin: rig.Point, frame: Body) -> List<rig.Bone> {
     let yaw = rig.rotate_y(-walk.yaw);
     let hem = rig.world(frame.hem, yaw, origin);
     let offset = hem_delta(walk.hem, rig.place(hem, spec.hem));
