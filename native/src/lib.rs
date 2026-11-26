@@ -230,7 +230,7 @@ impl GaussianRenderer {
         light: &Value,
     ) -> Result<u64, String> {
         let camera = camera_input(camera, self.half_viewport)?;
-        let bone_write = self.engine.write(self.session, "bones", bones)?;
+        let bone_write = self.engine.write_changed(self.session, "bones", bones)?;
         let light_write = self.engine.write(self.session, "light", light)?;
         self.engine.write(self.session, "camera", &camera)?;
         self.project(device)?;

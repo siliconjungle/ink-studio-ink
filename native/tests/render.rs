@@ -1,3 +1,4 @@
+use ink_gpu_program::{Backend, Engine};
 use ink_studio_wgpu::{GaussianRenderer, WorldOrder};
 use serde_json::json;
 
@@ -90,4 +91,54 @@ fn computes_and_draws_from_the_same_device_buffer() {
         drop(data);
         readback.unmap();
     }
+}
+
+#[test]
+fn uploads_only_changed_rig_transforms() {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        .expect("native GPU adapter");
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+        .expect("native GPU device");
+    let bone = json!({"axis_x": [1, 0, 0], "axis_y": [0, 1, 0], "axis_z": [0, 0, 1], "offset": [0, 0, 0]});
+    let light = json!({"sun": [0, 1, 0], "ambient": 1, "diffuse": 0, "blink": 1});
+    let rest = json!([{"center": [0, 0, -2], "covariance0": [1, 0, 0], "covariance1": [1, 0, 1],
+        "normal": [0, 1, 0], "joints": [1, 1], "weight": 0, "shade": 0, "palette": [255, 0, 0, 0],
+        "tones": 1, "eye": false, "alpha": 1}]);
+    let bones = json!([bone, bone, bone]);
+    let mut changed = bones.clone();
+    changed[1]["offset"][0] = json!(4);
+    let mut signed_zero = changed.clone();
+    signed_zero[1]["offset"][1] = json!(-0.0);
+
+    let camera = json!({"eye": [0, 0, 0], "right": [1, 0, 0], "up": [0, 1, 0], "back": [0, 0, 1],
+        "focal": 1, "near_clip": 0.1, "far_clip": 10, "variance": 0, "perspective": false});
+    let mut renderer = GaussianRenderer::with_camera(&device, &queue, wgpu::TextureFormat::Rgba8Unorm,
+        [64, 64], &json!([]), &camera, WorldOrder::Skinned { rest: rest.clone(), bones: bones.clone(), light: light.clone() })
+        .expect("skinned renderer");
+    for (pose, bytes) in [(&bones, 4 + 3 * 48 + 24), (&changed, 48 + 24), (&signed_zero, 48 + 24), (&signed_zero, 24)] {
+        assert_eq!(renderer.update_skin_camera(&device, &camera, pose, &light).unwrap(), bytes);
+    }
+
+    let mut engine = Engine::with_device(device, queue);
+    let plan = json!({
+        "inputs": {"bones": bones, "rest": rest, "light": light},
+        "steps": [{"id": "posed", "call": "skin_world", "args": [{"input": "rest"}, {"input": "bones"}, {"input": "light"}]}],
+        "outputs": ["posed"],
+    });
+    let session = engine.open(&plan, Backend::GpuRequired).unwrap()["session"].as_u64().unwrap();
+    engine.write_changed(session, "bones", &bones).unwrap();
+    engine.write_changed(session, "bones", &changed).unwrap();
+    engine.step(session, 1).unwrap();
+    let output = engine.read(session, &json!({"outputs": ["posed"]})).unwrap();
+    assert_eq!(output["values"]["posed"][0]["position"], json!([4.0, 0.0, -2.0]));
+    assert!(engine.write_ranges(session, "bones", &[(3, json!([bone]))]).is_err());
+    assert_eq!(engine.write_changed(session, "bones", &changed).unwrap()["counters"]["upload_bytes"], 0);
+    engine.write_ranges(session, "bones", &[(1, json!([bone]))]).unwrap();
+    assert_eq!(engine.write_changed(session, "bones", &changed).unwrap()["counters"]["upload_bytes"], 4 + 3 * 48);
+    engine.write(session, "bones", &bones).unwrap();
+    assert_eq!(engine.write_changed(session, "bones", &changed).unwrap()["counters"]["upload_bytes"], 4 + 3 * 48);
+    engine.step(session, 1).unwrap();
+    let output = engine.read(session, &json!({"outputs": ["posed"]})).unwrap();
+    assert_eq!(output["values"]["posed"][0]["position"], json!([4.0, 0.0, -2.0]));
 }

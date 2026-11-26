@@ -8,7 +8,7 @@ Both hosts can stage changes to disjoint row ranges and project them on the next
 
 A world view can reserve its final splat range for one moving actor. Ink applies the actor's yaw and translation to the centers and rotates their covariances on the GPU. Actor and scene rows share the same stable depth sort. Moving the actor updates its placement without replacing its pose rows. Rust exposes the mode through `WorldOrder::Actor` and `update_actor_camera`, and JavaScript accepts `actor` when creating the renderer and updating its camera.
 
-The skinned path uploads a character's bind splats once. `src/walker.ink` evaluates a biped's gait, lean and nod springs, landing squash, and cloth joints at each simulation tick. `skin_world` blends the joint transforms, applies them to splat centers and covariances, and shades the transformed normals. The GPU projects and compacts terrain and character splats before the shared stable depth sort. Rust exposes this through `WorldOrder::Skinned` and `update_skin_camera`. The browser renderer takes a `skin` option and exposes `updateSkinCamera`.
+The skinned path uploads a character's bind splats once. `src/walker.ink` evaluates a biped's gait, lean and nod springs, landing squash, and cloth joints at each simulation tick. `skin_world` blends the joint transforms, applies them to splat centers and covariances, and shades the transformed normals. The GPU projects and compacts terrain and character splats before the shared stable depth sort. Rust exposes this through `WorldOrder::Skinned` and `update_skin_camera`. The browser renderer takes a `skin` option and exposes `updateSkinCamera`. After the first pose update, both hosts keep unchanged leading and trailing joint transforms resident and upload only the span between changed joints. A repeated pose uploads the light alone.
 
 Walkers can add an action pose to the joint palette. The pose controls torso lean and stretch, head nod, and hem flare while retaining the current gait and cloth state. Rebirth uses this for Hex's slash.
 
@@ -50,7 +50,7 @@ Lathe profiles can also ripple as they taper. The same profile drives the signed
 
 ## Build and check
 
-Use [Ink Lang commit `b3170c4`](https://github.com/siliconjungle/ink-lang/commit/b3170c4f1af17c23e1f15b380be7018e1663f6a7) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build uses Node.js to request checked Rust borrows for the bake's immutable geometry inputs. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
+Use [Ink Lang commit `ca47d82`](https://github.com/siliconjungle/ink-lang/commit/ca47d82e898fe28345f6b397f48bc0ec848c4d23) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build uses Node.js to request checked Rust borrows for the bake's immutable geometry inputs. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
 
 ```sh
 ./scripts/build.sh --gpu
@@ -63,7 +63,7 @@ cargo test --release --locked --manifest-path native/Cargo.toml
 python3 -m http.server --bind 127.0.0.1
 ```
 
-Open `/tests/webgpu.html` on the local server to check browser dispatch, resident camera updates and compositing. The native test checks the same two draws with a wgpu device. To include native GPU compute in the value comparison, build `build/gpu/native/Cargo.toml` with Cargo and set `INK_WGPU_PROGRAM` to the generated `ink-gpu-program` executable.
+Open `/tests/webgpu.html` on the local server to check browser dispatch, resident camera updates and compositing. Both GPU tests also check rig uploads, bit-exact signed-zero changes, and replacement after other writes. To include native GPU compute in the value comparison, build `build/gpu/native/Cargo.toml` with Cargo and set `INK_WGPU_PROGRAM` to the generated `ink-gpu-program` executable.
 
 Open `/bench/camera.html` on the same server to run the camera probe.
 

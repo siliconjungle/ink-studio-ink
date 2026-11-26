@@ -110,7 +110,7 @@ export async function createGaussianRenderer(device, format, { width, height, sp
       },
       async updateSkinCamera(value, { bones, light }) {
         if (!hasSkin) throw new Error('Skin updates require a skinned world view');
-        const boneWrite = await session.write('bones', bones);
+        const boneWrite = await session.writeChanged('bones', bones);
         const lightWrite = await session.write('light', light);
         const rigUploadBytes = boneWrite.counters.upload_bytes + lightWrite.counters.upload_bytes;
         await session.write('camera', cameraInput(value));

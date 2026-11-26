@@ -7,6 +7,7 @@
 <script type="module">
   import { createGaussianRenderer } from '../web/gaussian.mjs';
   import { loadInk } from '../build/frost-gpu/ink-gpu.mjs';
+  import { loadInk as loadGaussian } from '../build/gpu/ink-gpu.mjs';
 
   const status = document.getElementById('status');
   async function check() {
@@ -56,6 +57,57 @@
       await renderer.close();
     }
     readback.destroy();
+    const bone = { axis_x: [1, 0, 0], axis_y: [0, 1, 0], axis_z: [0, 0, 1], offset: [0, 0, 0] };
+    const light = { sun: [0, 1, 0], ambient: 1, diffuse: 0, blink: 1 };
+    const rest = [{ center: [0, 0, -2], covariance0: [1, 0, 0], covariance1: [1, 0, 1],
+      normal: [0, 1, 0], joints: [1, 1], weight: 0, shade: 0, palette: [255, 0, 0, 0],
+      tones: 1, eye: false, alpha: 1 }];
+    const bones = [bone, bone, bone];
+    const changed = [bone, { ...bone, offset: [4, 0, 0] }, bone];
+    const signedZero = [bone, { ...bone, offset: [4, -0, 0] }, bone];
+    const rigRenderer = await createGaussianRenderer(device, format, { width: 64, height: 64,
+      splats: [], camera, skin: { rest, bones, light } });
+    for (const [pose, expected] of [[bones, 4 + 3 * 48 + 24], [changed, 48 + 24], [signedZero, 48 + 24], [signedZero, 24]]) {
+      const { rigUploadBytes } = await rigRenderer.updateSkinCamera(camera, { bones: pose, light });
+      if (rigUploadBytes !== expected) throw new Error(`Wrong rig upload count ${rigUploadBytes}, expected ${expected}`);
+    }
+    await rigRenderer.close();
+
+    const runtime = await loadGaussian(new URL('../build/gpu/', import.meta.url), { device });
+    const session = await runtime.open({
+      inputs: { rest, bones, light },
+      steps: [{ id: 'posed', call: 'skin_world', args: [{ input: 'rest' }, { input: 'bones' }, { input: 'light' }] }],
+      outputs: ['posed'],
+    }, { backend: 'gpu-required' });
+    const checkUpload = async bytes => {
+      if ((await session.writeChanged('bones', changed)).counters.upload_bytes !== bytes) throw new Error('Wrong changed transform span');
+    };
+    await checkUpload(4 + 3 * 48);
+    await checkUpload(0);
+    await session.writeRanges('bones', [{ start: 1, values: [bone] }]);
+    await checkUpload(4 + 3 * 48);
+    await session.write('bones', bones);
+    await checkUpload(4 + 3 * 48);
+    await session.step();
+    const posed = (await session.read({ outputs: ['posed'] })).values.posed;
+    if (posed[0].position.join() !== '4,0,-2') throw new Error('Patched transform did not reach skinned splat');
+
+    const splats = rows.slice(0, 1);
+    const target = await runtime.open({
+      inputs: { splats, camera: { ...camera, half_viewport: [32, 32] } },
+      steps: [{ id: 'ellipses', call: 'project_world', args: [{ input: 'splats' }, { input: 'camera' }] }],
+      outputs: ['ellipses'],
+    }, { backend: 'gpu-required' });
+    await target.writeChanged('splats', splats);
+    await target.writeFrom('splats', session, 'posed');
+    const restored = await target.writeChanged('splats', splats);
+    if (restored.counters.upload_bytes !== 4 + 48) throw new Error('Resident copy kept a stale upload baseline');
+    await target.step();
+    const result = (await target.read({ outputs: ['ellipses'] })).values.ellipses[0];
+    if (result.center.join() !== '0,0' || result.rgb !== 255) throw new Error('Restored splat did not reach projection');
+    await target.close();
+    await session.close();
+    await runtime.close();
     const frost = await loadInk(new URL('../build/frost-gpu/', import.meta.url), { device });
     const ice = await frost.pipeline({
       inputs: { colors: [0x11223344, 0x11223344, 0x11223344], timers: [3, 0, -8] },
@@ -69,7 +121,7 @@
     const error = await device.popErrorScope();
     if (error) throw error;
     status.dataset.result = 'passed';
-    status.textContent = 'Browser GPU projection, resident rendering, and frost packing passed.';
+    status.textContent = 'Browser GPU projection, resident rig uploads, and frost packing passed.';
   }
   check().catch((error) => {
     status.dataset.result = 'failed';
