@@ -244,6 +244,12 @@ fn ghost_surface(field: Field, model: sculpt.Model, job: ProjectionJob, p: math.
     return Surface { position: result.point, normal: result.normal, surface: 0, cut: 0, occlusion: ao, spacing: job.settings.spacing };
 }
 
+fn project_ghost(field: Field, model: sculpt.Model, member: sculpt.Member, settings: BakeSettings) -> List<Surface> {
+    let spacing = settings.spacing * (if member.bump > 0.0f64 { 0.8f64 } else { 1.0f64 });
+    let job = ProjectionJob { member: member, settings: settings, candidates: [], ghost: true };
+    return sampling.model_candidates(model, spacing).map(fn(p) => ghost_surface(field, model, job, p));
+}
+
 fn inside_projection_area(area: terrain.Rect, p: math.Point) -> Bool {
     return p.x > area.x0 && p.x < area.x1 && p.z > area.z0 && p.z < area.z1;
 }

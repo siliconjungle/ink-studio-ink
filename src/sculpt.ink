@@ -6,6 +6,7 @@ import "terrain.ink" as terrain;
 
 record Box { half: math.Point, rounding: f64, }
 record Lathe { height: f64, base: f64, slope: f64, }
+record PowerLathe { height: f64, base: f64, slope: f64, exponent: f64, }
 record Torus { major: f64, minor: f64, }
 
 record Segment {
@@ -16,7 +17,7 @@ record Segment {
     tip: f64,
 }
 
-enum Form { Boxed(Box), Ellipsoid(math.Point), Turned(Lathe), Tube(List<Segment>), Ring(Torus), TurnedFromTip(Lathe), }
+enum Form { Boxed(Box), Ellipsoid(math.Point), Turned(Lathe), Tube(List<Segment>), Ring(Torus), TurnedFromTip(Lathe), TurnedPower(PowerLathe), }
 
 record Model {
     center: math.Point,
@@ -41,6 +42,14 @@ pub fn turned(center: math.Point, frame: Option<math.Matrix>, bound: f64, height
 pub fn turned_from_tip(center: math.Point, frame: Option<math.Matrix>, bound: f64, height: f64, tip: f64, slope: f64) -> Model {
     return Model { center: center, frame: frame, bound: bound,
         form: Form.TurnedFromTip(Lathe { height: height, base: tip, slope: slope }) };
+}
+
+// The exponent is positive. Base and tip give the radii at the two caps.
+pub fn turned_power(center: math.Point, frame: Option<math.Matrix>, height: f64, base: f64, tip: f64, exponent: f64) -> Model {
+    let half = height * 0.5f64;
+    let radius = math.max(base, tip);
+    return Model { center: center, frame: frame, bound: sqrt(radius * radius + half * half),
+        form: Form.TurnedPower(PowerLathe { height: height, base: base, slope: tip - base, exponent: exponent }) };
 }
 
 pub fn tube(center: math.Point, bound: f64, segments: List<Segment>) -> Model {
@@ -85,13 +94,55 @@ fn lathe_radius(profile: Lathe, t: f64, from_tip: Bool) -> f64 {
     return profile.base + profile.slope * (if from_tip { 1.0f64 - t } else { t });
 }
 
-fn turned_distance(profile: Lathe, p: math.Point, from_tip: Bool) -> f64 {
-    let radius = lathe_radius(profile, math.sat(p.y / profile.height + 0.5f64), from_tip);
+fn power_bits(exponent: f64) -> f64 {
+    let word = u64_from_f64(exponent + 1023.0f64).fold(fn(bits) => bits, fn(unit) => 0);
+    return f64_from_bits(wrapping_shl(word, 52));
+}
+
+fn unit_power(t: f64, exponent: f64) -> f64 {
+    if t <= 0.0f64 || t >= 1.0f64 { return t; }
+    let scaled = if t < 2.2250738585072014e-308f64 { t * 4503599627370496.0f64 } else { t };
+    let bits = f64_bits(scaled);
+    let e = f64_from_u64(wrapping_shr(bits, 52)) - (if scaled == t { 1023.0f64 } else { 1075.0f64 });
+    let mantissa = f64_from_bits((bits & 4503599627370495) | 4607182418800017408);
+    // Reduce the logarithm to a series with |z| <= tanh(log(2)/4).
+    let halve = mantissa > 1.4142135623730951f64;
+    let m = if halve { mantissa * 0.5f64 } else { mantissa };
+    let k = if halve { e + 1.0f64 } else { e };
+    let z = (m - 1.0f64) / (m + 1.0f64);
+    let z2 = z * z;
+    let tail = repeat(10, 0.0f64, fn(i) => fn(sum) => 1.0f64 / f64_from_u32(21 - 2 * i) + z2 * sum);
+    let ln2 = 0.6931471805599453f64;
+    let log = 2.0f64 * z * (1.0f64 + z2 * tail) + k * ln2;
+    let y = exponent * log;
+    if y < -745.1332191019412f64 { return 0.0f64; }
+    let shift = floor(y / ln2 + 0.5f64);
+    let reduced = (y - shift * 0.6931471803691238f64) - shift * 1.9082149292705877e-10f64;
+    let series = repeat(14, 1.0f64, fn(i) => fn(sum) => 1.0f64 + reduced * sum / f64_from_u32(14 - i));
+    let normal_shift = math.max(-1022.0f64, shift);
+    return power_bits(normal_shift) * (series * power_bits(shift - normal_shift));
+}
+
+fn power_radius(profile: PowerLathe, t: f64) -> f64 {
+    return profile.base + profile.slope * unit_power(t, profile.exponent);
+}
+
+fn lathe_distance(height: f64, radius: f64, p: math.Point) -> f64 {
     let dr = (sqrt(p.x * p.x + p.z * p.z) - radius) * 0.8f64;
-    let dy = abs(p.y) - profile.height * 0.5f64;
+    let dy = abs(p.y) - height * 0.5f64;
     let outside_r = math.max(dr, 0.0f64);
     let outside_y = math.max(dy, 0.0f64);
     return math.min(math.max(dr, dy), 0.0f64) + sqrt(outside_r * outside_r + outside_y * outside_y);
+}
+
+fn turned_distance(profile: Lathe, p: math.Point, from_tip: Bool) -> f64 {
+    let radius = lathe_radius(profile, math.sat(p.y / profile.height + 0.5f64), from_tip);
+    return lathe_distance(profile.height, radius, p);
+}
+
+fn power_distance(profile: PowerLathe, p: math.Point) -> f64 {
+    let radius = power_radius(profile, math.sat(p.y / profile.height + 0.5f64));
+    return lathe_distance(profile.height, radius, p);
 }
 
 fn tube_distance(segments: List<Segment>, p: math.Point) -> f64 {
@@ -126,6 +177,7 @@ pub fn solid_distance(model: Model, p: math.Point) -> f64 {
         Form.Ellipsoid(radii) => ellipsoid_distance(radii, local_point(model, p)),
         Form.Turned(profile) => turned_distance(profile, local_point(model, p), false),
         Form.TurnedFromTip(profile) => turned_distance(profile, local_point(model, p), true),
+        Form.TurnedPower(profile) => power_distance(profile, local_point(model, p)),
         Form.Tube(segments) => tube_distance(segments, p),
         Form.Ring(ring) => torus_distance(ring, local_point(model, p)),
     };

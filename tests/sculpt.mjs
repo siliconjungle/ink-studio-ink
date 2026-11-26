@@ -37,6 +37,13 @@ shape('solid_distance', [ball, point(0, 2, 0)], 0);
 shape('solid_distance', [ball, origin], -1);
 const turned = shape('turned', [origin, none, Math.sqrt(5), 2, 2, -1]);
 shape('solid_distance', [turned, point(1.5, 0, 0)], 0);
+for (const exponent of [0.35, 1, 1.3, 4]) {
+  const profile = shape('turned_power', [origin, none, 2, 2, 1, exponent]);
+  for (const y of [-0.9999999999, -0.75, 0, 0.8, 0.9999999999]) {
+    const radius = 2 - Math.pow(y / 2 + 0.5, exponent);
+    assert(Math.abs(shape('solid_distance', [profile, point(radius, y, 0)]) < 1e-14));
+  }
+}
 const tube = shape('tube', [origin, 4, [
   { start: point(0, -1, 0), delta: point(0, 2, 0), length_squared: 4, base: 1.5, tip: 0.5 },
 ]]);
