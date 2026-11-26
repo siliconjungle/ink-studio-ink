@@ -44,6 +44,12 @@ for (const exponent of [0.35, 1, 1.3, 4]) {
     assert(Math.abs(shape('solid_distance', [profile, point(radius, y, 0)]) < 1e-14));
   }
 }
+const ripple = { height: 1.5, base: 0.5, taper: 0.5, amplitude: 0.1, frequency: 9 };
+const rippleModel = shape('turned_ripple', [origin, none, 1, ripple]);
+for (const t of [0.1, 0.3, 0.5, 0.7, 0.9]) {
+  const radius = ripple.base * (1 - ripple.taper * t) * (1 + ripple.amplitude * Math.sin(ripple.frequency * t));
+  assert(Math.abs(shape('solid_distance', [rippleModel, point(radius, (t - 0.5) * ripple.height, 0)]) < 1e-14));
+}
 const tube = shape('tube', [origin, 4, [
   { start: point(0, -1, 0), delta: point(0, 2, 0), length_squared: 4, base: 1.5, tip: 0.5 },
 ]]);

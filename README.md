@@ -42,6 +42,8 @@ The same module reflects a world-space splat across a horizontal water plane, in
 
 `src/rig_bake.ink` bakes a character's rest sculpt into the renderer's bind splats. It projects the blended and carved forms, then uses each visible surface's joint tags to bind the splat. Tags can blend two joints by height or mark a splat as a blinking eye. The bake preserves palette ramps, ambient occlusion, and seeded shade variation. Power-law lathe profiles support curved forms such as Hex's robe.
 
+Lathe profiles can also ripple as they taper. The same profile drives the signed-distance field and ring sampling, as used by the sculpted figures around Rebirth's Green Flame.
+
 ## Build and check
 
 Use [Ink Lang commit `b3170c4`](https://github.com/siliconjungle/ink-lang/commit/b3170c4f1af17c23e1f15b380be7018e1663f6a7) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build uses Node.js to request checked Rust borrows for the bake's immutable geometry inputs. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
