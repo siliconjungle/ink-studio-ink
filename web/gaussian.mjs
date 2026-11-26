@@ -3,6 +3,8 @@ import { createContourRaster } from './gaussian-contours.mjs';
 
 const shaderURL = new URL('../shaders/gaussian.wgsl', import.meta.url);
 const bundleURL = new URL('../build/gpu/', import.meta.url);
+const contourLightOff = { enabled: false, direction: [0, 1, 0], actor_center: [0, 0, 0], actor_rows: 0,
+  ambient: [1, 1, 1], key: [0, 0, 0] };
 
 function assertEllipseLayout(view, contours) {
   const fields = view.type?.element?.fields;
@@ -52,6 +54,12 @@ export async function createGaussianRenderer(device, format, { width, height, sp
     projection.input.actors = [];
     steps[0] = { id: 'ellipses', call: 'project_contour_scene',
       args: [{ input: 'splats' }, { input: 'actors' }, { input: 'camera' }] };
+  }
+  const directional = contours?.directional === true;
+  if (directional) {
+    projection.input.contourLight = contourLightOff;
+    steps.at(-1).call = 'project_lit_contour_scene';
+    steps.at(-1).args.push({ input: 'contourLight' });
   }
   const ink = await loadInk(bundleURL, { device });
   let session;
@@ -115,6 +123,12 @@ export async function createGaussianRenderer(device, format, { width, height, sp
       setContourGrade(grade) {
         if (!contourRaster) throw new Error('A contour grade requires Colored Contours');
         contourRaster.setGrade(grade);
+      },
+      async stageContourLighting(light) {
+        if (!directional) throw new Error('Enable directional Colored Contours first');
+        const frame = light ?? contourLightOff;
+        await session.write('contourLight', frame);
+        contourRaster.setLighting(frame);
       },
       async updateSkinCamera(value, { bones, light }) {
         if (!hasSkin) throw new Error('Skin updates require a skinned world view');

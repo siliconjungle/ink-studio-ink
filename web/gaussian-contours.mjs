@@ -1,6 +1,7 @@
 const shaderUrl = new URL('../shaders/gaussian-contours.wgsl', import.meta.url);
 const maxColors = 64;
 const gradeWord = 8 + maxColors * 4;
+const lightingWord = gradeWord + maxColors * 4;
 const over = { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' };
 
 export async function createContourRaster(device, format, width, height, {
@@ -42,7 +43,7 @@ export async function createContourRaster(device, format, width, height, {
       vertex: { module, entryPoint: 'vertex' }, fragment: { module, entryPoint: 'fragment', targets: [{ format }] },
     }),
   ]);
-  const words = new Float32Array(8 + maxColors * 8);
+  const words = new Float32Array(lightingWord + 8);
   words.set([count, dither, occlusion, occlusionReach, depthNear, depthSpan, Number(hard)]);
   for (let i = 0; i < count; i++) {
     const rgb = [16, 8, 0].map(shift => (colors[i] >>> shift & 255) / 255);
@@ -87,6 +88,10 @@ export async function createContourRaster(device, format, width, height, {
         for (let i = 0; i < count; i++) mapped.set(channels.slice(i * 3, i * 3 + 3), i * 4);
       }
       device.queue.writeBuffer(palette, gradeWord * 4, mapped);
+    },
+    setLighting({ ambient, key, enabled }) {
+      device.queue.writeBuffer(palette, lightingWord * 4,
+        new Float32Array([...ambient, Number(enabled), ...key, 0]));
     },
     bind(buffer, viewport) {
       return device.createBindGroup({ layout: rasterResources, entries: [

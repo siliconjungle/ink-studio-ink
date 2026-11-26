@@ -73,6 +73,19 @@ assert.deepEqual(visible.map(row => row.rgb), [scenery.rgb, world.rgb, skinned[0
 assert.deepEqual(call('project_sorted_scene', [[], [], camera]), []);
 const hiddenScene = [[{ ...world, alpha: 0 }], [{ ...world, position: [100, 0, -4] }], camera];
 assert.deepEqual(call('project_sorted_scene', hiddenScene), []);
+const lamp = { enabled: true, direction: [1, 0, 0], actor_center: [0, 0, -4], actor_rows: 2,
+  ambient: [1, 1, 1], key: [0.25, 0.25, 0.25] };
+const disc = { ...world, covariance0: [1, 0, 0], covariance1: [1, 0, 1], alpha: 1 };
+const actorDabs = [disc, { ...disc, position: [-1, 0, -4] }];
+const litArgs = [[{ ...disc, position: [0, 0, -5], alpha: 0.5 }], actorDabs, camera, lamp];
+const lit = call('project_lit_contour_scene', litArgs);
+const fromLeft = [...litArgs.slice(0, 3), { ...lamp, direction: [-1, 0, 0] }];
+const left = call('project_lit_contour_scene', fromLeft);
+assert.deepEqual(lit.map(row => row.rgb >>> 24), [0, 255, 1]);
+assert.deepEqual(left.map(row => row.rgb >>> 24), [0, 1, 255]);
+const unlit = [...litArgs.slice(0, 3), { ...lamp, enabled: false }];
+assert.deepEqual(lit.map(row => ({ ...row, rgb: row.rgb & 0xffffff })), call('project_contour_scene', litArgs.slice(0, 3)));
+assert.deepEqual(call('project_lit_contour_scene', unlit), call('project_contour_scene', litArgs.slice(0, 3)));
 const sourceRow = [1, 2, 3, 0.5, 4, 5, 6, 0xf08010, 7, 8, 9, 128, 11, 12, 13, 14];
 const imported = [{ position: [1, 2, 3], covariance0: [4, 5, 6], covariance1: [7, 8, 9],
   reach: 3, rgb: 0xf08010, alpha: 0.5 }];
@@ -107,6 +120,9 @@ try {
     { pure: 'skin_world', args: skinArgs, expected: skinned },
     { pure: 'project_sorted_scene', args: sceneArgs, expected: visible },
     { pure: 'project_sorted_scene', args: hiddenScene, expected: [] },
+    { pure: 'project_lit_contour_scene', args: litArgs, expected: lit },
+    { pure: 'project_lit_contour_scene', args: fromLeft, expected: left },
+    { pure: 'project_lit_contour_scene', args: unlit, expected: call('project_contour_scene', litArgs.slice(0, 3)) },
     { pure: 'import_builder_splats', args: [sourceRow], expected: imported, cpuOnly: true },
   ];
   writeFileSync(requestsPath, JSON.stringify(tests.map(({ pure, args }) => ({ pure, args }))));

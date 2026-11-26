@@ -3,6 +3,8 @@ struct Palette {
   depth_range: vec4f,
   colors: array<vec4f,64>,
   mapped: array<vec4f,64>,
+  light_ambient: vec4f,
+  light_key: vec4f,
 }
 @group(0) @binding(0) var high: texture_2d<f32>;
 @group(0) @binding(1) var depth: texture_2d<f32>;
@@ -33,6 +35,14 @@ fn pixelDepth(p: vec2i) -> f32 {
   }
   return result;
 }
+
+fn light_color(color: vec3f, signal: vec2f) -> vec3f {
+  if signal.y <= 0.0 { return color; }
+  let shade = clamp(signal.x / signal.y, 0.0, 1.0);
+  let illumination = pal.light_ambient.xyz + pal.light_key.xyz * shade;
+  return clamp(color * mix(vec3f(1), illumination, signal.y), vec3f(0), vec3f(1));
+}
+
 @vertex fn vertex(@builtin(vertex_index) id: u32) -> @builtin(position) vec4f {
   let corner = vec2f(f32((id << 1u) & 2u),f32(id & 2u));
   return vec4f(corner*2.0-1.0,0.0,1.0);
@@ -58,7 +68,16 @@ fn pixelDepth(p: vec2i) -> f32 {
       for (var j = 0; j < 4; j++) { if (labels[i] == labels[j]) { count++; } }
       if (count > score) { best = labels[i]; score = count; }
     }
-    let body = pal.mapped[best].xyz;
+    var body = pal.mapped[best].xyz;
+    if pal.light_ambient.w > .5 {
+      var signal = vec2f(0);
+      for (var i = 0; i < 4; i++) {
+        if labels[i] == best {
+          signal += textureLoad(depth,pixelAt(p*2+vec2i(i&1,1-(i>>1))),0).gb;
+        }
+      }
+      body = light_color(body, signal / f32(score));
+    }
     let raw = body * .64;
     let ink = min(vec3f(1),raw * max(1.0,.12 / max(dot(raw,weights),.001)));
     return vec4f(mix(pal.mapped[0].xyz,mix(body,ink,.65),f32(countOneBits(mask))*.25),1);
@@ -80,7 +99,11 @@ fn pixelDepth(p: vec2i) -> f32 {
     color *= 1.0-pal.settings.z*min(1.0,occlusion/4.0);
   }
   let pColor = clamp(color + noise,vec3f(0),vec3f(1));
-  return vec4f(pal.mapped[nearest(pColor,false)].xyz,1);
+  let body = pal.mapped[nearest(pColor,false)].xyz;
+  if pal.light_ambient.w > .5 {
+    return vec4f(light_color(body, textureLoad(nativeDepth,p,0).gb),1);
+  }
+  return vec4f(body,1);
 }
 
 // One sorted 13-word row drives both color and depth grids. Projected positions
@@ -93,6 +116,7 @@ struct RasterVertex {
     @location(0) local: vec2f,
     @location(1) @interpolate(flat) color: vec4f,
     @location(2) @interpolate(flat) depth: f32,
+    @location(3) @interpolate(flat) light: vec2f,
 }
 
 fn pair(base: u32) -> vec2f {
@@ -101,7 +125,7 @@ fn pair(base: u32) -> vec2f {
 
 fn raster_vertex(corner: u32, index: u32, native: bool) -> RasterVertex {
     if index >= ellipses[0] {
-        return RasterVertex(vec4f(2.0, 2.0, 0.0, 1.0), vec2f(0.0), vec4f(0.0), 1.0);
+        return RasterVertex(vec4f(2.0, 2.0, 0.0, 1.0), vec2f(0.0), vec4f(0.0), 1.0, vec2f(0.0));
     }
     let row = 1u + index * 13u;
     let local = vec2f(f32(corner & 1u), f32(corner >> 1u)) * 2.0 - 1.0;
@@ -109,9 +133,13 @@ fn raster_vertex(corner: u32, index: u32, native: bool) -> RasterVertex {
     let origin = select(center, floor(center + half_viewport) + 0.5 - half_viewport, native);
     let axes = row + select(6u, 2u, native);
     let point = origin + local.x * pair(axes) + local.y * pair(axes + 2u);
-    let color = vec4f(unpack4x8unorm(ellipses[row + 10u]).rgb, bitcast<f32>(ellipses[row + 11u]));
+    let packed = ellipses[row + 10u];
+    let color = vec4f(unpack4x8unorm(packed).rgb, bitcast<f32>(ellipses[row + 11u]));
+    let light_code = packed >> 24u;
+    let enabled = pal.light_ambient.w > .5 && light_code > 0u;
+    let light = select(vec2f(0), vec2f(f32(max(light_code,1u) - 1u) / 254.0, 1.0), enabled);
     let depth = (bitcast<f32>(ellipses[row + 12u]) - pal.depth_range.x) / pal.depth_range.y;
-    return RasterVertex(vec4f(point / half_viewport, 0.0, 1.0), local, color, clamp(depth, 0.0, 1.0));
+    return RasterVertex(vec4f(point / half_viewport, 0.0, 1.0), local, color, clamp(depth, 0.0, 1.0), light);
 }
 
 struct RasterPixel {
@@ -132,7 +160,7 @@ fn raster_fragment(input: RasterVertex, hard: bool) -> RasterPixel {
     if alpha < 0.004 { discard; }
     let depth_alpha = select(0.0, alpha, solid);
     return RasterPixel(vec4f(input.color.rgb * alpha, alpha),
-        vec4f(input.depth * depth_alpha, 0.0, 0.0, depth_alpha));
+        vec4f(input.depth * depth_alpha, input.light * depth_alpha, depth_alpha));
 }
 
 @vertex fn native_vertex(@builtin(vertex_index) corner: u32, @builtin(instance_index) index: u32) -> RasterVertex {

@@ -96,6 +96,29 @@ fn computes_and_draws_from_the_same_device_buffer() {
     assert!(contour.set_contour_grade(Some(&[[0.0, 0.0, 1.0]])).is_err());
     contour.set_contour_grade(None).unwrap();
     assert_eq!(draw_fixture(&device, &queue, &texture, &readback, &contour), data);
+
+    let mut directional = GaussianRenderer::with_directional_contours(&device, &queue, format, [64, 64], &solid,
+        &camera, WorldOrder::Sort, ContourSettings {
+            colors: &[0x101820, 0xff0000], grade: None, dither: 0.0, occlusion: 0.0,
+            occlusion_reach: 1.0, depth_near: 0.0, depth_span: 10.0, hard: true,
+        }).unwrap();
+    let mut light = json!({ "enabled": true, "direction": [0,1,0], "actor_center": [0,0,0], "actor_rows": 0,
+        "ambient": [0.25,0.25,0.25], "key": [0.75,0.75,0.75] });
+    directional.stage_contour_lighting(Some(&light)).unwrap();
+    directional.project(&device).unwrap();
+    let lit = draw_fixture(&device, &queue, &texture, &readback, &directional);
+    light["direction"] = json!([0,-1,0]);
+    directional.stage_contour_lighting(Some(&light)).unwrap();
+    directional.project(&device).unwrap();
+    let shade = draw_fixture(&device, &queue, &texture, &readback, &directional);
+    let center = 31 * 256 + 32 * 4;
+    assert!(lit[center] >= 240 && shade[center] <= 80);
+    assert_eq!(&lit[..4], &shade[..4]);
+    assert!(lit.chunks_exact(4).zip(shade.chunks_exact(4))
+        .any(|(light, dark)| light[0] > dark[0] && dark[0] > shade[0] && light[0] < lit[center]));
+    directional.stage_contour_lighting(None).unwrap();
+    directional.project(&device).unwrap();
+    assert_eq!(draw_fixture(&device, &queue, &texture, &readback, &directional), data);
 }
 
 fn draw_fixture(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture,

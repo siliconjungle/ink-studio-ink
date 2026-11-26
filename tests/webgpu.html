@@ -104,6 +104,32 @@
     const restoredGrade = await contourPixels(null);
     if (restoredGrade.some((value, i) => value !== originalGrade[i])) throw new Error('Contour grade did not restore');
     await contour.close();
+    const directional = await createGaussianRenderer(device, format, { width: 64, height: 64, camera,
+      splats: [{ ...near, position: [0.25, 0.25, -2], covariance0: [4, 0, 0], covariance1: [4, 0, 0], alpha: 1 }],
+      contours: { colors: [0x101820, 0xff0000], depthSpan: 10, dither: 0, directional: true } });
+    async function directionalPixels(light) {
+      await directional.stageContourLighting(light);
+      await directional.project();
+      const target = context.getCurrentTexture();
+      const commands = device.createCommandEncoder();
+      directional.draw(commands, target.createView());
+      commands.copyTextureToBuffer({ texture: target }, { buffer: readback, bytesPerRow: 256 }, [64, 64]);
+      device.queue.submit([commands.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const result = new Uint8Array(readback.getMappedRange()).slice();
+      readback.unmap();
+      return result;
+    }
+    const lightFrame = { enabled: true, direction: [0, 1, 0], actor_center: [0, 0, 0], actor_rows: 0,
+      ambient: [0.25, 0.25, 0.25], key: [0.75, 0.75, 0.75] };
+    const lit = await directionalPixels(lightFrame);
+    const shade = await directionalPixels({ ...lightFrame, direction: [0, -1, 0] });
+    const disabled = await directionalPixels(null);
+    const center = 31 * 256 + 32 * 4 + red;
+    if (lit[center] < 240 || shade[center] > 80 || lit[red] !== shade[red] ||
+        !lit.some((channel, i) => i % 4 === red && i !== center && channel > shade[i] && shade[i] > shade[red]) ||
+        disabled.some((channel, i) => channel !== originalGrade[i])) throw new Error('Directional contours did not light both grids or restore the grade');
+    await directional.close();
     readback.destroy();
     const bone = { axis_x: [1, 0, 0], axis_y: [0, 1, 0], axis_z: [0, 0, 1], offset: [0, 0, 0] };
     const light = { sun: [0, 1, 0], ambient: 1, diffuse: 0, blink: 1 };

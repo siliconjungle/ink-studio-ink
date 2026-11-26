@@ -18,6 +18,7 @@ pub struct ContourSettings<'a> {
 const INTERMEDIATE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const MAX_COLORS: usize = 64;
 const GRADE_WORD: usize = 8 + MAX_COLORS * 4;
+const LIGHTING_WORD: usize = GRADE_WORD + MAX_COLORS * 4;
 
 pub(crate) struct ContourRaster {
     pub layout: wgpu::BindGroupLayout,
@@ -153,7 +154,7 @@ impl ContourRaster {
                 include_str!("../../shaders/gaussian-contours.wgsl").into(),
             ),
         });
-        let mut words = [0.0f32; 8 + MAX_COLORS * 8];
+        let mut words = [0.0f32; LIGHTING_WORD + 8];
         words[..8].copy_from_slice(&[
             count as f32,
             settings.dither,
@@ -290,6 +291,12 @@ impl ContourRaster {
             .collect();
         self.queue.write_buffer(&self.palette, (GRADE_WORD * 4) as u64, &bytes);
         Ok(())
+    }
+
+    pub fn set_lighting(&self, ambient: [f32; 3], key: [f32; 3], enabled: bool) {
+        let bytes: Vec<u8> = [ambient[0], ambient[1], ambient[2], f32::from(enabled), key[0], key[1], key[2], 0.0]
+            .into_iter().flat_map(f32::to_le_bytes).collect();
+        self.queue.write_buffer(&self.palette, (LIGHTING_WORD * 4) as u64, &bytes);
     }
 
     pub fn draw(

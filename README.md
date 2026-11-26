@@ -6,6 +6,8 @@ This repository ports Ink Studio's Gaussian splat toolkit to [Ink Lang](https://
 
 Colored Contours is available for sorted world and skinned views. One Ink projection and depth sort supplies the native grid and a double-resolution grid. The native grid snaps splats to pixel centers. Solid coverage on the finer grid determines the silhouette, and the shared WGSL resolve applies the palette and ordered dither. Use Rust's `with_contours` or the browser renderer's `contours` option. Each palette uses packed `0xRRGGBB` colors and begins with its background. Rust's `set_contour_grade` and JavaScript's `setContourGrade` update the displayed colors of resident geometry.
 
+Use `with_directional_contours` in Rust or `directional: true` in the browser contour options to pass ambient and directional light to the same renderer. Ink projects the visible splats, estimates normals from their covariance, and keeps each base pigment for the contour palette vote. Stage a light with `stage_contour_lighting` or `stageContourLighting` before the next projection. The existing color and depth passes carry the light to the image without restaging geometry.
+
 Both hosts can stage changes to disjoint row ranges and project them on the next camera update or explicit `project` call. The `wide-green` scene uses this path to retain the original field cells as the view moves. `import_builder_splats` reads position, covariance, pigment and opacity from the Studio builder’s sixteen-float rows. Native clients can present an art-resolution texture with `PixelPresenter`, which uses centered nearest-neighbor scaling and supports sRGB surfaces.
 
 A world view can reserve its final splat range for one moving actor. Ink applies the actor's yaw and translation to the centers and rotates their covariances on the GPU. Actor and scene rows share the same stable depth sort. Moving the actor updates its placement without replacing its pose rows. Rust exposes the mode through `WorldOrder::Actor` and `update_actor_camera`, and JavaScript accepts `actor` when creating the renderer and updating its camera.
@@ -58,7 +60,7 @@ Lathe profiles can ripple as they taper, including the phase-shifted power profi
 
 ## Build and check
 
-Use [Ink Lang commit `765c615`](https://github.com/siliconjungle/ink-lang/commit/765c61589e1f418c7c1a2229df79257792fd59cc) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for the bake's immutable geometry inputs, including optional geometry. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
+Use [Ink Lang commit `3bda1fd`](https://github.com/siliconjungle/ink-lang/commit/3bda1fd29881a89de2482252f330b182da03bd13) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for the bake's immutable geometry inputs, including optional geometry. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
 
 ```sh
 ./scripts/build.sh --gpu

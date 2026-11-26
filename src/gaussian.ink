@@ -408,10 +408,75 @@ fn visible_contours(splats: List<WorldGaussian>, camera: Camera) -> List<Contour
     return splats.map(fn(splat) => contour_ellipse(splat, camera)).filter(fn(row) => row.alpha > 0.0);
 }
 
-// Both grids consume the same resident order, including the order of tied splats.
-pub fn project_contour_scene(terrain: List<WorldGaussian>, actors: List<WorldGaussian>, camera: Camera) -> List<ContourEllipse> {
-    let visible = visible_contours(terrain, camera).concat(visible_contours(actors, camera));
+fn sort_contours(visible: List<ContourEllipse>) -> List<ContourEllipse> {
     let keys = visible.map_indexed(fn(index) => fn(row) => indexed_depth(rank_depth(row.depth), index)).sort();
     let fallback = hidden_contour();
     return keys.map(fn(key) => visible.at_or(word_narrow_u64_to_u32(key), fallback));
+}
+
+// Both grids consume the same resident order, including the order of tied splats.
+pub fn project_contour_scene(terrain: List<WorldGaussian>, actors: List<WorldGaussian>, camera: Camera) -> List<ContourEllipse> {
+    return sort_contours(visible_contours(terrain, camera).concat(visible_contours(actors, camera)));
+}
+
+record ContourLight {
+    enabled: Bool,
+    direction: Vec3<f32>,
+    actor_center: Vec3<f32>,
+    actor_rows: u32,
+    ambient: Vec3<f32>,
+    key: Vec3<f32>,
+}
+
+fn near_unit(vector: Vec3<f32>, floor: f32, default: Vec3<f32>) -> Vec3<f32> {
+    let length = sqrt(dot3(vector, vector));
+    if length <= floor { return default; }
+    return vec3(vector.x / length, vector.y / length, vector.z / length);
+}
+
+fn dab_normal(splat: WorldGaussian, toward: Vec3<f32>) -> Vec3<f32> {
+    let hint = near_unit(toward, 1e-6, vec3(0.0, 1.0, 0.0));
+    let a = splat.covariance0;
+    let b = splat.covariance1;
+    // Four power iterations of trace(C)I - C select the thinnest axis.
+    // Divide out the trace so very small or large dabs stay finite.
+    let trace = a.x + b.x + b.z;
+    if !(trace > 0.0) { return hint; }
+    let first = vec3(1.0 - a.x / trace, -a.y / trace, -a.z / trace);
+    let rest = vec3(1.0 - b.x / trace, -b.y / trace, 1.0 - b.z / trace);
+    let x = covariance_product(first, rest, hint);
+    let y = covariance_product(first, rest, x);
+    let z = covariance_product(first, rest, y);
+    return near_unit(covariance_product(first, rest, z), 1e-12, hint);
+}
+
+fn light_step(low: f32, high: f32, value: f32) -> f32 {
+    let t = (value - low) / (high - low);
+    let s = if t < 0.0 { 0.0 } else { if t > 1.0 { 1.0 } else { t } };
+    return s * s * (3.0 - 2.0 * s);
+}
+
+fn directional_contour(splat: WorldGaussian, camera: Camera, light: ContourLight, actor: Bool) -> ContourEllipse {
+    let row = contour_ellipse(splat, camera);
+    if !light.enabled || row.alpha == 0.0 || splat.alpha < 1.0 { return row; }
+    let p = splat.position;
+    let center = light.actor_center;
+    let toward = if actor { vec3(p.x - center.x, p.y - center.y + 0.015, p.z - center.z) } else { vec3(0.035, 1.0, 0.025) };
+    let facing = dot3(dab_normal(splat, toward), light.direction);
+    let shade = 0.46 * light_step(0.15, 0.33, facing) + 0.54 * light_step(0.55, 0.74, facing);
+    // At 2^23 the binary32 spacing is one, so the low bits hold the rounded value.
+    let code = word_and(f32_bits(8388608.0 + shade * 254.0), 255) + 1;
+    return ContourEllipse { center: row.center, axis_x: row.axis_x, axis_y: row.axis_y,
+        high_axis_x: row.high_axis_x, high_axis_y: row.high_axis_y, alpha: row.alpha, depth: row.depth,
+        rgb: word_and(row.rgb, 16777215) + code * 16777216 };
+}
+
+// The upper color byte carries lighting strength while the pigment remains
+// available to the contour palette matcher and edge votes.
+pub fn project_lit_contour_scene(terrain: List<WorldGaussian>, actors: List<WorldGaussian>,
+    camera: Camera, light: ContourLight) -> List<ContourEllipse> {
+    let ground = terrain.map(fn(splat) => directional_contour(splat, camera, light, false)).filter(fn(row) => row.alpha > 0.0);
+    let posing = actors.map_indexed(fn(i) => fn(splat) =>
+        directional_contour(splat, camera, light, i < light.actor_rows)).filter(fn(row) => row.alpha > 0.0);
+    return sort_contours(ground.concat(posing));
 }
