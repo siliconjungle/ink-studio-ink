@@ -61,6 +61,34 @@ testCall('wall_step', [contact.wall, zero, zero, false, 0, false, 0.2], {
 });
 testCall('wall_impulse', [back, 8.5], { x: 0, y: 8.5 * 0.97, z: -7.6 });
 
+const dt = 1 / 60;
+const emptyLedge = { top: 0, time: 0, grabbed: false };
+const noLedge = { None: null };
+const ledge = y => ({ Some: y });
+testCall('ledge_idle', [], emptyLedge);
+testCall('ledge_candidate', [0, 0.75, 0, 1e9], true);
+testCall('ledge_candidate', [0, 0.75, 0, 0], false);
+testCall('ledge_candidate', [0, 0.75, 0.7, 1e9], false);
+testCall('ledge_candidate', [0, 1e9, 0, 1e9], false);
+testCall('ledge_step', [emptyLedge, ledge(0.95), 0, 0, true, true, dt], {
+  ledge: emptyLedge, y: 0, vy: 0, climbing: false,
+});
+const grabbed = testCall('ledge_step', [emptyLedge, ledge(0.75), 0, 0, true, true, dt], {
+  ledge: { top: 0.75, time: 0.25 - dt, grabbed: true }, y: 3.6 * dt, vy: 0, climbing: true,
+});
+testCall('ledge_step', [grabbed.ledge, ledge(1.3), 0.3, 0, false, true, dt], {
+  ledge: { ...grabbed.ledge, time: 0.25 - dt - dt }, y: 0.3 + 3.6 * dt, vy: 0, climbing: true,
+});
+const expired = testCall('ledge_step', [grabbed.ledge, noLedge, 0.79, 0, false, false, 0.24], {
+  ledge: { ...grabbed.ledge, time: 0 }, y: 0.75 + 0.05, vy: 0, climbing: true,
+});
+testCall('ledge_step', [expired.ledge, ledge(1.56), 0.8, -1, false, true, dt], {
+  ledge: expired.ledge, y: 0.8, vy: -1, climbing: false,
+});
+testCall('ledge_step', [emptyLedge, ledge(1.2), 0.8, -1, false, true, dt], {
+  ledge: emptyLedge, y: 1.2 + 0.02, vy: 0, climbing: false,
+});
+
 const directory = mkdtempSync(join(tmpdir(), 'ink-locomotion-'));
 try {
   const input = join(directory, 'requests.json');
