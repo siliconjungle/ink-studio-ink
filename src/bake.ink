@@ -35,6 +35,11 @@ pub fn prepare_bake(models: List<sculpt.Model>, scene: sculpt.SceneSpec, seed: u
     return Field { scene: sculpt.prepare_scene(models, scene), tables: noise.make_noise(seed ^ 2654435769), ground: ground };
 }
 
+fn prepare_indexed_bake(models: List<sculpt.Model>, scene: sculpt.SceneSpec, seed: u32, ground: Option<terrain.HeightGrid>) -> Field {
+    return Field { scene: sculpt.index_bake(sculpt.prepare_scene(models, scene)),
+        tables: noise.make_noise(seed ^ 2654435769), ground: ground };
+}
+
 pub fn surface_hit(field: Field, point: math.Point) -> sculpt.SurfaceHit {
     let distance = field.ground.fold(fn(grid) => terrain.terrain_sdf(grid, point.x, point.y, point.z), fn(unit) => 1e9f64);
     return sculpt.scene_hit(field.scene, field.tables, point, distance);
@@ -65,11 +70,13 @@ fn gradient(field: Field, point: math.Point, d: f64, step: f64) -> Gradient {
 }
 
 record Probe { point: math.Point, distance: f64, }
+record Projection { point: math.Point, hit: sculpt.SurfaceHit, }
 
-fn advance(field: Field, p: Probe, step: f64) -> Probe {
-    let g = gradient(field, p.point, p.distance, step);
-    let point = math.sub(p.point, math.scale(g.direction, p.distance / g.slope));
-    return Probe { point: point, distance: distance(field, point) };
+fn advance(field: Field, p: Projection, step: f64) -> Projection {
+    let d = p.hit.distance;
+    let g = gradient(field, p.point, d, step);
+    let point = math.sub(p.point, math.scale(g.direction, d / g.slope));
+    return Projection { point: point, hit: surface_hit(field, point) };
 }
 
 fn own_distance(model: sculpt.Model, member: sculpt.Member, tables: noise.Noise, point: math.Point) -> f64 {
@@ -110,16 +117,17 @@ fn ambient_occlusion(field: Field, point: math.Point, normal: math.Point, step: 
 }
 
 fn surface(field: Field, start: math.Point, member: sculpt.Member, settings: BakeSettings) -> Option<Surface> {
-    let d = distance(field, start);
+    let start_hit = surface_hit(field, start);
+    let d = start_hit.distance;
     let limit = settings.spacing * 0.7f64 + member.bump;
     if d > limit + settings.reach || d < -(limit + member.blend * 0.4f64 + settings.reach) { return None; }
-    let projected = repeat_until(7, Probe { point: start, distance: d }, fn(p) => absolute(p.distance) <= 0.004f64,
+    let projected = repeat_until(7, Projection { point: start, hit: start_hit }, fn(p) => absolute(p.hit.distance) <= 0.004f64,
         fn(i) => fn(p) => advance(field, p, settings.normal_step));
-    if absolute(projected.distance) > settings.spacing * 0.5f64 { return None; }
+    if absolute(projected.hit.distance) > settings.spacing * 0.5f64 { return None; }
     let point = projected.point;
-    let hit = surface_hit(field, point);
+    let hit = projected.hit;
     if hit.surface == 4294967295 { return None; }
-    let normal = gradient(field, point, projected.distance, settings.normal_step).direction;
+    let normal = gradient(field, point, hit.distance, settings.normal_step).direction;
     let ao = ambient_occlusion(field, point, normal, settings.occlusion_step, settings.occlusion_strength);
     return Some(Surface { position: point, normal: normal, surface: hit.surface, cut: hit.cut,
         occlusion: ao, spacing: settings.spacing });
@@ -249,8 +257,7 @@ fn project_job(field: Field, models: List<sculpt.Model>, area: terrain.Rect, job
 
 pub fn project_cell(models: List<sculpt.Model>, scene: sculpt.SceneSpec, seed: u32, ground: terrain.HeightGrid,
     area: terrain.Rect, jobs: List<ProjectionJob>, lighting: Lighting) -> List<List<LitSurface>> {
-    let field = Field { scene: sculpt.index_bake(sculpt.prepare_scene(models, scene)),
-        tables: noise.make_noise(seed ^ 2654435769), ground: Some(ground) };
+    let field = prepare_indexed_bake(models, scene, seed, Some(ground));
     return jobs.map(fn(job) => project_job(field, models, area, job).map(fn(surface) =>
         LitSurface { surface: surface, visibility: sun_visibility(field, surface, lighting.sun),
             lamps: lighting.lamps.map(fn(lamp) => sample_lamp(field, surface, lamp, lighting.sun.march.steps)) }));

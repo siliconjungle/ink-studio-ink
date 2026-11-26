@@ -26,6 +26,8 @@ Callers that already own the correct far-to-near order can use `WorldOrder::Preo
 
 Rebirth uses this projection and lighting in the visual field export. Its Lupine Steps fixture bakes and renders the same paired arches on both hosts using the portable palette painter with ambient, sky and shadowed sunlight.
 
+`src/edit.ink` turns art-frame coordinates into an orthographic or perspective ray, traces the current sculpt, and adds a spherical cut at the picked surface. The edit history supports undo and redo. Rebaking runs the same projection and shadow pass and returns the updated Gaussian splats. Rebirth's live Lupine Steps view uses this module on both targets.
+
 `src/marks.ink` computes the covariance of round splats, axial discs and sticks, and oriented surface dabs. Rebirth uses the compiled mark geometry during field export, with the original styling pass supplying colors and shading.
 
 ## Build and check
@@ -45,4 +47,4 @@ Open `/tests/webgpu.html` on the local server to check browser dispatch, residen
 
 Open `/bench/camera.html` on the same server to run the camera probe.
 
-The ongoing port includes additional shape recipes, textured materials, additional rig types, idle gaze, animation clips, the remaining art and streaming features, simulation tools, editors, and the CLI.
+The ongoing port includes additional shape recipes, textured materials, additional rig types, idle gaze, animation clips, the remaining art and streaming features, simulation tools, additional editor tools, and the CLI.

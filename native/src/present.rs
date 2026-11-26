@@ -61,17 +61,9 @@ impl PixelPresenter {
         target: &wgpu::TextureView,
         size: [u32; 2],
     ) {
-        if size.contains(&0) {
+        let Some([x, y, width, height]) = self.placement(size) else {
             return;
-        }
-        let [w, h] = size.map(|x| x as f32);
-        let [art_w, art_h] = self.art_size.map(|x| x as f32);
-        let mut scale = (w / art_w).min(h / art_h);
-        if scale >= 1.0 {
-            scale = scale.floor();
-        }
-        let width = (art_w * scale).round().clamp(1.0, w);
-        let height = (art_h * scale).round().clamp(1.0, h);
+        };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
@@ -84,16 +76,41 @@ impl PixelPresenter {
             })],
             ..Default::default()
         });
-        pass.set_viewport(
+        pass.set_viewport(x, y, width, height, 0.0, 1.0);
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.source, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    pub fn art_position(&self, size: [u32; 2], pixel: [f64; 2]) -> Option<[f32; 2]> {
+        let [x, y, w, h] = self.placement(size)?.map(f64::from);
+        let u = (pixel[0] - x) / w;
+        let v = (pixel[1] - y) / h;
+        if (0.0..1.0).contains(&u) && (0.0..1.0).contains(&v) {
+            Some([
+                (u * f64::from(self.art_size[0])) as f32,
+                (v * f64::from(self.art_size[1])) as f32,
+            ])
+        } else {
+            None
+        }
+    }
+
+    fn placement(&self, size: [u32; 2]) -> Option<[f32; 4]> {
+        if size.contains(&0) {
+            return None;
+        }
+        let [w, h] = size.map(|x| x as f32);
+        let [art_w, art_h] = self.art_size.map(|x| x as f32);
+        let scale = (w / art_w).min(h / art_h);
+        let scale = if scale >= 1.0 { scale.floor() } else { scale };
+        let width = (art_w * scale).round().clamp(1.0, w);
+        let height = (art_h * scale).round().clamp(1.0, h);
+        Some([
             ((w - width) * 0.5).floor(),
             ((h - height) * 0.5).floor(),
             width,
             height,
-            0.0,
-            1.0,
-        );
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.source, &[]);
-        pass.draw(0..3, 0..1);
+        ])
     }
 }

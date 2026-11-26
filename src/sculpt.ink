@@ -99,9 +99,15 @@ fn tube_distance(segments: List<Segment>, p: math.Point) -> f64 {
 }
 
 fn segment_distance(segment: Segment, p: math.Point) -> f64 {
-    let delta = math.sub(p, segment.start);
-    let t = math.sat(math.dot(delta, segment.delta) / segment.length_squared);
-    return math.magnitude(math.sub(delta, math.scale(segment.delta, t))) - math.mix(segment.base, segment.tip, t);
+    let dx = p.x - segment.start.x;
+    let dy = p.y - segment.start.y;
+    let dz = p.z - segment.start.z;
+    let axis = segment.delta;
+    let t = math.sat((dx * axis.x + dy * axis.y + dz * axis.z) / segment.length_squared);
+    let x = dx - t * axis.x;
+    let y = dy - t * axis.y;
+    let z = dz - t * axis.z;
+    return sqrt(x * x + y * y + z * z) - math.mix(segment.base, segment.tip, t);
 }
 
 fn torus_distance(ring: Torus, p: math.Point) -> f64 {
@@ -296,20 +302,21 @@ fn scene_column(scene: Scene, x: f64, z: f64) -> Column {
     return Column { positive: positive, negative: scene.negative, grid: grid };
 }
 
-record Owner { id: u32, distance: f64, }
 record Blend {
-    best: Owner,
+    best: f64,
+    owner: u32,
     group: u32,
-    local: Owner,
+    local: f64,
+    local_owner: u32,
     width: f64,
 }
 
-fn nearer(a: Owner, b: Owner) -> Owner { return if b.distance < a.distance { b } else { a }; }
-
 fn push_group(current: Blend, member: Member) -> Blend {
     if current.group == member.group { return current; }
-    return Blend { best: nearer(current.best, current.local), group: member.group,
-        local: Owner { id: 0, distance: 1e9f64 }, width: member.blend };
+    let replace = current.local < current.best;
+    return Blend { best: if replace { current.local } else { current.best },
+        owner: if replace { current.local_owner } else { current.owner }, group: member.group,
+        local: 1e9f64, local_owner: 0, width: member.blend };
 }
 
 fn local_join(a: f64, b: f64, width: f64) -> f64 {
@@ -320,19 +327,21 @@ fn local_join(a: f64, b: f64, width: f64) -> f64 {
 
 fn touches(model: Model, p: math.Point, reach: f64) -> Bool {
     if reach <= 0.0f64 { return false; }
-    let delta = math.sub(p, model.center);
-    return math.dot(delta, delta) <= reach * reach;
+    let x = p.x - model.center.x;
+    let y = p.y - model.center.y;
+    let z = p.z - model.center.z;
+    return x * x + y * y + z * z <= reach * reach;
 }
 
 fn union_one(tables: noise.Noise, point: math.Point, current: Blend, row: Placed) -> Blend {
     let next = push_group(current, row.member);
-    let reach = math.min(next.best.distance, next.local.distance) + next.width + row.geometry.bound;
+    let reach = math.min(next.best, next.local) + next.width + row.geometry.bound;
     if !touches(row.geometry, point, reach) { return next; }
     let d = bumped_distance(row.geometry, row.member, tables, point);
     if is_nan(d) { return next; }
-    let winner = if d < next.local.distance { row.id } else { next.local.id };
-    let surface = Owner { id: winner, distance: local_join(next.local.distance, d, next.width) };
-    return Blend { best: next.best, group: next.group, local: surface, width: next.width };
+    let winner = if d < next.local { row.id } else { next.local_owner };
+    return Blend { best: next.best, owner: next.owner, group: next.group,
+        local: local_join(next.local, d, next.width), local_owner: winner, width: next.width };
 }
 
 // Surface zero is the terrain. Positive and cut IDs are separate lists
@@ -352,13 +361,14 @@ fn union_at(tables: noise.Noise, point: math.Point, bucket: f64, current: Blend,
 
 fn begin_union(ground: f64) -> Blend {
     let ground_id: u32 = if ground < 1e8f64 { 0 } else { 4294967295 };
-    return Blend { best: Owner { id: ground_id, distance: ground },
-        local: Owner { id: ground_id, distance: 1e9f64 }, group: 0, width: 0.0f64 };
+    return Blend { best: ground, owner: ground_id, local: 1e9f64, local_owner: ground_id, group: 0, width: 0.0f64 };
 }
 
 fn finish_union(combined: Blend, negative: List<Placed>, tables: noise.Noise, point: math.Point) -> SurfaceHit {
-    let winner = nearer(combined.best, combined.local);
-    let hit = SurfaceHit { distance: math.min(1.0f64, winner.distance), surface: winner.id, cut: 0 };
+    let use_local = combined.local < combined.best;
+    let d = if use_local { combined.local } else { combined.best };
+    let hit = SurfaceHit { distance: math.min(1.0f64, d),
+        surface: if use_local { combined.local_owner } else { combined.owner }, cut: 0 };
     return foldl(negative, hit, fn(row) => fn(current) => cut_one(tables, point, current, row));
 }
 
