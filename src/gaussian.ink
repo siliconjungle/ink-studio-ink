@@ -21,6 +21,17 @@ record Ellipse {
     alpha: f32,
 }
 
+record ContourEllipse {
+    center: Vec2<f32>,
+    axis_x: Vec2<f32>,
+    axis_y: Vec2<f32>,
+    high_axis_x: Vec2<f32>,
+    high_axis_y: Vec2<f32>,
+    rgb: u32,
+    alpha: f32,
+    depth: f32,
+}
+
 record WorldGaussian {
     position: Vec3<f32>,
     covariance0: Vec3<f32>,
@@ -65,8 +76,12 @@ fn unit_direction(vector: Vec2<f32>) -> Vec2<f32> {
 // The screen-space covariance is symmetric. Its eigensystem supplies the
 // principal axes of the quad, with a fixed orientation for circular splats.
 fn project_one(splat: Gaussian, half_viewport: Vec2<f32>) -> Ellipse {
-    let xx = splat.xx + splat.variance;
-    let yy = splat.yy + splat.variance;
+    return project_variance(splat, half_viewport, splat.variance);
+}
+
+fn project_variance(splat: Gaussian, half_viewport: Vec2<f32>, variance: f32) -> Ellipse {
+    let xx = splat.xx + variance;
+    let yy = splat.yy + variance;
     let xy = splat.xy;
     if !(xx > 0.0 && yy > 0.0 && splat.alpha >= 0.004 && splat.reach > 0.0) {
         return hidden();
@@ -126,15 +141,17 @@ fn covariance_product(first: Vec3<f32>, rest: Vec3<f32>, v: Vec3<f32>) -> Vec3<f
     );
 }
 
-fn project_world_one(splat: WorldGaussian, camera: Camera) -> Ellipse {
-    if !(splat.alpha >= 0.004 && splat.reach > 0.0) { return hidden(); }
-    let position = vec3(splat.position.x - camera.eye.x,
-        splat.position.y - camera.eye.y, splat.position.z - camera.eye.z);
-    let depth = -dot3(camera.back, position);
-    if !(depth >= camera.near_clip && depth <= camera.far_clip && camera.focal > 0.0) {
-        return hidden();
-    }
-    if camera.perspective && !(depth > 0.0) { return hidden(); }
+fn from_eye(center: Vec3<f32>, camera: Camera) -> Vec3<f32> {
+    return vec3(center.x - camera.eye.x, center.y - camera.eye.y, center.z - camera.eye.z);
+}
+
+fn world_visible(splat: WorldGaussian, camera: Camera, depth: f32) -> Bool {
+    return splat.alpha >= 0.004 && splat.reach > 0.0 &&
+        depth >= camera.near_clip && depth <= camera.far_clip && camera.focal > 0.0 &&
+        (!camera.perspective || depth > 0.0);
+}
+
+fn screen_gaussian(splat: WorldGaussian, camera: Camera, position: Vec3<f32>, depth: f32) -> Gaussian {
     let x = dot3(camera.right, position);
     let y = dot3(camera.up, position);
     let scale = if camera.perspective { camera.focal / depth } else { camera.focal };
@@ -148,7 +165,7 @@ fn project_world_one(splat: WorldGaussian, camera: Camera) -> Ellipse {
     let jy = projection_axis(camera.up, camera.back, slope_y, scale);
     let cov_x = covariance_product(splat.covariance0, splat.covariance1, jx);
     let cov_y = covariance_product(splat.covariance0, splat.covariance1, jy);
-    return project_one(Gaussian {
+    return Gaussian {
         center: vec2(x * scale, y * scale),
         xx: dot3(jx, cov_x),
         xy: dot3(jy, cov_x),
@@ -157,7 +174,14 @@ fn project_world_one(splat: WorldGaussian, camera: Camera) -> Ellipse {
         reach: splat.reach,
         rgb: splat.rgb,
         alpha: splat.alpha,
-    }, camera.half_viewport);
+    };
+}
+
+fn project_world_one(splat: WorldGaussian, camera: Camera) -> Ellipse {
+    let position = from_eye(splat.position, camera);
+    let depth = -dot3(camera.back, position);
+    if !world_visible(splat, camera, depth) { return hidden(); }
+    return project_one(screen_gaussian(splat, camera, position, depth), camera.half_viewport);
 }
 
 // Covariance words follow Studio's resident Point layout: xx, xy, xz,
@@ -167,12 +191,10 @@ pub fn project_world(splats: List<WorldGaussian>, camera: Camera) -> List<Ellips
 }
 
 fn depth_rank(center: Vec3<f32>, camera: Camera) -> u32 {
-    let position = vec3(
-        center.x - camera.eye.x,
-        center.y - camera.eye.y,
-        center.z - camera.eye.z
-    );
-    let depth = -dot3(camera.back, position);
+    return rank_depth(-dot3(camera.back, from_eye(center, camera)));
+}
+
+fn rank_depth(depth: f32) -> u32 {
     let bits = f32_bits(if depth == 0.0 { 0.0 } else { depth });
     let ascending = if word_and(bits, 2147483648) != 0 {
         4294967295 - bits
@@ -357,4 +379,39 @@ pub fn project_sorted_scene(terrain: List<WorldGaussian>, actors: List<WorldGaus
     let keys = visible.map_indexed(fn(index) => fn(row) => indexed_depth(row.depth, index)).sort();
     let fallback = DepthEllipse { depth: 0, ellipse: hidden() };
     return keys.map(fn(key) => visible.at_or(word_narrow_u64_to_u32(key), fallback).ellipse);
+}
+
+fn hidden_contour() -> ContourEllipse {
+    return ContourEllipse {
+        center: vec2(0.0, 0.0), axis_x: vec2(0.0, 0.0), axis_y: vec2(0.0, 0.0),
+        high_axis_x: vec2(0.0, 0.0), high_axis_y: vec2(0.0, 0.0), rgb: 0, alpha: 0.0, depth: 0.0,
+    };
+}
+
+fn contour_ellipse(splat: WorldGaussian, camera: Camera) -> ContourEllipse {
+    let position = from_eye(splat.position, camera);
+    let depth = -dot3(camera.back, position);
+    if !world_visible(splat, camera, depth) { return hidden_contour(); }
+    let screen = screen_gaussian(splat, camera, position, depth);
+    // The same pixel variance is applied on each grid. In native-pixel
+    // units, variance on the double-resolution grid is one quarter as large.
+    let native = project_one(screen, camera.half_viewport);
+    if native.alpha == 0.0 { return hidden_contour(); }
+    let high = project_variance(screen, camera.half_viewport, screen.variance * 0.25);
+    return ContourEllipse {
+        center: native.center, axis_x: native.axis_x, axis_y: native.axis_y,
+        high_axis_x: high.axis_x, high_axis_y: high.axis_y, rgb: native.rgb, alpha: native.alpha, depth: depth,
+    };
+}
+
+fn visible_contours(splats: List<WorldGaussian>, camera: Camera) -> List<ContourEllipse> {
+    return splats.map(fn(splat) => contour_ellipse(splat, camera)).filter(fn(row) => row.alpha > 0.0);
+}
+
+// Both grids consume the same resident order, including the order of tied splats.
+pub fn project_contour_scene(terrain: List<WorldGaussian>, actors: List<WorldGaussian>, camera: Camera) -> List<ContourEllipse> {
+    let visible = visible_contours(terrain, camera).concat(visible_contours(actors, camera));
+    let keys = visible.map_indexed(fn(index) => fn(row) => indexed_depth(rank_depth(row.depth), index)).sort();
+    let fallback = hidden_contour();
+    return keys.map(fn(key) => visible.at_or(word_narrow_u64_to_u32(key), fallback));
 }

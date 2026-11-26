@@ -2,18 +2,26 @@ use ink_gpu_program::{Backend, Engine, View};
 use serde_json::{Value, json};
 use wgpu::util::DeviceExt;
 
+mod contours;
 mod present;
+pub use contours::ContourSettings;
+use contours::ContourRaster;
 pub use present::PixelPresenter;
 
 pub struct GaussianRenderer {
     engine: Engine,
     session: u64,
-    pipeline: wgpu::RenderPipeline,
+    raster: Raster,
     viewport: wgpu::Buffer,
     half_viewport: [f32; 2],
     bindings: Option<(wgpu::Buffer, wgpu::BindGroup)>,
     count: u32,
     skin_rows: u32,
+}
+
+enum Raster {
+    Smooth(wgpu::RenderPipeline),
+    Contours(Box<ContourRaster>),
 }
 
 pub enum WorldOrder {
@@ -35,7 +43,7 @@ impl GaussianRenderer {
         size: [u32; 2],
         splats: &Value,
     ) -> Result<Self, String> {
-        Self::create(device, queue, format, size, splats, None)
+        Self::create(device, queue, format, size, splats, None, None)
     }
 
     pub fn with_camera(
@@ -54,7 +62,24 @@ impl GaussianRenderer {
             size,
             splats,
             Some((camera, ordering)),
+            None,
         )
+    }
+
+    pub fn with_contours(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        size: [u32; 2],
+        splats: &Value,
+        camera: &Value,
+        ordering: WorldOrder,
+        settings: ContourSettings<'_>,
+    ) -> Result<Self, String> {
+        if matches!(ordering, WorldOrder::Preordered | WorldOrder::Actor(_)) {
+            return Err("Colored Contours requires sorted world or skinned splats".into());
+        }
+        Self::create(device, queue, format, size, splats, Some((camera, ordering)), Some(settings))
     }
 
     fn create(
@@ -64,6 +89,7 @@ impl GaussianRenderer {
         size: [u32; 2],
         splats: &Value,
         camera: Option<(&Value, WorldOrder)>,
+        contours: Option<ContourSettings<'_>>,
     ) -> Result<Self, String> {
         if size.contains(&0) {
             return Err("Gaussian render target must have positive dimensions".into());
@@ -76,38 +102,43 @@ impl GaussianRenderer {
             contents: &constants,
             usage: wgpu::BufferUsages::UNIFORM,
         });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Ink Studio Gaussian raster"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/gaussian.wgsl").into()),
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Ink Studio Gaussian raster"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vertex"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fragment"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let raster = if let Some(settings) = contours {
+            Raster::Contours(Box::new(ContourRaster::new(device, format, size, settings)?))
+        } else {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Ink Studio Gaussian raster"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/gaussian.wgsl").into()),
+            });
+            Raster::Smooth(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Ink Studio Gaussian raster"),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vertex"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fragment"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            }))
+        };
+        let contour = matches!(raster, Raster::Contours(_));
         let mut engine = Engine::with_device(device.clone(), queue.clone());
         let mut inputs = json!({"splats": splats});
         let mut args = vec![json!({"input": "splats"})];
@@ -117,6 +148,11 @@ impl GaussianRenderer {
             inputs["camera"] = camera_input(camera, half_viewport)?;
             args.push(json!({"input": "camera"}));
             match ordering {
+                WorldOrder::Sort if contour => {
+                    inputs["actors"] = json!([]);
+                    args.insert(1, json!({"input": "actors"}));
+                    "project_contour_scene"
+                }
                 WorldOrder::Sort => "project_sorted_world",
                 WorldOrder::Preordered => "project_world",
                 WorldOrder::Actor(placement) => {
@@ -132,7 +168,7 @@ impl GaussianRenderer {
                     steps.push(json!({"id": "posed", "call": "skin_world",
                         "args": [{"input": "rest"}, {"input": "bones"}, {"input": "light"}]}));
                     args.insert(1, json!({"step": "posed"}));
-                    "project_sorted_scene"
+                    if contour { "project_contour_scene" } else { "project_sorted_scene" }
                 }
             }
         } else {
@@ -148,7 +184,7 @@ impl GaussianRenderer {
         let mut renderer = Self {
             engine,
             session,
-            pipeline,
+            raster,
             viewport,
             half_viewport,
             bindings: None,
@@ -162,24 +198,24 @@ impl GaussianRenderer {
     pub fn project(&mut self, device: &wgpu::Device) -> Result<Value, String> {
         let outcomes = self.engine.step(self.session, 1)?;
         let view = self.engine.view(self.session, "ellipses")?;
-        assert_ellipse_layout(&view)?;
+        assert_ellipse_layout(&view, matches!(self.raster, Raster::Contours(_)))?;
         if view.capacity < self.count as usize {
             return Err("Insufficient ellipse capacity".into());
         }
         if self.bindings.as_ref().map(|(buffer, _)| buffer) != Some(&view.buffer) {
+            let plain_layout;
+            let (layout, entries) = match &self.raster {
+                Raster::Smooth(pipeline) => {
+                    plain_layout = pipeline.get_bind_group_layout(0);
+                    (&plain_layout, vec![buffer_entry(0, &view.buffer), buffer_entry(1, &self.viewport)])
+                }
+                Raster::Contours(contour) => (&contour.layout,
+                    vec![buffer_entry(3, &contour.palette), buffer_entry(5, &view.buffer), buffer_entry(6, &self.viewport)]),
+            };
             let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Resident Ink ellipse output"),
-                layout: &self.pipeline.get_bind_group_layout(0),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: view.buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self.viewport.as_entire_binding(),
-                    },
-                ],
+                layout,
+                entries: &entries,
             });
             self.bindings = Some((view.buffer, bindings));
         }
@@ -243,6 +279,14 @@ impl GaussianRenderer {
     }
 
     pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        let bindings = &self.bindings.as_ref().expect("renderer prepared").1;
+        let pipeline = match &self.raster {
+            Raster::Smooth(pipeline) => pipeline,
+            Raster::Contours(contour) => {
+                contour.draw(encoder, target, bindings, self.count);
+                return;
+            }
+        };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Ink Studio Gaussian raster"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -256,14 +300,14 @@ impl GaussianRenderer {
             })],
             ..Default::default()
         });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(
-            0,
-            &self.bindings.as_ref().expect("renderer prepared").1,
-            &[],
-        );
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bindings, &[]);
         pass.draw(0..4, 0..self.count);
     }
+}
+
+fn buffer_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry { binding, resource: buffer.as_entire_binding() }
 }
 
 fn camera_input(camera: &Value, half_viewport: [f32; 2]) -> Result<Value, String> {
@@ -283,19 +327,24 @@ fn splat_count(splats: &Value) -> Result<u32, String> {
     u32::try_from(count).map_err(|_| "Too many splats".into())
 }
 
-fn assert_ellipse_layout(view: &View) -> Result<(), String> {
+fn assert_ellipse_layout(view: &View, contour: bool) -> Result<(), String> {
     let vector = json!({"kind": "vector", "element": {"kind": "f32"}, "size": 2});
-    let fields = json!([
-        {"name": "center", "type": vector},
-        {"name": "axis_x", "type": vector},
-        {"name": "axis_y", "type": vector},
-        {"name": "rgb", "type": {"kind": "u32"}},
-        {"name": "alpha", "type": {"kind": "f32"}}
-    ]);
+    let mut fields = vec![
+        json!({"name": "center", "type": vector}),
+        json!({"name": "axis_x", "type": vector}),
+        json!({"name": "axis_y", "type": vector}),
+    ];
+    if contour {
+        fields.extend([json!({"name": "high_axis_x", "type": vector}), json!({"name": "high_axis_y", "type": vector})]);
+    }
+    fields.extend([json!({"name": "rgb", "type": {"kind": "u32"}}), json!({"name": "alpha", "type": {"kind": "f32"}})]);
+    if contour {
+        fields.push(json!({"name": "depth", "type": {"kind": "f32"}}));
+    }
     if !view.header
         || view.offset != 4
         || view.ty["kind"] != "list"
-        || view.ty["element"]["fields"] != fields
+        || view.ty["element"]["fields"] != Value::Array(fields)
     {
         return Err("Unexpected Ink ellipse buffer layout".into());
     }

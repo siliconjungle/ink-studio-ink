@@ -56,6 +56,23 @@
       }
       await renderer.close();
     }
+    const contour = await createGaussianRenderer(device, format, { width: 64, height: 64, camera,
+      splats: [{ ...near, position: [0.25, 0.25, -2], covariance0: [4, 0, 0], covariance1: [4, 0, 0], alpha: 1 }],
+      contours: { colors: [0x101820, 0xff0000], depthSpan: 10, dither: 0 } });
+    const contourTarget = context.getCurrentTexture();
+    const encoder = device.createCommandEncoder();
+    contour.draw(encoder, contourTarget.createView());
+    encoder.copyTextureToBuffer({ texture: contourTarget }, { buffer: readback, bytesPerRow: 256 }, [64, 64]);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+    const colors = new Uint8Array(readback.getMappedRange());
+    const red = format.startsWith('bgra') ? 2 : 0;
+    if (colors[red] !== 16 || colors[31 * 256 + 32 * 4 + red] !== 255 ||
+        !colors.some((value, i) => i % 4 === red && value > 16 && value < 255)) {
+      throw new Error('Colored Contours missed the background, interior, or silhouette');
+    }
+    readback.unmap();
+    await contour.close();
     readback.destroy();
     const bone = { axis_x: [1, 0, 0], axis_y: [0, 1, 0], axis_z: [0, 0, 1], offset: [0, 0, 0] };
     const light = { sun: [0, 1, 0], ambient: 1, diffuse: 0, blink: 1 };
@@ -121,7 +138,7 @@
     const error = await device.popErrorScope();
     if (error) throw error;
     status.dataset.result = 'passed';
-    status.textContent = 'Browser GPU projection, resident rig uploads, and frost packing passed.';
+    status.textContent = 'Browser GPU projection, Colored Contours, resident rig uploads, and frost packing passed.';
   }
   check().catch((error) => {
     status.dataset.result = 'failed';

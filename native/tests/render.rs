@@ -1,5 +1,5 @@
 use ink_gpu_program::{Backend, Engine};
-use ink_studio_wgpu::{GaussianRenderer, WorldOrder};
+use ink_studio_wgpu::{ContourSettings, GaussianRenderer, WorldOrder};
 use serde_json::json;
 
 #[test]
@@ -60,37 +60,58 @@ fn computes_and_draws_from_the_same_device_buffer() {
                 .expect("resident camera update");
             assert!(counters["dispatches"].as_u64().unwrap() > 0);
         }
-        let mut encoder = device.create_command_encoder(&Default::default());
-        renderer.draw(&mut encoder, &texture.create_view(&Default::default()));
-        encoder.copy_texture_to_buffer(
-            texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(256),
-                    rows_per_image: Some(64),
-                },
-            },
-            size,
-        );
-        queue.submit([encoder.finish()]);
-        let (tx, rx) = std::sync::mpsc::channel();
-        readback
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
-        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        rx.recv().unwrap().unwrap();
-        let data = readback.slice(..).get_mapped_range().unwrap();
+        let data = draw_fixture(&device, &queue, &texture, &readback, &renderer);
         assert!(data[32 * 256 + lit_x * 4] > 170);
         assert!(data[32 * 256 + lit_x * 4 + 1] < 60);
         assert_eq!(
             &data[32 * 256 + dark_x * 4..32 * 256 + dark_x * 4 + 4],
             &[0, 0, 0, 255]
         );
-        drop(data);
-        readback.unmap();
     }
+
+    camera["eye"] = json!([0, 0, 0]);
+    let solid = json!([{"position": [0.25, 0.25, -2], "covariance0": [4, 0, 0],
+        "covariance1": [4, 0, 0], "reach": 3, "rgb": 255, "alpha": 1}]);
+    let contour = GaussianRenderer::with_contours(&device, &queue, format, [64, 64], &solid,
+        &camera, WorldOrder::Sort, ContourSettings {
+            colors: &[0x101820, 0xff0000], grade: None, dither: 0.0, occlusion: 0.0,
+            occlusion_reach: 1.0, depth_near: 0.0, depth_span: 10.0, hard: true,
+        }).expect("Colored Contours world projection");
+    let data = draw_fixture(&device, &queue, &texture, &readback, &contour);
+    assert_eq!(&data[..4], &[16, 24, 32, 255]);
+    assert_eq!(&data[31 * 256 + 32 * 4..31 * 256 + 33 * 4], &[255, 0, 0, 255]);
+    assert!(data.chunks_exact(4).any(|pixel| pixel[0] > 16 && pixel[0] < 255));
+}
+
+fn draw_fixture(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture,
+    readback: &wgpu::Buffer, renderer: &GaussianRenderer) -> Vec<u8> {
+    let size = wgpu::Extent3d { width: texture.width(), height: texture.height(), depth_or_array_layers: 1 };
+    let mut encoder = device.create_command_encoder(&Default::default());
+    renderer.draw(&mut encoder, &texture.create_view(&Default::default()));
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(256),
+                rows_per_image: Some(64),
+            },
+        },
+        size,
+    );
+    queue.submit([encoder.finish()]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    readback
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    rx.recv().unwrap().unwrap();
+    let data = readback.slice(..).get_mapped_range().unwrap();
+    let pixels = data.to_vec();
+    drop(data);
+    readback.unmap();
+    pixels
 }
 
 #[test]
