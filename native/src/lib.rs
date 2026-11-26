@@ -18,6 +18,7 @@ pub struct GaussianRenderer {
 pub enum WorldOrder {
     Sort,
     Preordered,
+    Actor(Value),
 }
 
 impl GaussianRenderer {
@@ -102,21 +103,27 @@ impl GaussianRenderer {
             cache: None,
         });
         let mut engine = Engine::with_device(device.clone(), queue.clone());
-        let (function, inputs, view) = if let Some((camera, ordering)) = camera {
-            (
-                match ordering {
-                    WorldOrder::Sort => "project_sorted_world",
-                    WorldOrder::Preordered => "project_world",
-                },
-                json!({"splats": splats, "camera": camera_input(camera, half_viewport)?}),
-                json!({"input": "camera"}),
-            )
+        let mut inputs = json!({"splats": splats});
+        let mut args = vec![json!({"input": "splats"})];
+        let function = if let Some((camera, ordering)) = camera {
+            inputs["camera"] = camera_input(camera, half_viewport)?;
+            args.push(json!({"input": "camera"}));
+            match ordering {
+                WorldOrder::Sort => "project_sorted_world",
+                WorldOrder::Preordered => "project_world",
+                WorldOrder::Actor(placement) => {
+                    inputs["actor"] = placement;
+                    args.push(json!({"input": "actor"}));
+                    "project_sorted_actor"
+                }
+            }
         } else {
-            ("project", json!({"splats": splats}), json!(half_viewport))
+            args.push(json!(half_viewport));
+            "project"
         };
         let plan = json!({
             "inputs": inputs,
-            "steps": [{"id": "ellipses", "call": function, "args": [{"input": "splats"}, view]}],
+            "steps": [{"id": "ellipses", "call": function, "args": args}],
             "outputs": ["ellipses"]
         });
         let session = engine.open(&plan, Backend::GpuRequired)?["session"]
@@ -184,6 +191,16 @@ impl GaussianRenderer {
             &camera_input(camera, self.half_viewport)?,
         )?;
         self.project(device)
+    }
+
+    pub fn update_actor_camera(
+        &mut self,
+        device: &wgpu::Device,
+        camera: &Value,
+        placement: &Value,
+    ) -> Result<Value, String> {
+        self.engine.write(self.session, "actor", placement)?;
+        self.update_camera(device, camera)
     }
 
     pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {

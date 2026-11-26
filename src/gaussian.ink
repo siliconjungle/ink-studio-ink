@@ -164,11 +164,11 @@ pub fn project_world(splats: List<WorldGaussian>, camera: Camera) -> List<Ellips
     return splats.map(fn(splat) => project_world_one(splat, camera));
 }
 
-fn depth_order(splat: WorldGaussian, camera: Camera, index: u32) -> u64 {
+fn depth_order(center: Vec3<f32>, camera: Camera, index: u32) -> u64 {
     let position = vec3(
-        splat.position.x - camera.eye.x,
-        splat.position.y - camera.eye.y,
-        splat.position.z - camera.eye.z
+        center.x - camera.eye.x,
+        center.y - camera.eye.y,
+        center.z - camera.eye.z
     );
     let depth = -dot3(camera.back, position);
     let bits = f32_bits(if depth == 0.0 { 0.0 } else { depth });
@@ -179,11 +179,8 @@ fn depth_order(splat: WorldGaussian, camera: Camera, index: u32) -> u64 {
     return word_widen_u32_to_u64(depth_key) * 4294967296 + word_widen_u32_to_u64(index);
 }
 
-// Retain input order for equal depths by sorting the original index as the
-// low half of the key. The renderer can consume the sorted list directly.
-pub fn project_sorted_world(splats: List<WorldGaussian>, camera: Camera) -> List<Ellipse> {
-    let keys = splats.map_indexed(fn(index) => fn(splat) => depth_order(splat, camera, index)).sort();
-    let fallback = WorldGaussian {
+fn absent_world() -> WorldGaussian {
+    return WorldGaussian {
         position: vec3(0.0, 0.0, 0.0),
         covariance0: vec3(0.0, 0.0, 0.0),
         covariance1: vec3(0.0, 0.0, 0.0),
@@ -191,8 +188,14 @@ pub fn project_sorted_world(splats: List<WorldGaussian>, camera: Camera) -> List
         rgb: 0,
         alpha: 0.0,
     };
+}
+
+// Retain input order for equal depths by sorting the original index as the
+// low half of the key. The renderer can consume the sorted list directly.
+pub fn project_sorted_world(splats: List<WorldGaussian>, camera: Camera) -> List<Ellipse> {
+    let keys = splats.map_indexed(fn(index) => fn(splat) => depth_order(splat.position, camera, index)).sort();
     return keys.map(fn(key) =>
-        project_world_one(splats.at_or(word_narrow_u64_to_u32(key), fallback), camera));
+        project_world_one(splats.at_or(word_narrow_u64_to_u32(key), absent_world()), camera));
 }
 
 fn legacy_color(value: f32) -> u32 {
@@ -214,4 +217,48 @@ fn legacy_row(data: List<f32>, offset: u32) -> WorldGaussian {
 pub fn import_builder_splats(data: List<f32>) -> List<WorldGaussian> {
     let rows = buffer_fill(quot_or(length(data), 16, 0), 0).freeze();
     return rows.map_indexed(fn(index) => fn(unused) => legacy_row(data, index * 16));
+}
+
+record ActorPlacement {
+    first: u32,
+    origin: Vec3<f32>,
+    forward: Vec2<f32>,
+}
+
+// A yaw turns the local +X axis toward the unit XZ facing vector.
+fn yaw_center(center: Vec3<f32>, actor: ActorPlacement) -> Vec3<f32> {
+    return vec3(actor.forward.x * center.x - actor.forward.y * center.z + actor.origin.x,
+        center.y + actor.origin.y, actor.forward.y * center.x + actor.forward.x * center.z + actor.origin.z);
+}
+
+fn yaw_one(splat: WorldGaussian, actor: ActorPlacement) -> WorldGaussian {
+    let x_axis = vec3(actor.forward.x, 0.0, -actor.forward.y);
+    let y_axis = vec3(0.0, 1.0, 0.0);
+    let z_axis = vec3(actor.forward.y, 0.0, actor.forward.x);
+    let cx = covariance_product(splat.covariance0, splat.covariance1, x_axis);
+    let cy = covariance_product(splat.covariance0, splat.covariance1, y_axis);
+    let cz = covariance_product(splat.covariance0, splat.covariance1, z_axis);
+    return WorldGaussian {
+        position: yaw_center(splat.position, actor),
+        covariance0: vec3(dot3(x_axis, cx), dot3(x_axis, cy), dot3(x_axis, cz)),
+        covariance1: vec3(dot3(y_axis, cy), dot3(y_axis, cz), dot3(z_axis, cz)),
+        reach: splat.reach,
+        rgb: splat.rgb,
+        alpha: splat.alpha,
+    };
+}
+
+// The actor occupies the final rows of the buffer. Sort on world-space
+// centers so terrain and actor occlude each other in the same raster pass.
+pub fn project_sorted_actor(splats: List<WorldGaussian>, camera: Camera, actor: ActorPlacement) -> List<Ellipse> {
+    let keys = splats.map_indexed(fn(index) => fn(splat) =>
+        depth_order(if index >= actor.first { yaw_center(splat.position, actor) } else { splat.position },
+            camera, index)).sort();
+    return keys.map(fn(key) => project_actor_key(splats, camera, actor, key));
+}
+
+fn project_actor_key(splats: List<WorldGaussian>, camera: Camera, actor: ActorPlacement, key: u64) -> Ellipse {
+    let index = word_narrow_u64_to_u32(key);
+    let splat = splats.at_or(index, absent_world());
+    return project_world_one(if index >= actor.first { yaw_one(splat, actor) } else { splat }, camera);
 }

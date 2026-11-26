@@ -14,16 +14,22 @@ function assertEllipseLayout(view) {
   }
 }
 
-export async function createGaussianRenderer(device, format, { width, height, splats, camera, preordered = false }) {
+export async function createGaussianRenderer(device, format, { width, height, splats, camera, preordered = false, actor }) {
   const halfViewport = [width / 2, height / 2];
   if (!halfViewport.every((dimension) => Number.isFinite(dimension) && dimension > 0)) {
     throw new Error('Gaussian render target must have positive dimensions');
   }
   const cameraInput = (value) => ({ ...value, half_viewport: halfViewport });
+  if (actor && (!camera || preordered)) throw new Error('An actor requires a depth-sorted world view');
   const projection = camera
     ? { call: preordered ? 'project_world' : 'project_sorted_world',
-      input: { camera: cameraInput(camera) }, view: { input: 'camera' } }
-    : { call: 'project', input: {}, view: halfViewport };
+      input: { camera: cameraInput(camera) }, view: [{ input: 'camera' }] }
+    : { call: 'project', input: {}, view: [halfViewport] };
+  if (actor) {
+    projection.call = 'project_sorted_actor';
+    projection.input.actor = actor;
+    projection.view.push({ input: 'actor' });
+  }
   const shaderResponse = await fetch(shaderURL);
   if (!shaderResponse.ok) throw new Error(`Gaussian shader could not load (${shaderResponse.status})`);
   const shader = device.createShaderModule({ code: await shaderResponse.text() });
@@ -44,7 +50,7 @@ export async function createGaussianRenderer(device, format, { width, height, sp
   try {
     session = await ink.open({
       inputs: { splats, ...projection.input },
-      steps: [{ id: 'ellipses', call: projection.call, args: [{ input: 'splats' }, projection.view] }],
+      steps: [{ id: 'ellipses', call: projection.call, args: [{ input: 'splats' }, ...projection.view] }],
       outputs: ['ellipses'],
     }, { backend: 'gpu-required' });
     viewport = device.createBuffer({ size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -82,9 +88,11 @@ export async function createGaussianRenderer(device, format, { width, height, sp
         count = rows.length;
         return project();
       },
-      async updateCamera(value) {
+      async updateCamera(value, placement) {
         if (!camera) throw new Error('Camera updates require world-space splats');
+        if (placement && !actor) throw new Error('Actor updates require an actor view');
         await session.write('camera', cameraInput(value));
+        if (placement) await session.write('actor', placement);
         return project();
       },
       draw(encoder, target) {

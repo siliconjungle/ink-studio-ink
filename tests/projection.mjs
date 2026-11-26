@@ -49,6 +49,14 @@ const colors = [255, 65280, 16711680, 65535];
 const unordered = [4, 7, 4, 6].map((depth, i) => ({ ...world, position: [0, 0, -depth], rgb: colors[i] }));
 const ordered = call('project_sorted_world', [unordered, camera]);
 assert.deepEqual(ordered.map((splat) => splat.rgb), [65280, 65535, 255, 16711680]);
+const actor = { first: 1, origin: [1, -1, -7], forward: [0, 1] };
+const scenery = { ...world, position: [0, 0, -5], rgb: 65280 };
+const local = { ...world, position: [1, 2, 1], covariance0: [4, 0.5, 0.25], covariance1: [2, -0.75, 1] };
+const rotated = { ...local, position: [0, 1, -6], covariance0: [1, 0.75, -0.25], covariance1: [2, 0.5, 4] };
+const placed = call('project_sorted_world', [[scenery, rotated], camera]);
+const actorArgs = [[scenery, local], camera, actor];
+assert.deepEqual(call('project_sorted_actor', actorArgs), placed);
+assert.deepEqual(placed.map(splat => splat.rgb), [local.rgb, scenery.rgb]);
 const sourceRow = [1, 2, 3, 0.5, 4, 5, 6, 0xf08010, 7, 8, 9, 128, 11, 12, 13, 14];
 const imported = [{ position: [1, 2, 3], covariance0: [4, 5, 6], covariance1: [7, 8, 9],
   reach: 3, rgb: 0xf08010, alpha: 0.5 }];
@@ -79,6 +87,7 @@ try {
     { pure: 'project_world', args: [worldRows, camera], expected: orthographic },
     { pure: 'project_world', args: [worldRows, perspective], expected: orthographic },
     { pure: 'project_sorted_world', args: [unordered, camera], expected: ordered },
+    { pure: 'project_sorted_actor', args: actorArgs, expected: placed },
     { pure: 'import_builder_splats', args: [sourceRow], expected: imported, cpuOnly: true },
   ];
   writeFileSync(requestsPath, JSON.stringify(tests.map(({ pure, args }) => ({ pure, args }))));
