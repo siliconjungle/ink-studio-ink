@@ -22,7 +22,9 @@ Callers that already own the correct far-to-near order can use `WorldOrder::Preo
 
 `src/sculpt.ink` evaluates rounded boxes, ellipsoids, linear-profile lathes, tapered tube segments, and tori. It applies local frames, seeded surface bumps, smooth unions within each group, and subtractive cuts. Vertical ray queries select nearby shapes once for the ray, with each shape's vertical range used to skip probes outside its bounds. Rebirth uses this path for live field collision.
 
-`src/sampling.ink` generates the surface candidates for boxes, ellipsoids, tapered tubes, lathes, and tori. Lathes can use a linear profile or a list of authored radii. `src/bake.ink` projects candidates onto the combined field, records the contributing surface or cut, estimates normals and ambient occlusion, and shades the result into axial Gaussian splats. Both build to Rust and JavaScript. Rebirth's Lupine Steps fixture bakes and renders the same paired arches on both hosts. Its current material pass uses a palette with ambient, sky, and direct light.
+`src/sampling.ink` generates surface candidates for boxes, ellipsoids, tapered tubes, lathes, and tori. Lathes can use a linear profile measured from either end or a list of authored radii. `src/bake.ink` projects candidates onto the combined field, records the contributing surface or cut, estimates normals and ambient occlusion, and marches shadow rays toward the sun and local lamps. A field cell indexes shape lists once and reuses them across its surface and shadow queries. Decorative shapes can project against their own fields while receiving light and shadows from the scene. Both modules build to Rust and JavaScript.
+
+Rebirth uses this projection and lighting in the visual field export. Its Lupine Steps fixture bakes and renders the same paired arches on both hosts using the portable palette painter with ambient, sky and shadowed sunlight.
 
 `src/marks.ink` computes the covariance of round splats, axial discs and sticks, and oriented surface dabs. Rebirth uses the compiled mark geometry during field export, with the original styling pass supplying colors and shading.
 
@@ -43,4 +45,4 @@ Open `/tests/webgpu.html` on the local server to check browser dispatch, residen
 
 Open `/bench/camera.html` on the same server to run the camera probe.
 
-The ongoing port includes additional shape recipes, textured materials, cast shadows, additional rig types, idle gaze, animation clips, the remaining art and streaming features, simulation tools, editors, and the CLI.
+The ongoing port includes additional shape recipes, textured materials, additional rig types, idle gaze, animation clips, the remaining art and streaming features, simulation tools, editors, and the CLI.

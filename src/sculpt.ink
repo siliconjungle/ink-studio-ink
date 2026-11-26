@@ -16,7 +16,7 @@ record Segment {
     tip: f64,
 }
 
-enum Form { Boxed(Box), Ellipsoid(math.Point), Turned(Lathe), Tube(List<Segment>), Ring(Torus), }
+enum Form { Boxed(Box), Ellipsoid(math.Point), Turned(Lathe), Tube(List<Segment>), Ring(Torus), TurnedFromTip(Lathe), }
 
 record Model {
     center: math.Point,
@@ -36,6 +36,11 @@ pub fn ellipsoid(center: math.Point, frame: Option<math.Matrix>, bound: f64, rad
 pub fn turned(center: math.Point, frame: Option<math.Matrix>, bound: f64, height: f64, base: f64, slope: f64) -> Model {
     return Model { center: center, frame: frame, bound: bound,
         form: Form.Turned(Lathe { height: height, base: base, slope: slope }) };
+}
+
+pub fn turned_from_tip(center: math.Point, frame: Option<math.Matrix>, bound: f64, height: f64, tip: f64, slope: f64) -> Model {
+    return Model { center: center, frame: frame, bound: bound,
+        form: Form.TurnedFromTip(Lathe { height: height, base: tip, slope: slope }) };
 }
 
 pub fn tube(center: math.Point, bound: f64, segments: List<Segment>) -> Model {
@@ -76,8 +81,12 @@ fn ellipsoid_distance(r: math.Point, p: math.Point) -> f64 {
     return if k1 > 1e-9f64 { k0 * (k0 - 1.0f64) / k1 } else { -math.min(math.min(r.x, r.y), r.z) };
 }
 
-fn turned_distance(profile: Lathe, p: math.Point) -> f64 {
-    let radius = profile.base + profile.slope * math.sat(p.y / profile.height + 0.5f64);
+fn lathe_radius(profile: Lathe, t: f64, from_tip: Bool) -> f64 {
+    return profile.base + profile.slope * (if from_tip { 1.0f64 - t } else { t });
+}
+
+fn turned_distance(profile: Lathe, p: math.Point, from_tip: Bool) -> f64 {
+    let radius = lathe_radius(profile, math.sat(p.y / profile.height + 0.5f64), from_tip);
     let dr = (sqrt(p.x * p.x + p.z * p.z) - radius) * 0.8f64;
     let dy = abs(p.y) - profile.height * 0.5f64;
     let outside_r = math.max(dr, 0.0f64);
@@ -109,7 +118,8 @@ pub fn solid_distance(model: Model, p: math.Point) -> f64 {
     return match model.form {
         Form.Boxed(box) => box_distance(box, local_point(model, p)),
         Form.Ellipsoid(radii) => ellipsoid_distance(radii, local_point(model, p)),
-        Form.Turned(profile) => turned_distance(profile, local_point(model, p)),
+        Form.Turned(profile) => turned_distance(profile, local_point(model, p), false),
+        Form.TurnedFromTip(profile) => turned_distance(profile, local_point(model, p), true),
         Form.Tube(segments) => tube_distance(segments, p),
         Form.Ring(ring) => torus_distance(ring, local_point(model, p)),
     };
@@ -141,6 +151,7 @@ record Scene {
     positive: List<Candidate>,
     negative: List<Placed>,
     grid: Grid,
+    buckets: List<List<Placed>>,
 }
 record Column {
     positive: List<Candidate>,
@@ -241,7 +252,7 @@ pub fn prepare_scene(models: List<Model>, spec: SceneSpec) -> Scene {
     let positive = ordered(models, spec.positive);
     let negative = spec.negative.map_indexed(fn(i) => fn(member) => placed(models, member, i + 1));
     let grid = grid_geometry(enclosing(positive));
-    return Scene { positive: positive.map(fn(shape) => cover(grid, shape)), negative: negative, grid: grid };
+    return Scene { positive: positive.map(fn(shape) => cover(grid, shape)), negative: negative, grid: grid, buckets: [] };
 }
 
 fn horizontal_overlap(candidate: Candidate, x: f64, z: f64) -> Bool {
@@ -249,12 +260,39 @@ fn horizontal_overlap(candidate: Candidate, x: f64, z: f64) -> Bool {
         && z >= f64_from_u32(candidate.low.z) && z <= f64_from_u32(candidate.high.z);
 }
 
+fn column_candidates(scene: Scene, x: f64, z: f64) -> List<Candidate> {
+    return scene.positive.filter(fn(candidate) => horizontal_overlap(candidate, x, z));
+}
+
+fn vertical_overlap(candidate: Candidate, y: f64) -> Bool {
+    return y >= f64_from_u32(candidate.low.y) && y <= f64_from_u32(candidate.high.y);
+}
+
+fn append_bake_column(buckets: Buffer<List<Placed>>, scene: Scene, i: u32) -> Buffer<List<Placed>> {
+    let size = scene.grid.size;
+    let column = column_candidates(scene, f64_from_u32(quot_or(i, size.z, 0)), f64_from_u32(rem_or(i, size.z, 0)));
+    return repeat_until(size.y, buckets, fn(output) => false, fn(y) => fn(output) =>
+        output.push(column.filter(fn(candidate) => vertical_overlap(candidate, f64_from_u32(y))).map(fn(candidate) => candidate.shape)));
+}
+
+// Baking revisits the same cells along thousands of surface and shadow rays.
+// Store their ordered shape lists once, with the range index as a sparse fallback.
+fn index_bake(scene: Scene) -> Scene {
+    let size = scene.grid.size;
+    let footprint_limit: u32 = quot_or(262144, size.y, 0);
+    if length(scene.positive) == 0 || size.x > quot_or(footprint_limit, size.z, 0) { return scene; }
+    let out: Buffer<List<Placed>> = Buffer.empty();
+    let buckets = repeat_until(size.x * size.z, out, fn(output) => false,
+        fn(i) => fn(output) => append_bake_column(output, scene, i)).freeze();
+    return Scene { positive: scene.positive, negative: scene.negative, grid: scene.grid, buckets: buckets };
+}
+
 // A vertical ray stays in one horizontal bucket. Store each solid's inclusive
 // bucket range and select its column once, without allocating a dense 3D grid.
 fn scene_column(scene: Scene, x: f64, z: f64) -> Column {
     let grid = scene.grid;
     let cell = bucket_point(grid, math.point(x, grid.origin.y, z));
-    let positive = scene.positive.filter(fn(candidate) => horizontal_overlap(candidate, cell.x, cell.z));
+    let positive = column_candidates(scene, cell.x, cell.z);
     return Column { positive: positive, negative: scene.negative, grid: grid };
 }
 
@@ -308,24 +346,42 @@ fn cut_one(tables: noise.Noise, point: math.Point, current: SurfaceHit, row: Pla
 }
 
 fn union_at(tables: noise.Noise, point: math.Point, bucket: f64, current: Blend, candidate: Candidate) -> Blend {
-    if bucket < f64_from_u32(candidate.low.y) || bucket > f64_from_u32(candidate.high.y) { return current; }
+    if !vertical_overlap(candidate, bucket) { return current; }
     return union_one(tables, point, current, candidate.shape);
 }
 
-fn column_hit(column: Column, tables: noise.Noise, point: math.Point, ground: f64) -> SurfaceHit {
+fn begin_union(ground: f64) -> Blend {
     let ground_id: u32 = if ground < 1e8f64 { 0 } else { 4294967295 };
-    let seed = Blend { best: Owner { id: ground_id, distance: ground },
+    return Blend { best: Owner { id: ground_id, distance: ground },
         local: Owner { id: ground_id, distance: 1e9f64 }, group: 0, width: 0.0f64 };
-    let bucket = floor((point.y - column.grid.origin.y) / column.grid.stride);
-    let combined = foldl(column.positive, seed, fn(candidate) => fn(current) =>
-        union_at(tables, point, bucket, current, candidate));
+}
+
+fn finish_union(combined: Blend, negative: List<Placed>, tables: noise.Noise, point: math.Point) -> SurfaceHit {
     let winner = nearer(combined.best, combined.local);
     let hit = SurfaceHit { distance: math.min(1.0f64, winner.distance), surface: winner.id, cut: 0 };
-    return foldl(column.negative, hit, fn(row) => fn(current) => cut_one(tables, point, current, row));
+    return foldl(negative, hit, fn(row) => fn(current) => cut_one(tables, point, current, row));
+}
+
+fn column_hit(column: Column, tables: noise.Noise, point: math.Point, ground: f64) -> SurfaceHit {
+    let bucket = floor((point.y - column.grid.origin.y) / column.grid.stride);
+    let combined = foldl(column.positive, begin_union(ground), fn(candidate) => fn(current) =>
+        union_at(tables, point, bucket, current, candidate));
+    return finish_union(combined, column.negative, tables, point);
+}
+
+fn scene_bucket(scene: Scene, point: math.Point) -> List<Placed> {
+    let cell = bucket_point(scene.grid, point);
+    let size = scene.grid.size;
+    if cell.x < 0.0f64 || cell.y < 0.0f64 || cell.z < 0.0f64 ||
+        cell.x >= f64_from_u32(size.x) || cell.y >= f64_from_u32(size.y) || cell.z >= f64_from_u32(size.z) { return []; }
+    return scene.buckets.at_or((index(cell.x) * size.z + index(cell.z)) * size.y + index(cell.y), []);
 }
 
 pub fn scene_hit(scene: Scene, tables: noise.Noise, point: math.Point, ground: f64) -> SurfaceHit {
-    return column_hit(scene_column(scene, point.x, point.z), tables, point, ground);
+    if length(scene.buckets) == 0 { return column_hit(scene_column(scene, point.x, point.z), tables, point, ground); }
+    let combined = foldl(scene_bucket(scene, point), begin_union(ground),
+        fn(row) => fn(current) => union_one(tables, point, current, row));
+    return finish_union(combined, scene.negative, tables, point);
 }
 
 pub fn scene_distance(scene: Scene, tables: noise.Noise, point: math.Point, ground: f64) -> f64 {

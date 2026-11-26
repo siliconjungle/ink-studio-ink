@@ -178,11 +178,12 @@ pub fn profile_candidates(center: math.Point, frame: Option<math.Matrix>, height
     return to_world(lathe_points(height, side, bottom, top, spacing), center, frame);
 }
 
-fn turned_points(lathe: sculpt.Lathe, spacing: f64) -> List<math.Point> {
+fn turned_points(lathe: sculpt.Lathe, spacing: f64, from_tip: Bool) -> List<math.Point> {
     let rows = lathe_rows(lathe.height, spacing);
     let side = indexed(rows).map(fn(i) =>
-        lathe.base + lathe.slope * ((f64_from_u32(i) + 0.5f64) / f64_from_u32(rows)));
-    return lathe_points(lathe.height, side, lathe.base, lathe.base + lathe.slope, spacing);
+        sculpt.lathe_radius(lathe, (f64_from_u32(i) + 0.5f64) / f64_from_u32(rows), from_tip));
+    return lathe_points(lathe.height, side, sculpt.lathe_radius(lathe, 0.0f64, from_tip),
+        sculpt.lathe_radius(lathe, 1.0f64, from_tip), spacing);
 }
 
 fn ring_point(ring: sculpt.Torus, i: u32, j: u32, width: u32, height: u32) -> math.Point {
@@ -277,7 +278,8 @@ pub fn model_candidates(model: sculpt.Model, spacing: f64) -> List<math.Point> {
     return match model.form {
         sculpt.Form.Boxed(box) => to_world(boxed_points(box, spacing), model.center, model.frame),
         sculpt.Form.Ellipsoid(radii) => to_world(ellipsoid_points(radii, spacing), model.center, model.frame),
-        sculpt.Form.Turned(lathe) => to_world(turned_points(lathe, spacing), model.center, model.frame),
+        sculpt.Form.Turned(lathe) => to_world(turned_points(lathe, spacing, false), model.center, model.frame),
+        sculpt.Form.TurnedFromTip(lathe) => to_world(turned_points(lathe, spacing, true), model.center, model.frame),
         sculpt.Form.Tube(segments) => tube_points(segments, spacing),
         sculpt.Form.Ring(ring) => to_world(torus_points(ring, spacing), model.center, model.frame),
     };

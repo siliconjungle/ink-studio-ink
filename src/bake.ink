@@ -144,6 +144,118 @@ pub fn project_model(field: Field, model: sculpt.Model, member: sculpt.Member, s
     return project_candidates(field, model, member, sampling.model_candidates(model, spacing), settings);
 }
 
+record ProjectionJob {
+    member: sculpt.Member,
+    settings: BakeSettings,
+    candidates: List<math.Point>,
+    ghost: Bool,
+}
+
+record ShadowMarch {
+    steps: u32,
+    distance: f64,
+    softness: f64,
+    legacy_empty_space: Bool,
+}
+record DirectionalLight { direction: math.Point, march: ShadowMarch, }
+record ShadowRay { distance: f64, visibility: f64, }
+record Lamp {
+    position: math.Point,
+    radius: f64,
+    strength: f64,
+    casts_shadows: Bool,
+}
+record LampSample { power: f64, visibility: f64, }
+record Lighting { sun: DirectionalLight, lamps: List<Lamp>, }
+record LitSurface { surface: Surface, visibility: f64, lamps: List<LampSample>, }
+
+fn shadow_step(field: Field, origin: math.Point, sun: DirectionalLight, ray: ShadowRay) -> ShadowRay {
+    let h = distance(field, math.add(origin, math.scale(sun.direction, ray.distance)));
+    if h < 0.004f64 { return ShadowRay { distance: ray.distance, visibility: 0.0f64 }; }
+    let visibility = if h < 1.0f64 || sun.march.legacy_empty_space {
+        math.min(ray.visibility, sun.march.softness * h / ray.distance)
+    } else { ray.visibility };
+    return ShadowRay { distance: ray.distance + math.min(0.9f64, math.max(0.05f64, h)), visibility: visibility };
+}
+
+fn sun_visibility(field: Field, surface: Surface, light: DirectionalLight) -> f64 {
+    if math.dot(surface.normal, light.direction) <= 0.0f64 { return 1.0f64; }
+    let start = ShadowRay { distance: 0.07f64, visibility: 1.0f64 };
+    let origin = math.add(surface.position, math.scale(surface.normal, 0.05f64));
+    let done = repeat_until(light.march.steps, start,
+        fn(ray) => ray.visibility <= 0.0f64 || ray.distance >= light.march.distance,
+        fn(i) => fn(ray) => shadow_step(field, origin, light, ray));
+    return done.visibility;
+}
+
+fn lamp_step(field: Field, origin: math.Point, direction: math.Point, ray: ShadowRay) -> ShadowRay {
+    let h = distance(field, math.add(origin, math.scale(direction, ray.distance)));
+    if h < 0.004f64 { return ShadowRay { distance: ray.distance, visibility: 0.12f64 }; }
+    return ShadowRay { distance: ray.distance + math.max(0.06f64, h), visibility: 1.0f64 };
+}
+
+fn sample_lamp(field: Field, surface: Surface, lamp: Lamp, steps: u32) -> LampSample {
+    let offset = math.sub(lamp.position, surface.position);
+    let dist = math.magnitude(offset);
+    if dist > lamp.radius || lamp.radius <= 0.0f64 { return LampSample { power: 0.0f64, visibility: 1.0f64 }; }
+    let normal = surface.normal;
+    let nd = math.dot(normal, offset) / (if dist > 0.0f64 { dist } else { 1.0f64 });
+    let fade = 1.0f64 - dist / lamp.radius;
+    let power = fade * fade * lamp.strength * (0.2f64 + 0.8f64 * math.max(nd, 0.0f64));
+    if !lamp.casts_shadows || power <= 0.03f64 || nd <= 0.0f64 {
+        return LampSample { power: power, visibility: 1.0f64 };
+    }
+    let origin = math.add(surface.position, math.scale(normal, 0.05f64));
+    let direction = math.point(offset.x / dist, offset.y / dist, offset.z / dist);
+    let ray = repeat_until(steps, ShadowRay { distance: 0.08f64, visibility: 1.0f64 },
+        fn(ray) => ray.visibility < 1.0f64 || ray.distance >= dist - 0.12f64,
+        fn(i) => fn(ray) => lamp_step(field, origin, direction, ray));
+    return LampSample { power: power * ray.visibility, visibility: ray.visibility };
+}
+
+record GhostProbe { point: math.Point, distance: f64, normal: math.Point, }
+
+fn ghost_step(model: sculpt.Model, member: sculpt.Member, tables: noise.Noise, probe: GhostProbe, step: f64) -> GhostProbe {
+    let p = probe.point;
+    let d = probe.distance;
+    let g = axial_gradient(
+        own_distance(model, member, tables, axis_point(p, step, 0.0f64, 0.0f64)) - d,
+        own_distance(model, member, tables, axis_point(p, 0.0f64, step, 0.0f64)) - d,
+        own_distance(model, member, tables, axis_point(p, 0.0f64, 0.0f64, step)) - d, step);
+    if member.bump <= 0.0f64 { return GhostProbe { point: p, distance: d, normal: g.direction }; }
+    let shifted = math.sub(p, math.scale(g.direction, d / g.slope));
+    return GhostProbe { point: shifted, distance: own_distance(model, member, tables, shifted), normal: g.direction };
+}
+
+fn ghost_surface(field: Field, model: sculpt.Model, job: ProjectionJob, p: math.Point) -> Surface {
+    let probe = GhostProbe { point: p, distance: own_distance(model, job.member, field.tables, p), normal: math.zero() };
+    let steps: u32 = if job.member.bump > 0.0f64 { 5 } else { 1 };
+    let result = repeat_until(steps, probe, fn(probe) => false,
+        fn(i) => fn(probe) => ghost_step(model, job.member, field.tables, probe, job.settings.normal_step));
+    let ao = ambient_occlusion(field, result.point, result.normal, job.settings.occlusion_step, job.settings.occlusion_strength);
+    return Surface { position: result.point, normal: result.normal, surface: 0, cut: 0, occlusion: ao, spacing: job.settings.spacing };
+}
+
+fn inside_projection_area(area: terrain.Rect, p: math.Point) -> Bool {
+    return p.x > area.x0 && p.x < area.x1 && p.z > area.z0 && p.z < area.z1;
+}
+
+fn project_job(field: Field, models: List<sculpt.Model>, area: terrain.Rect, job: ProjectionJob) -> List<Surface> {
+    let points = job.candidates.filter(fn(p) => inside_projection_area(area, p));
+    let model = models.at_or(job.member.model, sculpt.no_model());
+    if job.ghost { return points.map(fn(p) => ghost_surface(field, model, job, p)); }
+    return project_candidates(field, model, job.member, points, job.settings);
+}
+
+pub fn project_cell(models: List<sculpt.Model>, scene: sculpt.SceneSpec, seed: u32, ground: terrain.HeightGrid,
+    area: terrain.Rect, jobs: List<ProjectionJob>, lighting: Lighting) -> List<List<LitSurface>> {
+    let field = Field { scene: sculpt.index_bake(sculpt.prepare_scene(models, scene)),
+        tables: noise.make_noise(seed ^ 2654435769), ground: Some(ground) };
+    return jobs.map(fn(job) => project_job(field, models, area, job).map(fn(surface) =>
+        LitSurface { surface: surface, visibility: sun_visibility(field, surface, lighting.sun),
+            lamps: lighting.lamps.map(fn(lamp) => sample_lamp(field, surface, lamp, lighting.sun.march.steps)) }));
+}
+
 record Material { colors: List<u32>, bias: f64, alpha: f32, }
 record Palette { terrain: Material, surfaces: List<Material>, cuts: List<Material>, }
 record Paint { direction: math.Point, ambient: f64, sky: f64, sun: f64, fat: f64, }
@@ -162,9 +274,9 @@ fn color(material: Material, light: f64) -> u32 {
     return material.colors.at_or(channel, material.colors.at_or(count - 1, 0));
 }
 
-fn to_splat(s: Surface, palette: Palette, paint: Paint) -> gaussian.WorldGaussian {
+fn to_splat(s: Surface, palette: Palette, paint: Paint, visibility: f64) -> gaussian.WorldGaussian {
     let material = material_for(palette, s);
-    let direct = math.max(0.0f64, math.dot(s.normal, paint.direction));
+    let direct = math.max(0.0f64, math.dot(s.normal, paint.direction)) * visibility;
     let light = s.occlusion * (paint.ambient + paint.sky * (0.5f64 + s.normal.y * 0.5f64)) + paint.sun * direct;
     let axial = marks.axial_mark(s.normal, s.spacing * 0.3f64, s.spacing * paint.fat);
     let cov = axial.fold(fn(mark) => mark.covariance, fn(error) => marks.round_mark(s.spacing * paint.fat));
@@ -173,7 +285,7 @@ fn to_splat(s: Surface, palette: Palette, paint: Paint) -> gaussian.WorldGaussia
 }
 
 pub fn paint_surfaces(surfaces: List<Surface>, palette: Palette, light: Paint) -> List<gaussian.WorldGaussian> {
-    return surfaces.map(fn(s) => to_splat(s, palette, light));
+    return surfaces.map(fn(s) => to_splat(s, palette, light, 1.0f64));
 }
 
 record Blueprint {
@@ -197,13 +309,23 @@ fn part(blueprint: Blueprint, field: Field, id: u32, member: sculpt.Member) -> L
     return project_model(field, model, member, settings);
 }
 
-pub fn bake_surfaces(blueprint: Blueprint) -> List<Surface> {
-    let field = prepare_bake(blueprint.models, blueprint.scene, blueprint.seed, blueprint.ground);
+fn sample_blueprint(blueprint: Blueprint, field: Field) -> List<Surface> {
     let members = blueprint.scene.positive.concat(blueprint.scene.negative);
     let batches = members.map_indexed(fn(id) => fn(member) => part(blueprint, field, id, member));
     return foldl(batches, [], fn(batch) => fn(out) => out.concat(batch));
 }
 
+pub fn bake_surfaces(blueprint: Blueprint) -> List<Surface> {
+    return sample_blueprint(blueprint, prepare_bake(blueprint.models, blueprint.scene, blueprint.seed, blueprint.ground));
+}
+
 pub fn bake_sculpt(blueprint: Blueprint) -> List<gaussian.WorldGaussian> {
     return paint_surfaces(bake_surfaces(blueprint), blueprint.palette, blueprint.light);
+}
+
+pub fn bake_sculpt_with_shadows(blueprint: Blueprint, march: ShadowMarch) -> List<gaussian.WorldGaussian> {
+    let field = prepare_bake(blueprint.models, blueprint.scene, blueprint.seed, blueprint.ground);
+    let sun = DirectionalLight { direction: blueprint.light.direction, march: march };
+    return sample_blueprint(blueprint, field).map(fn(surface) =>
+        to_splat(surface, blueprint.palette, blueprint.light, sun_visibility(field, surface, sun)));
 }
