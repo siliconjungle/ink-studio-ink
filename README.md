@@ -32,6 +32,8 @@ Rebirth uses this projection and lighting in the visual field export. Its Lupine
 
 `src/marks.ink` computes the covariance of round splats, axial discs and sticks, and oriented surface dabs. Rebirth uses the compiled mark geometry during field export, with the original styling pass supplying colors and shading.
 
+The same module reflects a world-space splat across a horizontal water plane, including the signs of the covariance terms. Rebirth uses it to generate water reflections in Rust and JavaScript.
+
 `src/brush.ink` generates seed-driven grass blades, foliage, and feathers. It takes a projected surface, material settings, a pigment ramp, and a random state. It returns the marks and the advanced random state. Rebirth uses these brushes during field export. Studio tests the same strokes, noise, and splat shapes in Rust and JavaScript.
 
 `src/material.ink` turns projected normals, ambient occlusion, and sun and lamp visibility into diffuse paint. It also provides palette ramps, moss placement on upward-facing surfaces, masonry courses, and the final dab. Rebirth uses it with the brush module to paint the two cells affected by the Wide Green bush at run time.

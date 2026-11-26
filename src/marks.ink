@@ -1,6 +1,7 @@
 module StudioMarks;
 
 import "rig.ink" as math;
+import "gaussian.ink" as gaussian;
 
 record Covariance {
     first: math.Point,
@@ -57,4 +58,14 @@ pub fn surface_mark(normal: math.Point, tangent: math.Point, along: f64, across:
     let square = math.point(along * along, across * across, thickness * thickness);
     return covariance(term(square, xx, xx), term(square, xx, yy), term(square, xx, zz),
         term(square, yy, yy), term(square, yy, zz), term(square, zz, zz));
+}
+
+pub fn reflect_splat(row: gaussian.WorldGaussian, level: f64, drift: f64, color: u32, alpha: f32) -> gaussian.WorldGaussian {
+    let dy = f64_from_f32(row.position.y) - level;
+    return gaussian.WorldGaussian {
+        position: vec3(f32_from_f64(f64_from_f32(row.position.x) + drift), f32_from_f64(level - dy), row.position.z),
+        covariance0: vec3(row.covariance0.x, -row.covariance0.y, row.covariance0.z),
+        covariance1: vec3(row.covariance1.x, -row.covariance1.y, row.covariance1.z),
+        reach: row.reach, rgb: color, alpha: alpha,
+    };
 }
