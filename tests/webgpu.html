@@ -54,6 +54,18 @@
         if (!preordered) reference.set(litX, data.slice());
         readback.unmap();
       }
+      await renderer.updateCamera({ ...camera, eye: [500, 0, 0] });
+      const target = context.getCurrentTexture();
+      const encoder = device.createCommandEncoder();
+      renderer.draw(encoder, target.createView());
+      encoder.copyTextureToBuffer({ texture: target }, { buffer: readback, bytesPerRow: 256 }, [64, 64]);
+      device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const blank = new Uint8Array(readback.getMappedRange());
+      if (blank.some((value, i) => i % 4 === 3 ? value !== 255 : value !== 0)) {
+        throw new Error('Culled geometry survived a zero-instance draw');
+      }
+      readback.unmap();
       await renderer.close();
     }
     const contour = await createGaussianRenderer(device, format, { width: 64, height: 64, camera,

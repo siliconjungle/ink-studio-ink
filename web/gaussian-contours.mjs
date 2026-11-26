@@ -68,11 +68,11 @@ export async function createContourRaster(device, format, width, height, {
   const background = { r: words[8], g: words[9], b: words[10], a: 1 };
   const depthClear = { r: 1, g: 0, b: 0, a: 1 };
   const attachment = (view, clearValue) => ({ view, clearValue, loadOp: 'clear', storeOp: 'store' });
-  function drawGrid(encoder, pipeline, color, depth, bindings, count) {
+  function drawGrid(encoder, pipeline, color, depth, bindings, drawArgs) {
     const pass = encoder.beginRenderPass({ colorAttachments: [attachment(color, background), attachment(depth, depthClear)] });
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindings);
-    pass.draw(4, count);
+    pass.drawIndirect(drawArgs, 0);
     pass.end();
   }
   return {
@@ -83,9 +83,9 @@ export async function createContourRaster(device, format, width, height, {
         { binding: 6, resource: { buffer: viewport } },
       ] });
     },
-    draw(encoder, target, bindings, count) {
-      drawGrid(encoder, highPipeline, highColor, highDepth, bindings, count);
-      drawGrid(encoder, nativePipeline, nativeColor, nativeDepth, bindings, count);
+    draw(encoder, target, bindings, drawArgs) {
+      drawGrid(encoder, highPipeline, highColor, highDepth, bindings, drawArgs);
+      drawGrid(encoder, nativePipeline, nativeColor, nativeDepth, bindings, drawArgs);
       const pass = encoder.beginRenderPass({ colorAttachments: [attachment(target, background)] });
       pass.setPipeline(resolve);
       pass.setBindGroup(0, inputs);

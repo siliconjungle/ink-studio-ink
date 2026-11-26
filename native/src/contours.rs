@@ -1,3 +1,4 @@
+use super::SplatDraw;
 use wgpu::util::DeviceExt;
 
 /// Palette and depth settings for native-resolution Colored Contours.
@@ -84,7 +85,7 @@ impl Grid {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         bindings: &wgpu::BindGroup,
-        count: u32,
+        draw: &SplatDraw<'_>,
         background: wgpu::Color,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -105,7 +106,7 @@ impl Grid {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bindings, &[]);
-        pass.draw(0..4, 0..count);
+        draw.raster(&mut pass);
     }
 }
 
@@ -272,10 +273,10 @@ impl ContourRaster {
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         bindings: &wgpu::BindGroup,
-        count: u32,
+        draw: &SplatDraw<'_>,
     ) {
-        self.high.draw(encoder, bindings, count, self.background);
-        self.native.draw(encoder, bindings, count, self.background);
+        self.high.draw(encoder, bindings, draw, self.background);
+        self.native.draw(encoder, bindings, draw, self.background);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Colored Contours resolve"),
             color_attachments: &[attachment(target, wgpu::Color::BLACK)],

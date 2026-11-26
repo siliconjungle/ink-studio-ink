@@ -69,7 +69,15 @@ fn computes_and_draws_from_the_same_device_buffer() {
         );
     }
 
+    camera["eye"] = json!([500, 0, 0]);
+    renderer.update_camera(&device, &camera).unwrap();
+    let hidden = draw_fixture(&device, &queue, &texture, &readback, &renderer);
+    assert!(hidden.chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255]));
     camera["eye"] = json!([0, 0, 0]);
+    renderer.update_camera(&device, &camera).unwrap();
+    let restored = draw_fixture(&device, &queue, &texture, &readback, &renderer);
+    assert!(restored[32 * 256 + 32 * 4] > 170);
+
     let solid = json!([{"position": [0.25, 0.25, -2], "covariance0": [4, 0, 0],
         "covariance1": [4, 0, 0], "reach": 3, "rgb": 255, "alpha": 1}]);
     let contour = GaussianRenderer::with_contours(&device, &queue, format, [64, 64], &solid,

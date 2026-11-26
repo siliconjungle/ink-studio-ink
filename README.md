@@ -2,7 +2,7 @@
 
 This repository ports Ink Studio's Gaussian splat toolkit to [Ink Lang](https://github.com/siliconjungle/ink-lang). The first renderer takes screen-space or world-space Gaussian covariances and produces the axes, color and opacity for instanced Gaussian quads. It handles perspective and orthographic cameras, clipping and offscreen splats, and gives circular splats a stable orientation. The world path sorts far to near and retains input order at equal depths. The source follows [Ink Studio's WebGPU projection](https://github.com/siliconjungle/shapeshift-labs-ink-studio/blob/66eafbc93224aaef24c7c72a8c38487679af4999/src/webgpu/gaussian-shaders.mjs#L92-L158).
 
-`src/gaussian.ink` builds to native Rust, JavaScript and WGSL. The GPU path produces a packed buffer of ellipses. The native and browser renderers bind that buffer directly and share `shaders/gaussian.wgsl` for rasterization. The caller creates the device and render target. Screen-space inputs use the supplied compositing order. World-space inputs use the supplied camera pose and keep splat data resident across camera changes. A renderer retains a single target size and an input capacity determined by the initial rows.
+`src/gaussian.ink` builds to native Rust, JavaScript and WGSL. The GPU path produces a packed buffer of ellipses. The native and browser renderers bind that buffer directly and share `shaders/gaussian.wgsl` for rasterization. WebGPU and native wgpu on Metal, Vulkan, and Direct3D 12 use the packed row count to draw only projected splats, with the draw count staying on the GPU. The caller creates the device and render target. Screen-space inputs use the supplied compositing order. World-space inputs use the supplied camera pose and keep splat data resident across camera changes. A renderer retains a single target size and an input capacity determined by the initial rows.
 
 Colored Contours is available for sorted world and skinned views. One Ink projection and depth sort supplies the native grid and a double-resolution grid. The native grid snaps splats to pixel centers. Solid coverage on the finer grid determines the silhouette, and the shared WGSL resolve applies the palette and ordered dither. Use Rust's `with_contours` or the browser renderer's `contours` option. Each palette uses packed `0xRRGGBB` colors and begins with its background.
 
@@ -54,7 +54,7 @@ Lathe profiles can also ripple as they taper. The same profile drives the signed
 
 ## Build and check
 
-Use [Ink Lang commit `ca47d82`](https://github.com/siliconjungle/ink-lang/commit/ca47d82e898fe28345f6b397f48bc0ec848c4d23) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build uses Node.js to request checked Rust borrows for the bake's immutable geometry inputs. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
+Use [Ink Lang commit `3769737`](https://github.com/siliconjungle/ink-lang/commit/3769737c6f86459dbf66d10ab77fa5c243d76f2e) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build uses Node.js to request checked Rust borrows for the bake's immutable geometry inputs, including optional geometry. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
 
 ```sh
 ./scripts/build.sh --gpu

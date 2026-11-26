@@ -26,10 +26,10 @@ function containsOwner(type, visited = new Set()) {
     Array.isArray(value) ? value.some(child => containsOwner(child, visited)) : containsOwner(value, visited));
 }
 
-// These bake modules are nonrecursive. The compiler independently checks
+// The compiler independently checks
 // each lexical site and its carrier before emitting borrowed Rust helpers.
 const sites = program.functions.flatMap(fn => fn.params.flatMap(([parameter, type]) => {
-  if (typeof type !== 'object' || (!('Named' in type) && !('List' in type)) || containsOwner(type)) return [];
+  if (typeof type !== 'object' || !['Named', 'List', 'Option', 'Result'].some(carrier => carrier in type) || containsOwner(type)) return [];
   return [hash(JSON.stringify({ capability: 'ink-parameter-read-v1', function: fn.name, parameter }))];
 })).sort();
 const physical = { schema: 1, semantics: 'ink-physical-plan-v1', input_core_sha256: moduleHash, borrow_reads: sites };

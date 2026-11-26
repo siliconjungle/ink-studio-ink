@@ -15,6 +15,7 @@ pub struct GaussianRenderer {
     viewport: wgpu::Buffer,
     half_viewport: [f32; 2],
     bindings: Option<(wgpu::Buffer, wgpu::BindGroup)>,
+    draw_args: Option<wgpu::Buffer>,
     count: u32,
     skin_rows: u32,
 }
@@ -22,6 +23,20 @@ pub struct GaussianRenderer {
 enum Raster {
     Smooth(wgpu::RenderPipeline),
     Contours(Box<ContourRaster>),
+}
+
+enum SplatDraw<'a> {
+    Visible(&'a wgpu::Buffer),
+    Capacity(u32),
+}
+
+impl SplatDraw<'_> {
+    fn raster(&self, pass: &mut wgpu::RenderPass<'_>) {
+        match self {
+            Self::Visible(args) => pass.draw_indirect(args, 0),
+            Self::Capacity(count) => pass.draw(0..4, 0..*count),
+        }
+    }
 }
 
 pub enum WorldOrder {
@@ -181,6 +196,17 @@ impl GaussianRenderer {
         let session = engine.open(&plan, Backend::GpuRequired)?["session"]
             .as_u64()
             .ok_or("Missing Ink GPU session")?;
+        let draw_args = match device.adapter_info().backend {
+            wgpu::Backend::Vulkan | wgpu::Backend::Metal | wgpu::Backend::Dx12 | wgpu::Backend::BrowserWebGpu => {
+                let args = wgpu::util::DrawIndirectArgs { vertex_count: 4, ..Default::default() };
+                Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Visible splat draw arguments"),
+                    contents: args.as_bytes(),
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::INDIRECT,
+                }))
+            }
+            _ => None,
+        };
         let mut renderer = Self {
             engine,
             session,
@@ -188,6 +214,7 @@ impl GaussianRenderer {
             viewport,
             half_viewport,
             bindings: None,
+            draw_args,
             count,
             skin_rows,
         };
@@ -279,11 +306,18 @@ impl GaussianRenderer {
     }
 
     pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
-        let bindings = &self.bindings.as_ref().expect("renderer prepared").1;
+        let (ellipses, bindings) = self.bindings.as_ref().expect("renderer prepared");
+        let draw = if let Some(args) = &self.draw_args {
+            // Ink's list header is the compacted row count. A GPU copy patches instance_count.
+            encoder.copy_buffer_to_buffer(ellipses, 0, args, 4, 4);
+            SplatDraw::Visible(args)
+        } else {
+            SplatDraw::Capacity(self.count)
+        };
         let pipeline = match &self.raster {
             Raster::Smooth(pipeline) => pipeline,
             Raster::Contours(contour) => {
-                contour.draw(encoder, target, bindings, self.count);
+                contour.draw(encoder, target, bindings, &draw);
                 return;
             }
         };
@@ -302,7 +336,7 @@ impl GaussianRenderer {
         });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, bindings, &[]);
-        pass.draw(0..4, 0..self.count);
+        draw.raster(&mut pass);
     }
 }
 
