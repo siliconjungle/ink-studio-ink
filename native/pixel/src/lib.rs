@@ -165,7 +165,70 @@ fn coordinate(value: &Json, limit: u32) -> Option<u32> {
     token.parse::<u32>().ok().filter(|&n| n < limit)
 }
 
-fn coordinate_runs([width, height]: [u32; 2], pixels: Json, limit: u32) -> Vec<u32> {
+fn coordinate_slot([width, height]: [u32; 2], point: &Json) -> u32 {
+    match point {
+        Json::Array(pair) if pair.len() == 2 => coordinate(&pair[0], width)
+            .zip(coordinate(&pair[1], height))
+            .map_or(u32::MAX, |(x, y)| y * width + x),
+        _ => u32::MAX,
+    }
+}
+
+fn pack_named_pixels(input: &mut Json) -> Vec<Vec<u32>> {
+    let Json::Object(fields) = input else {
+        return Vec::new();
+    };
+    let Some(Json::Number(version)) = fields
+        .iter()
+        .find(|(key, _)| key == "version")
+        .map(|(_, v)| v)
+    else {
+        return Vec::new();
+    };
+    if version != "2" {
+        return Vec::new();
+    }
+    let dimension = |name: &str| {
+        fields
+            .iter()
+            .find(|(key, _)| key == name)
+            .and_then(|(_, value)| coordinate(value, 513))
+            .filter(|&n| n != 0)
+    };
+    let Some(canvas) = dimension("width")
+        .zip(dimension("height"))
+        .map(|(w, h)| [w, h])
+    else {
+        return Vec::new();
+    };
+    let Some(Json::Array(rows)) = fields
+        .iter_mut()
+        .find(|(key, _)| key == "selections")
+        .map(|(_, v)| v)
+    else {
+        return Vec::new();
+    };
+    rows.iter_mut()
+        .map(|row| {
+            let Json::Object(fields) = row else {
+                return Vec::new();
+            };
+            let Some(Json::Array(pixels)) = fields
+                .iter_mut()
+                .find(|(key, _)| key == "pixels")
+                .map(|(_, v)| v)
+            else {
+                return Vec::new();
+            };
+            std::mem::take(pixels)
+                .iter()
+                .map(|point| coordinate_slot(canvas, point))
+                .collect()
+        })
+        .collect()
+}
+
+fn coordinate_runs(canvas: [u32; 2], pixels: Json, limit: u32) -> Vec<u32> {
     let Json::Array(points) = pixels else {
         return Vec::new();
     };
@@ -175,12 +238,7 @@ fn coordinate_runs([width, height]: [u32; 2], pixels: Json, limit: u32) -> Vec<u
     }
     let mut runs = vec![count as u32];
     for point in points {
-        let slot = match point {
-            Json::Array(pair) if pair.len() == 2 => coordinate(&pair[0], width)
-                .zip(coordinate(&pair[1], height))
-                .map_or(u32::MAX, |(x, y)| y * width + x),
-            _ => u32::MAX,
-        };
+        let slot = coordinate_slot(canvas, &point);
         let end = runs.len() - 1;
         if end > 0 && runs[end - 1].checked_add(runs[end]) == Some(slot) {
             runs[end] += 1;
@@ -320,9 +378,56 @@ pub fn select_pixel_mask_with_raster(
         }
         .into());
     }
+    let prepared = prepare_selection([width, height], query, saved)?;
+    let program = State::new();
+    let build = |kind, scalar, flag, values, keys| {
+        program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
+    };
+    let (nodes, saved, runs) = prepared.compile(&build);
+    match indexed {
+        Some(indexed) => program.function_l_select_pixel_words_from_raster(
+            nodes,
+            width,
+            height,
+            rgba,
+            saved,
+            runs,
+            large,
+            indexed.slots,
+            indexed.alpha,
+            indexed.clipping,
+            indexed.ids,
+        ),
+        None => {
+            program.function_l_select_pixel_words(nodes, width, height, rgba, saved, runs, large)
+        }
+    }
+}
+
+struct SelectionInput {
+    nodes: Vec<Json>,
+    saved: Json,
+    runs: Vec<Vec<u32>>,
+}
+
+impl SelectionInput {
+    fn compile<T>(
+        self,
+        build: &impl Fn(u32, String, bool, Vec<T>, Vec<String>) -> T,
+    ) -> (Vec<T>, T, Vec<Vec<u32>>) {
+        let nodes = self
+            .nodes
+            .into_iter()
+            .map(|node| compiled_json(node, build))
+            .collect();
+        (nodes, compiled_json(self.saved, build), self.runs)
+    }
+}
+
+fn prepare_selection(canvas: [u32; 2], query: &str, saved: &str) -> Result<SelectionInput, String> {
     let OrderedJson(query) = serde_json::from_str(query).map_err(|error| error.to_string())?;
     let OrderedJson(saved) = serde_json::from_str(saved).map_err(|error| error.to_string())?;
-    let canvas = [width, height];
+    let [width, height] = canvas;
     let mut runs = Vec::new();
     let mut nodes = Vec::new();
     append_selection_node(query, canvas, &mut nodes, &mut runs);
@@ -344,32 +449,81 @@ pub fn select_pixel_mask_with_raster(
             }
         }
     }
-    let program = State::new();
-    let build = |kind, scalar, flag, values, keys| {
-        program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
-    };
-    let nodes = nodes
-        .into_iter()
-        .map(|node| compiled_json(node, &build))
-        .collect();
-    let saved = compiled_json(Json::Object(packed_saved), &build);
-    match indexed {
-        Some(indexed) => program.function_l_select_pixel_words_from_raster(
-            nodes,
-            width,
-            height,
-            rgba,
-            saved,
-            runs,
-            large,
-            indexed.slots,
-            indexed.alpha,
-            indexed.clipping,
-            indexed.ids,
-        ),
-        None => {
-            program.function_l_select_pixel_words(nodes, width, height, rgba, saved, runs, large)
-        }
+    Ok(SelectionInput {
+        nodes,
+        saved: Json::Object(packed_saved),
+        runs,
+    })
+}
+
+#[derive(Debug, PartialEq, serde::Serialize)]
+pub struct PixelSelection {
+    pub frame: String,
+    pub grid: [u32; 2],
+    pub pixels: Vec<[u32; 2]>,
+}
+
+pub struct PixelEditor {
+    program: State,
+    grid: [u32; 2],
+}
+
+impl PixelEditor {
+    pub fn new(source: &str) -> Result<Self, String> {
+        let mut editor = Self {
+            program: State::new(),
+            grid: [0, 0],
+        };
+        editor.replace_document(source)?;
+        Ok(editor)
+    }
+
+    pub fn replace_document(&mut self, source: &str) -> Result<(), String> {
+        let OrderedJson(mut input) =
+            serde_json::from_str(source).map_err(|error| error.to_string())?;
+        let build = |kind, scalar, flag, values, keys| {
+            self.program
+                .function_l_pixel_json_value(kind, scalar, flag, values, keys)
+        };
+        let positions = pack_named_pixels(&mut input);
+        let document = compiled_json(input, &build);
+        let grid = self
+            .program
+            .invoke_view_l_load_pixel_editor(document, positions)?
+            .result?;
+        self.grid = [grid.l_width, grid.l_height];
+        Ok(())
+    }
+
+    pub fn select(
+        &mut self,
+        query: &str,
+        frame: Option<&str>,
+        layer: Option<&str>,
+        cel: Option<&str>,
+        saved: &str,
+    ) -> Result<PixelSelection, String> {
+        let build = |kind, scalar, flag, values, keys| {
+            self.program
+                .function_l_pixel_json_value(kind, scalar, flag, values, keys)
+        };
+        let (nodes, saved, runs) = prepare_selection(self.grid, query, saved)?.compile(&build);
+        let selected = self
+            .program
+            .invoke_view_l_select_pixel_editor(
+                nodes,
+                saved,
+                runs,
+                frame.map(str::to_owned),
+                layer.map(str::to_owned),
+                cel.map(str::to_owned),
+            )?
+            .result?;
+        Ok(PixelSelection {
+            frame: selected.l_frame,
+            grid: [selected.l_grid.l_width, selected.l_grid.l_height],
+            pixels: mask_pixels(selected.l_grid.l_width, &selected.l_words),
+        })
     }
 }
 

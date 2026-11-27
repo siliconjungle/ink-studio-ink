@@ -1,5 +1,5 @@
 use ink_studio_pixel::{
-    IndexedSelectionRaster, mask_pixels, open_pixel_document, rasterize_pixel_frame,
+    IndexedSelectionRaster, PixelEditor, mask_pixels, open_pixel_document, rasterize_pixel_frame,
     select_pixel_mask_with_raster,
 };
 use serde::Deserialize;
@@ -34,28 +34,24 @@ struct FrameRequest<'a> {
 fn frame(path: std::ffi::OsString, select: bool) -> Result<(), String> {
     let source = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     let request: FrameRequest = serde_json::from_str(&source).map_err(|error| error.to_string())?;
-    let raster = rasterize_pixel_frame(
-        request.document.get(),
-        request.frame.as_deref(),
-        request.layer.as_deref(),
-        request.cel.as_deref(),
-    )?;
     let output = if select {
         let query = request.query.ok_or("Document selection needs a query")?;
-        let words = select_pixel_mask_with_raster(
-            raster.width,
-            raster.height,
+        let mut editor = PixelEditor::new(request.document.get())?;
+        let selection = editor.select(
             query.get(),
-            raster.rgba,
+            request.frame.as_deref(),
+            request.layer.as_deref(),
+            request.cel.as_deref(),
             request.saved.map_or("{}", RawValue::get),
-            false,
-            Some(raster.indexed),
         )?;
-        serde_json::to_string(&serde_json::json!({
-            "frame": raster.frame, "grid": [raster.width, raster.height],
-            "pixels": mask_pixels(raster.width, &words),
-        }))
+        serde_json::to_string(&selection)
     } else {
+        let raster = rasterize_pixel_frame(
+            request.document.get(),
+            request.frame.as_deref(),
+            request.layer.as_deref(),
+            request.cel.as_deref(),
+        )?;
         serde_json::to_string(&raster)
     };
     println!("{}", output.map_err(|error| error.to_string())?);

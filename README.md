@@ -74,7 +74,9 @@ cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- artwork.
 
 `rasterizePixelFrame(source, { frame, layer, cel })` compiles artwork into indexed slots, alpha, clipping and packed RGBA. Omit `layer` and `cel` for the frame composite. The same Ink code runs on both targets and handles held cels, content offsets, layer groups, blend modes, clipping masks, and authored point, run, stair, rectangle, path and polygon marks. The compiler needs `f64_from_decimal` to read authored numbers.
 
-`selectPixelFrame(source, query, scope)` runs selection on the resolved raster and returns the frame, grid and selected coordinates. A caller doing multiple selections on an unchanged frame can retain the raster and pass it to `selectPixels` as the `indexed` option with `rgba: raster.rgba`.
+`selectPixelFrame(source, query, scope)` runs selection on the resolved raster and returns the frame, grid and selected coordinates. Use `createPixelEditor(source)` for repeated selections. Its `select(query, scope)` method reuses the last raster for the same resolved frame and layer, including when the scope is given as a cel. `replaceDocument(source)` validates and installs a fresh snapshot, then clears the cached raster. Rust provides the same lifecycle through `PixelEditor::new`, `select` and `replace_document`.
+
+Use `{ type: 'recall', id }` to resolve a document's saved selection. An unscoped top-level recall selects its saved frame. Recalls within a composed query use the active frame.
 
 `raster` and `select-document` are the native equivalents. Their JSON request contains `document` and optional `frame`, `layer` or `cel`. Add `query` for `select-document`.
 

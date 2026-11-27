@@ -1,4 +1,4 @@
-import { call, callOwned, compiledValues, JsonCodec } from '../build/pixel_document.mjs';
+import { call, callOwned, compiledValues, createState, JsonCodec } from '../build/pixel_document.mjs';
 
 const codec = new JsonCodec(compiledValues.open_pixel_document.params[0]);
 const utf8 = new TextEncoder();
@@ -30,9 +30,83 @@ export function rasterizePixelFrame(source, { frame = '', layer = '', cel = '' }
 }
 
 export function selectPixelFrame(source, query, { saved, ...scope } = {}) {
-  const raster = rasterizePixelFrame(source, scope);
-  return { frame: raster.frame, grid: [raster.width, raster.height],
-    pixels: selectPixels(raster.width, raster.height, query, { rgba: raster.rgba, indexed: raster, saved }) };
+  return createPixelEditor(source).select(query, { ...scope, saved });
+}
+
+export function createPixelEditor(source) {
+  const state = createState();
+  // JSON's typed representation has multiple schema levels per authored level.
+  const load = state.bind('load_pixel_editor', { resultOnly: true, inputLimits: { depth: 512, nodes: 8000000 } });
+  const pick = state.bind('select_pixel_editor', { resultOnly: true });
+  let grid;
+  function replaceDocument(source) {
+    const input = typeof source === 'string' ? JSON.parse(source) : source;
+    const { document, positions } = packNamedPixels(input);
+    grid = unwrap(load(codec.fromJS(document), positions));
+  }
+  function select(query, { frame, layer, cel, saved = {} } = {}) {
+    const { encoded, packedSaved, runs } = prepareSelection(grid.width, grid.height, query, saved);
+    const chosen = unwrap(pick(encoded, packedSaved, runs, option(frame), option(layer), option(cel)));
+    return { frame: chosen.frame, grid: [chosen.grid.width, chosen.grid.height],
+      pixels: maskPixels(chosen.grid.width, chosen.words) };
+  }
+  replaceDocument(source);
+  return Object.freeze({ replaceDocument, select });
+}
+
+function ownData(value, key) {
+  if (!value || typeof value !== 'object') return undefined;
+  const field = Object.getOwnPropertyDescriptor(value, key);
+  return field?.enumerable && Object.hasOwn(field, 'value') ? field.value : undefined;
+}
+
+function documentPoint(width, height, point) {
+  if (!Array.isArray(point) || point.length !== 2) return 0xffffffff;
+  const x = ownData(point, '0'), y = ownData(point, '1');
+  return Number.isInteger(x) && Number.isInteger(y) && x >= 0 && x < width && y >= 0 && y < height
+    ? y * width + x : 0xffffffff;
+}
+
+// Keep authored coordinates in one typed list per saved region so a full native
+// canvas does not cross the recursive JSON ABI as hundreds of thousands of tags.
+function packNamedPixels(input) {
+  if (ownData(input, 'version') !== 2) return { document: input, positions: [] };
+  const width = ownData(input, 'width'), height = ownData(input, 'height');
+  const selections = ownData(input, 'selections');
+  if (!Array.isArray(selections) || ![width, height].every(n => Number.isInteger(n) && n > 0 && n <= 512)) {
+    return { document: input, positions: [] };
+  }
+  const positions = [];
+  const rows = [];
+  for (let rowIndex = 0; rowIndex < selections.length; rowIndex++) {
+    const row = ownData(selections, rowIndex);
+    const pixels = ownData(row, 'pixels');
+    if (!Array.isArray(pixels)) {
+      positions.push([]);
+      rows.push(row);
+      continue;
+    }
+    const slots = new Uint32Array(pixels.length);
+    for (let i = 0; i < slots.length; i++) slots[i] = documentPoint(width, height, ownData(pixels, i));
+    positions.push(slots);
+    rows.push(replacingDataField(row, 'pixels', []));
+  }
+  return { document: replacingDataField(input, 'selections', rows), positions };
+}
+
+function replacingDataField(source, name, value) {
+  const fields = Object.getOwnPropertyDescriptors(source);
+  fields[name].value = value;
+  return Object.create(Object.getPrototypeOf(source), fields);
+}
+
+function option(value) {
+  return value === undefined ? { None: null } : { Some: value };
+}
+
+function unwrap(result) {
+  if (Object.hasOwn(result, 'Err')) throw new Error(result.Err);
+  return result.Ok;
 }
 
 function coordinateRuns(width, height, points, limit) {
@@ -49,12 +123,7 @@ function coordinateRuns(width, height, points, limit) {
   return result;
 }
 
-export function selectPixelMask(width, height, query, { rgba = [], saved = {}, large = false, indexed } = {}) {
-  const limit = large ? 8192 : 512;
-  if (![width, height].every(n => Number.isInteger(n) && n >= 1 && n <= limit) || width * height > 16777216) {
-    throw new RangeError(large ? 'Selection exceeds the material canvas budget' :
-      'Pixel selections need a canvas from 1 to 512 pixels on each axis');
-  }
+function prepareSelection(width, height, query, saved) {
   const runs = [];
   const pack = (points, limit = width * height) => runs.push(coordinateRuns(width, height, points, limit));
   const nodes = [];
@@ -91,10 +160,20 @@ export function selectPixelMask(width, height, query, { rgba = [], saved = {}, l
     return index + 1;
   }
   append(query);
-  const encoded = nodes.map(value => codec.fromJS(value));
+  return { encoded: nodes.map(value => codec.fromJS(value)),
+    packedSaved: codec.fromJS(Object.fromEntries(recalled)), runs, usesColor };
+}
+
+export function selectPixelMask(width, height, query, { rgba = [], saved = {}, large = false, indexed } = {}) {
+  const limit = large ? 8192 : 512;
+  if (![width, height].every(n => Number.isInteger(n) && n >= 1 && n <= limit) || width * height > 16777216) {
+    throw new RangeError(large ? 'Selection exceeds the material canvas budget' :
+      'Pixel selections need a canvas from 1 to 512 pixels on each axis');
+  }
+  const { encoded, packedSaved, runs, usesColor } = prepareSelection(width, height, query, saved);
   const colors = usesColor && rgba != null && rgba.length === width * height
     ? rgba instanceof Uint32Array ? rgba : checkedColors(rgba) : [];
-  const args = [encoded, width, height, colors, codec.fromJS(Object.fromEntries(recalled)), runs, large];
+  const args = [encoded, width, height, colors, packedSaved, runs, large];
   if (indexed != null) {
     const { slots, alpha = [], clipping = [], ids = [] } = indexed;
     const signed = slots instanceof Int16Array || slots instanceof Int32Array
@@ -125,7 +204,10 @@ function checkedWords(values, min, max) {
 }
 
 export function selectPixels(width, height, query, options) {
-  const words = selectPixelMask(width, height, query, options);
+  return maskPixels(width, selectPixelMask(width, height, query, options));
+}
+
+function maskPixels(width, words) {
   const pixels = [];
   for (let i = 0; i < words.length; i++) {
     let bits = words[i];

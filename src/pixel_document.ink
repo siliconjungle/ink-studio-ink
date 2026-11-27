@@ -14,6 +14,8 @@ record NameIndex { buckets: Map<u64, List<Identifier>>, duplicate: String, }
 record Visits { seen: Map<u32, u32>, issue: String, }
 record HoldWalk { visits: Visits, path: Buffer<u32>, current: u32, }
 record Opened { document: json.Json, legacy: Bool, }
+record FrameRaster { width: u32, height: u32, frame: String, slots: List<i32>, alpha: List<u32>,
+    clipping: List<u32>, ids: List<String>, rgba: List<u32>, }
 
 pub fn select_pixel_indices(query: List<json.Json>, width: u32, height: u32, rgba: List<u32>, saved: json.Json) -> Result<List<u32>, String> {
     let selected = selection.select(width, height, query, rgba, saved, [], false, false, mask.no_palette())?;
@@ -32,9 +34,12 @@ pub fn select_pixel_words_from_raster(query: List<json.Json>, width: u32, height
     return selection.select(width, height, query, rgba, saved, literal_runs, true, large, palette);
 }
 
-pub fn rasterize_pixel_frame(document: json.Json, frame: String, layer: String, cel: String) -> Result<frame_raster.Raster, String> {
+pub fn rasterize_pixel_frame(document: json.Json, frame: String, layer: String, cel: String) -> Result<FrameRaster, String> {
     let opened = open_pixel_document(document)?;
-    return frame_raster.compile(opened.document, frame, layer, cel);
+    let raster = frame_raster.compile(opened.document, frame, layer, cel)?;
+    let palette = raster.image.palette;
+    return Ok(FrameRaster { width: raster.width, height: raster.height, frame: raster.frame,
+        slots: palette.slots, alpha: palette.alpha, clipping: palette.clipping, ids: palette.ids, rgba: raster.image.rgba });
 }
 
 // Assemble the standard JSON value from already parsed native components.
@@ -413,4 +418,161 @@ pub fn open_pixel_document(document: json.Json) -> Result<Opened, String> {
     let checked: Unit = frames?;
     if !valid_palette(palette, legacy) { return Err("Pixel palettes need 1–255 RGB swatches keyed by stable ID"); }
     return Ok(Opened { document: if legacy { upgrade_legacy(items, layers) } else { document }, legacy: legacy });
+}
+
+record EditorDocument { artwork: frame_raster.Artwork, named: selection.Named, }
+record EditorSelection { frame: String, grid: mask.Grid, words: List<u32>, }
+record NamedBuild { ids: Buffer<String>, frames: Buffer<String>, packed: Buffer<Bool>, pixels: Buffer<List<u32>>,
+    seen: Map<u64, List<String>>, issue: String, }
+record NamedPixels { seen: Buffer<u32>, indices: Buffer<u32>, packed: Bool, issue: String, }
+
+state EditorArtwork: frame_raster.Artwork = frame_raster.empty_artwork();
+state EditorNamed: selection.Named = selection.no_named();
+state EditorScope: frame_raster.Scope = frame_raster.Scope { frame: "", layer: "" };
+state EditorImage: selection.Image = empty_editor_image();
+
+fn empty_editor_image() -> selection.Image {
+    return selection.Image { rgba: [], palette: mask.no_palette() };
+}
+
+fn prepare_editor(source: json.Json, positions: List<List<u32>>) -> Result<EditorDocument, String> {
+    let opened = open_pixel_document(source)?;
+    let art = frame_raster.prepare(opened.document);
+    let items = object(opened.document, "Expected a normalized pixel-art document")?;
+    let named = json.lookup(items, "selections").fold(fn(rows) =>
+        read_named(rows, art.grid, art.frames, positions), fn(unit) => Ok(selection.no_named()))?;
+    return Ok(EditorDocument { artwork: art, named: named });
+}
+
+fn read_named(raw: json.Json, g: mask.Grid, frames: List<String>, positions: List<List<u32>>) -> Result<selection.Named, String> {
+    let decoded: Result<List<json.Json>, String> = json.elements(raw).fold(fn(items) => Ok(items),
+        fn(issue) => Err("Pixel selections must be an array"));
+    let rows = decoded?;
+    let initial = NamedBuild { ids: Buffer.empty(), frames: Buffer.empty(), packed: Buffer.empty(),
+        pixels: Buffer.empty(), seen: Map.empty(), issue: "" };
+    let scanned = repeat_until(length(rows), initial, fn(old) => old.issue != "", fn(i) => fn(old) =>
+        add_named(rows.at_or(i, json.null()), positions.at_or(i, []), g, frames, old));
+    if scanned.issue != "" { return Err(scanned.issue); }
+    return Ok(selection.Named { ids: scanned.ids.freeze(), frames: scanned.frames.freeze(),
+        packed: scanned.packed.freeze(), pixels: scanned.pixels.freeze() });
+}
+
+fn add_named(raw: json.Json, positions: List<u32>, g: mask.Grid, frames: List<String>, old: NamedBuild) -> NamedBuild {
+    let items = json.members(raw).fold(fn(items) => items, fn(issue) => []);
+    let name = text(field(items, "id"));
+    let frame = text(field(items, "frame"));
+    let error = "Pixel selections needs unique IDs, pixel lists and optional known frames";
+    if !allowed(items, ["id", "frame", "pixels"]) || !stable_id(name) ||
+        (has(items, "frame") && !frame_raster.known_frame(frames, frame)) {
+        return NamedBuild { ..old, issue: error };
+    }
+    let key = id_hash(name);
+    let bucket = old.seen.get_or(key, []);
+    if selection.named_slot(bucket, name) != 4294967295 { return NamedBuild { ..old, issue: error }; }
+    let points: Result<List<json.Json>, String> = json.elements(field(items, "pixels")).fold(fn(values) => Ok(values), fn(reason) => Err(error));
+    return points.fold(fn(coords) => pack_named(g, if length(coords) == 0 { positions } else { coords.map(fn(row) => named_position(g, row)) },
+        name, frame, key, bucket, old),
+        fn(issue) => NamedBuild { ..old, issue: issue });
+}
+
+fn pack_named(g: mask.Grid, coords: List<u32>, name: String, frame: String, key: u64,
+    bucket: List<String>, old: NamedBuild) -> NamedBuild {
+    let empty: Buffer<u32> = Buffer.empty();
+    let visited = if length(coords) == 0 { empty } else { mask.blank(g) };
+    let packed = length(coords) >= mask.word_count(g);
+    let initial = NamedPixels { seen: visited, indices: Buffer.empty(), packed: packed, issue: "" };
+    let selected = foldl(coords, initial, fn(row) => fn(state) =>
+        if state.issue != "" { state } else { append_named(g, name, row, state) });
+    if selected.issue != "" { return NamedBuild { ..old, issue: selected.issue }; }
+    let pixels = if packed { selected.seen.freeze() } else { selected.indices.freeze() };
+    return NamedBuild { ids: old.ids.push(name), frames: old.frames.push(frame), packed: old.packed.push(packed),
+        pixels: old.pixels.push(pixels), seen: old.seen.set(key, bucket.concat([name])), issue: "" };
+}
+
+fn named_position(g: mask.Grid, raw: json.Json) -> u32 {
+    let at = selection.point(pair(raw), g);
+    return if selection.inside(at, g) { mask.index(g, at) } else { 4294967295 };
+}
+
+fn append_named(g: mask.Grid, name: String, p: u32, state: NamedPixels) -> NamedPixels {
+    if p >= mask.size(g) {
+        return NamedPixels { ..state, issue: named_issue(name, " has a pixel outside the native grid") };
+    }
+    if word_and(state.seen.at_or(mask.word_slot(p), 0), mask.word_bit(p)) != 0 {
+        let x = frame_raster.decimal(rem_or(p, g.width, 0));
+        let y = frame_raster.decimal(quot_or(p, g.width, 0));
+        let position = string_concat(x, string_concat(",", y));
+        return NamedPixels { ..state, issue: named_issue(name, string_concat(" repeats pixel ", position)) };
+    }
+    let indices = if state.packed { state.indices } else { state.indices.push(p) };
+    return NamedPixels { ..state, seen: mask.mark(state.seen, p), indices: indices };
+}
+
+fn named_issue(id: String, problem: String) -> String {
+    return string_concat("Pixel selections ", string_concat(id, problem));
+}
+
+fn recall_default(query: json.Json, named: selection.Named, supplied: json.Json) -> Result<String, String> {
+    let item = json.members(query).fold(fn(items) => items, fn(issue) => []);
+    if text(field(item, "type")) != "recall" { return Ok(""); }
+    let id = field(item, "id");
+    let name = text(id);
+    let overrides = json.members(supplied).fold(fn(rows) => rows, fn(issue) => []);
+    if has(overrides, name) { return Ok(""); }
+    let slot = selection.named_slot(named.ids, name);
+    if slot != 4294967295 { return Ok(named.frames.at_or(slot, "")); }
+    let label = if !has(item, "id") { "undefined" } else { recall_label(id) };
+    return Err(string_concat("Unknown pixel selection ", label));
+}
+
+fn recall_label(raw: json.Json) -> String {
+    return json.as_text(raw).fold(fn(value) => value, fn(issue) =>
+        json.as_number(raw).fold(fn(value) => value, fn(issue) =>
+            json.as_boolean(raw).fold(fn(value) => if value { "true" } else { "false" },
+                fn(issue) => if raw == json.null() { "null" } else { "[object Object]" })));
+}
+
+fn resolve_editor_scope(art: frame_raster.Artwork, named: selection.Named, root: json.Json,
+    supplied: json.Json, frame: Option<String>, layer: Option<String>, cel: Option<String>) -> Result<frame_raster.Scope, String> {
+    if art.grid.width == 0 { return Err("Open a pixel document before selecting"); }
+    if layer.fold(fn(id) => true, fn(unit) => false) && cel.fold(fn(id) => true, fn(unit) => false) {
+        return Err("Select from the composite, a layer or a cel");
+    }
+    if frame.fold(fn(id) => true, fn(unit) => false) || cel.fold(fn(id) => true, fn(unit) => false) {
+        return frame_raster.resolve(art, frame, layer, cel);
+    }
+    let active = recall_default(root, named, supplied)?;
+    return frame_raster.resolve(art, frame_raster.optional_scope(active), layer, cel);
+}
+
+fn editor_selection(g: mask.Grid, scope: frame_raster.Scope, image: selection.Image,
+    named: selection.Named, query: List<json.Json>, saved: json.Json, runs: List<List<u32>>) -> Result<EditorSelection, String> {
+    let request = selection.request(g, query, saved, runs, true);
+    let words = selection.evaluate(request, image, named, scope.frame)?;
+    return Ok(EditorSelection { frame: scope.frame, grid: g, words: words });
+}
+
+fn first_query(query: List<json.Json>) -> json.Json { return query.at_or(0, json.null()); }
+
+change load_pixel_editor(document: json.Json, positions: List<List<u32>>) -> Result<mask.Grid, String>
+    writes(EditorArtwork, EditorNamed, EditorScope, EditorImage) {
+    let prepared = prepare_editor(document, positions)?;
+    let grid = prepared.artwork.grid;
+    EditorArtwork = prepared.artwork;
+    EditorNamed = prepared.named;
+    EditorScope = frame_raster.Scope { frame: "", layer: "" };
+    EditorImage = empty_editor_image();
+    return Ok(grid);
+}
+
+change select_pixel_editor(query: List<json.Json>, saved: json.Json, runs: List<List<u32>>,
+    frame: Option<String>, layer: Option<String>, cel: Option<String>) -> Result<EditorSelection, String>
+    reads(EditorArtwork, EditorNamed, EditorScope, EditorImage) writes(EditorScope, EditorImage) {
+    let scope = resolve_editor_scope(EditorArtwork, EditorNamed, first_query(query), saved, frame, layer, cel)?;
+    if scope != EditorScope {
+        let raster = frame_raster.raster(EditorArtwork, scope)?;
+        EditorScope = scope;
+        EditorImage = raster.image;
+    }
+    return editor_selection(frame_raster.artwork_grid(EditorArtwork), scope, EditorImage, EditorNamed, query, saved, runs);
 }

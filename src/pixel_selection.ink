@@ -7,12 +7,12 @@ import "pixel_labels.ink" as labels;
 record Inputs {
     grid: mask.Grid,
     nodes: List<json.Json>,
-    rgba: List<u32>,
     saved: List<json.Member>,
     runs: List<List<u32>>,
     packed: Bool,
-    palette: mask.PaletteRaster,
 }
+record Image { rgba: List<u32>, palette: mask.PaletteRaster, }
+record Named { ids: List<String>, frames: List<String>, packed: List<Bool>, pixels: List<List<u32>>, }
 record Job { operation: String, query: json.Json, }
 record Run { pending: Buffer<Job>, values: Buffer<List<u32>>, count: u32, issue: String, }
 record Choice { mask: List<u32>, issue: String, }
@@ -171,23 +171,44 @@ fn literal(input: Inputs, raw: json.Json) -> Choice {
     return finish_literal(raster, length(coords));
 }
 
-fn recall(input: Inputs, query: List<json.Member>) -> Choice {
+fn recall(input: Inputs, named: Named, frame: String, query: List<json.Member>) -> Choice {
     let id = field(query, "id");
     if !allowed(query, ["id"]) || !is_text(id) { return bad("Recall needs a saved selection ID"); }
-    return json.lookup(input.saved, text(id)).fold(fn(raw) => literal(input, raw),
-        fn(unit) => bad(string_concat("Unknown saved selection ", text(id))));
+    let name = text(id);
+    return json.lookup(input.saved, name).fold(fn(raw) => literal(input, raw),
+        fn(unit) => recall_named(input.grid, named, frame, name));
 }
 
-fn wand(input: Inputs, query: List<json.Member>) -> Choice {
+fn no_named() -> Named { return Named { ids: [], frames: [], packed: [], pixels: [] }; }
+
+fn named_slot(ids: List<String>, name: String) -> u32 {
+    return repeat_until(length(ids), 4294967295, fn(found) => found != 4294967295,
+        fn(i) => fn(found) => if ids.at_or(i, "") == name { i } else { found });
+}
+
+fn recall_named(g: mask.Grid, named: Named, frame: String, name: String) -> Choice {
+    let slot = named_slot(named.ids, name);
+    if slot == 4294967295 {
+        return bad(string_concat(if frame == "" { "Unknown saved selection " } else { "Unknown pixel selection " }, name));
+    }
+    let scope = named.frames.at_or(slot, "");
+    if scope != "" && scope != frame { return bad(string_concat("Pixel selection belongs to frame ", scope)); }
+    let pixels = named.pixels.at_or(slot, []);
+    if named.packed.at_or(slot, false) { return chosen(pixels); }
+    let words = foldl(pixels, mask.blank(g), fn(p) => fn(out) => mask.mark(out, p));
+    return chosen(words.freeze());
+}
+
+fn wand(g: mask.Grid, rgba: List<u32>, query: List<json.Member>) -> Choice {
     if !allowed(query, ["at", "tolerance", "connected"]) { return bad(bad_tool()); }
-    let p = point(items(field(query, "at")), input.grid);
+    let p = point(items(field(query, "at")), g);
     let tolerance = optional_word(query, "tolerance", 0);
     let connected = json.lookup(query, "connected").fold(fn(value) => json.as_boolean(value), fn(unit) => Ok(true));
     let valid = connected.fold(fn(value) => true, fn(reason) => false);
-    if !inside(p, input.grid) || tolerance > 255 || !valid || length(input.rgba) != mask.size(input.grid) {
+    if !inside(p, g) || tolerance > 255 || !valid || length(rgba) != mask.size(g) {
         return bad("A wand needs a native seed, a tolerance from 0 to 255, and an optional connected flag");
     }
-    return chosen(mask.wand(input.grid, input.rgba, p, tolerance, connected.fold(fn(value) => value, fn(reason) => true)));
+    return chosen(mask.wand(g, rgba, p, tolerance, connected.fold(fn(value) => value, fn(reason) => true)));
 }
 
 fn find_swatch(ids: List<String>, id: String) -> i32 {
@@ -229,16 +250,16 @@ fn swatch(g: mask.Grid, palette: mask.PaletteRaster, query: List<json.Member>) -
     return chosen(bits.freeze());
 }
 
-fn leaf(input: Inputs, operation: String, query: List<json.Member>) -> Choice {
+fn leaf(input: Inputs, image: Image, named: Named, frame: String, operation: String, query: List<json.Member>) -> Choice {
     if operation == "rectangle" || operation == "ellipse" { return marquee(input.grid, query, operation == "ellipse"); }
     if operation == "lasso" || operation == "polygon" { return lasso(input, query, operation == "polygon"); }
-    if operation == "wand" { return wand(input, query); }
-    if operation == "recall" { return recall(input, query); }
+    if operation == "wand" { return wand(input.grid, image.rgba, query); }
+    if operation == "recall" { return recall(input, named, frame, query); }
     if operation == "pixels" {
         return if allowed(query, ["pixels"]) { literal(input, field(query, "pixels")) }
             else { bad("A literal selection needs native pixels") };
     }
-    if operation == "swatch" { return swatch(input.grid, input.palette, query); }
+    if operation == "swatch" { return swatch(input.grid, image.palette, query); }
     if operation == "binding" || operation == "object" || operation == "part" ||
         operation == "material" || operation == "depth" || operation == "channel" {
         return bad(string_concat("A semantic selection needs a source for ", operation));
@@ -259,7 +280,7 @@ fn publish(run: Run, value: Choice) -> Run {
     return Run { ..run, values: run.values.push(value.mask) };
 }
 
-fn schedule(input: Inputs, value: json.Json, old: Run) -> Run {
+fn schedule(input: Inputs, image: Image, named: Named, frame: String, value: json.Json, old: Run) -> Run {
     if old.count == 32 { return Run { ..old, issue: "A selection query supports at most 32 operations" }; }
     let run = Run { ..old, count: old.count + 1 };
     let query = members(value);
@@ -285,9 +306,9 @@ fn schedule(input: Inputs, value: json.Json, old: Run) -> Run {
         }
         return json.lookup(query, "source").fold(fn(raw) =>
             Run { ..run, pending: run.pending.push(finished).push(node(child(input, raw))) },
-            fn(unit) => cluster_swatch(input.grid, input.palette, p, connectivity == 8, run));
+            fn(unit) => cluster_swatch(input.grid, image.palette, p, connectivity == 8, run));
     }
-    return publish(run, leaf(input, op, query));
+    return publish(run, leaf(input, image, named, frame, op, query));
 }
 
 fn cluster_swatch(g: mask.Grid, palette: mask.PaletteRaster, p: Vec2<u32>, diagonal: Bool, run: Run) -> Run {
@@ -313,10 +334,10 @@ fn apply(g: mask.Grid, job: Job, source: List<u32>) -> Choice {
     return chosen(mask.modifier(g, source, job.operation, amount, side));
 }
 
-fn step(input: Inputs, old: Run) -> Run {
+fn step(input: Inputs, image: Image, named: Named, frame: String, old: Run) -> Run {
     let job = old.pending.at_or(old.pending.len() - 1, node(json.null()));
     let run = Run { ..old, pending: old.pending.pop() };
-    if job.operation == "" { return schedule(input, job.query, run); }
+    if job.operation == "" { return schedule(input, image, named, frame, job.query, run); }
     let n = run.values.len();
     let last = run.values.at_or(n - 1, []);
     if merge_op(job.operation) {
@@ -333,11 +354,19 @@ fn select(width: u32, height: u32, query: List<json.Json>, rgba: List<u32>, save
         return Err(if large { "Selection exceeds the material canvas budget" }
             else { "Pixel selections need a canvas from 1 to 512 pixels on each axis" });
     }
-    let input = Inputs { grid: mask.Grid { width: width, height: height }, nodes: query, rgba: rgba,
-        saved: members(saved), runs: runs, packed: packed, palette: palette };
-    let run = Run { pending: buffer([node(query.at_or(0, json.null()))]), values: Buffer.empty(), count: 0, issue: "" };
+    let g = mask.Grid { width: width, height: height };
+    let input = request(g, query, saved, runs, packed);
+    return evaluate(input, Image { rgba: rgba, palette: palette }, no_named(), "");
+}
+
+fn request(g: mask.Grid, query: List<json.Json>, saved: json.Json, runs: List<List<u32>>, packed: Bool) -> Inputs {
+    return Inputs { grid: g, nodes: query, saved: members(saved), runs: runs, packed: packed };
+}
+
+fn evaluate(input: Inputs, image: Image, named: Named, frame: String) -> Result<List<u32>, String> {
+    let run = Run { pending: buffer([node(input.nodes.at_or(0, json.null()))]), values: Buffer.empty(), count: 0, issue: "" };
     let result = repeat_until(65, run, fn(run) => run.issue != "" || run.pending.len() == 0,
-        fn(i) => fn(run) => step(input, run));
+        fn(i) => fn(run) => step(input, image, named, frame, run));
     if result.issue != "" { return Err(result.issue); }
     return Ok(result.values.at_or(0, []));
 }

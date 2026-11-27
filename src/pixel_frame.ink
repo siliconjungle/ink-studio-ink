@@ -4,13 +4,16 @@ import "std:json" as json;
 import "pixel_mask.ink" as mask;
 import "pixel_values.ink" as value;
 import "pixel_raster.ink" as paint;
+import "pixel_selection.ink" as selection;
 
+record Location { id: String, frame: String, layer: String, }
 record Cel { id: String, layer: String, frame: String, fields: List<json.Member>, }
 record Placement { x: i32, y: i32, opacity: f64, }
 record Layer { id: String, kind: String, parent: String, clip: String, blend: String, protect: Bool,
     visible: Bool, opacity: f64, }
-record Plan { grid: mask.Grid, layers: List<Layer>, ids: List<String>, colors: List<u32>,
-    cels: List<Cel>, active: String, target: String, }
+record Artwork { grid: mask.Grid, layers: List<Layer>, ids: List<String>, colors: List<u32>,
+    cels: List<Cel>, locations: List<Location>, frames: List<String>, inputs: List<json.Json>, }
+record Scope { frame: String, layer: String, }
 record Captured { found: Bool, slots: List<i32>, alpha: List<u32>, clipping: List<u32>, }
 record Pixel { slot: i32, color: u32, alpha: u32, locked: Bool, }
 record Source { raw: paint.Raw, group: List<Pixel>, }
@@ -21,8 +24,7 @@ record Scene { canvas: Canvas, ancestors: Buffer<Parked>, todo: Buffer<Job>,
     capture: Captured, work: paint.Work, issue: String, }
 record Overlay { pixels: Buffer<Pixel>, coverage: Buffer<u32>, issue: String, }
 record Style { opacity: f64, blend: String, kind: String, protect: Bool, }
-record Raster { width: u32, height: u32, frame: String, slots: List<i32>, alpha: List<u32>,
-    clipping: List<u32>, ids: List<String>, rgba: List<u32>, }
+record Raster { width: u32, height: u32, frame: String, image: selection.Image, }
 
 fn palette_color(raw: json.Json) -> u32 {
     let s = json.as_text(raw).fold(fn(color) => color, fn(issue) => value.text(value.get(value.fields(raw), "color")));
@@ -222,8 +224,8 @@ fn empty_layer() -> Layer {
     return Layer { id: "", kind: "", parent: "", clip: "", blend: "normal", protect: false, visible: false, opacity: 0.0f64 };
 }
 
-fn empty_canvas(plan: Plan, shown: Bool) -> Canvas {
-    return Canvas { pixels: buffer_fill(mask.size(plan.grid), blank()), masks: buffer_fill(length(plan.layers), []),
+fn empty_canvas(art: Artwork, shown: Bool) -> Canvas {
+    return Canvas { pixels: buffer_fill(mask.size(art.grid), blank()), masks: buffer_fill(length(art.layers), []),
         shown: shown, protected: false };
 }
 
@@ -242,73 +244,73 @@ fn add_child(layers: List<Layer>, parent: String, ordinal: u32, todo: Buffer<Job
     return todo.push(Job { ordinal: ordinal, closing: false });
 }
 
-fn open_group(plan: Plan, ordinal: u32, layer: Layer, old: Scene) -> Scene {
+fn open_group(art: Artwork, ordinal: u32, layer: Layer, old: Scene) -> Scene {
     let shown = visible(layer, old.canvas.shown, layer.opacity);
     let parent = Parked { pixels: old.canvas.pixels.freeze(), masks: old.canvas.masks.freeze(),
         shown: old.canvas.shown, protected: old.canvas.protected };
-    let todo = children(plan.layers, layer.id, old.todo.push(Job { ordinal: ordinal, closing: true }));
-    return Scene { ..old, ancestors: old.ancestors.push(parent), canvas: empty_canvas(plan, shown), todo: todo };
+    let todo = children(art.layers, layer.id, old.todo.push(Job { ordinal: ordinal, closing: true }));
+    return Scene { ..old, ancestors: old.ancestors.push(parent), canvas: empty_canvas(art, shown), todo: todo };
 }
 
-fn apply_layer(plan: Plan, ordinal: u32, layer: Layer, opacity: f64, source: Source, has_protected: Bool, old: Scene) -> Scene {
+fn apply_layer(art: Artwork, scope: Scope, ordinal: u32, layer: Layer, opacity: f64, source: Source, has_protected: Bool, old: Scene) -> Scene {
     let canvas = old.canvas;
-    let clip: List<u32> = if layer.clip == "" { [] } else { canvas.masks.at_or(clip_index(plan.layers, layer.clip, ordinal), []) };
-    let capture = if layer.kind != "group" && plan.target == layer.id {
+    let clip: List<u32> = if layer.clip == "" { [] } else { canvas.masks.at_or(clip_index(art.layers, layer.clip, ordinal), []) };
+    let capture = if layer.kind != "group" && scope.layer == layer.id {
         Captured { found: true, slots: source.raw.slots, alpha: source.raw.alpha, clipping: clip }
     } else { old.capture };
-    let coverage: Buffer<u32> = buffer_fill(mask.size(plan.grid), 0);
+    let coverage: Buffer<u32> = buffer_fill(mask.size(art.grid), 0);
     if !visible(layer, canvas.shown, opacity) {
         return Scene { ..old, capture: capture, canvas: Canvas { ..canvas, masks: canvas.masks.set(ordinal, coverage.freeze()) } };
     }
     let style = Style { opacity: opacity, blend: layer.blend, kind: layer.kind, protect: layer.protect };
     let start = Overlay { pixels: canvas.pixels, coverage: coverage, issue: "" };
-    let result = draw_layer(plan, layer.id, source, style, clip, canvas.protected, start);
+    let result = draw_layer(art, layer.id, source, style, clip, canvas.protected, start);
     return Scene { ..old, canvas: Canvas { pixels: result.pixels, masks: canvas.masks.set(ordinal, result.coverage.freeze()),
         shown: canvas.shown, protected: canvas.protected || layer.protect || has_protected },
         capture: capture, issue: result.issue };
 }
 
-fn draw_layer(plan: Plan, id: String, source: Source, style: Style, clip: List<u32>, protected: Bool, start: Overlay) -> Overlay {
-    let cells = mask.size(plan.grid);
+fn draw_layer(art: Artwork, id: String, source: Source, style: Style, clip: List<u32>, protected: Bool, start: Overlay) -> Overlay {
+    let cells = mask.size(art.grid);
     if !protected && style.kind != "group" && style.kind != "mask" && style.blend == "normal" &&
         style.opacity == 1.0f64 && length(clip) == 0 && length(source.raw.alpha) == 0 {
         return repeat_until(cells, start, fn(out) => false, fn(p) => fn(out) =>
-            opaque_cell(source.raw.slots, plan.colors, style.protect, p, out));
+            opaque_cell(source.raw.slots, art.colors, style.protect, p, out));
     }
     return repeat_until(cells, start, fn(out) => out.issue != "", fn(p) => fn(out) =>
-        paint_cell(plan.grid, source, style, plan.colors, clip, p, id, out));
+        paint_cell(art.grid, source, style, art.colors, clip, p, id, out));
 }
 
-fn close_group(plan: Plan, ordinal: u32, layer: Layer, scene: Scene) -> Scene {
+fn close_group(art: Artwork, scope: Scope, ordinal: u32, layer: Layer, scene: Scene) -> Scene {
     let ancestor = scene.ancestors.at_or(scene.ancestors.len() - 1, Parked { pixels: [], masks: [], shown: false, protected: false });
     let group_protected = scene.canvas.protected;
     let source = Source { group: scene.canvas.pixels.freeze(),
         raw: paint.Raw { slots: [], alpha: [], work: scene.work, issue: "" } };
     let old = Scene { ..scene, ancestors: scene.ancestors.pop(),
         canvas: Canvas { pixels: buffer(ancestor.pixels), masks: buffer(ancestor.masks), shown: ancestor.shown, protected: ancestor.protected } };
-    return apply_layer(plan, ordinal, layer, layer.opacity, source, group_protected, old);
+    return apply_layer(art, scope, ordinal, layer, layer.opacity, source, group_protected, old);
 }
 
-fn step(plan: Plan, inputs: List<json.Json>, scene: Scene) -> Scene {
+fn step(art: Artwork, scope: Scope, scene: Scene) -> Scene {
     let job = scene.todo.at_or(scene.todo.len() - 1, Job { ordinal: 0, closing: false });
     let old = Scene { ..scene, todo: scene.todo.pop() };
-    let layer = plan.layers.at_or(job.ordinal, empty_layer());
-    if job.closing { return close_group(plan, job.ordinal, layer, old); }
-    if layer.kind == "group" { return open_group(plan, job.ordinal, layer, old); }
-    let active = active_cel(plan.cels, plan.active, layer.id);
-    let place = placement(inputs.at_or(job.ordinal, json.null()), active);
-    let raw = translated(plan.grid, paint.raster(plan.grid, plan.ids, content(plan.cels, active), old.work), place);
+    let layer = art.layers.at_or(job.ordinal, empty_layer());
+    if job.closing { return close_group(art, scope, job.ordinal, layer, old); }
+    if layer.kind == "group" { return open_group(art, job.ordinal, layer, old); }
+    let active = active_cel(art.cels, scope.frame, layer.id);
+    let place = placement(art.inputs.at_or(job.ordinal, json.null()), active);
+    let raw = translated(art.grid, paint.raster(art.grid, art.ids, content(art.cels, active), old.work), place);
     if raw.issue != "" { return Scene { ..old, issue: raw.issue }; }
     let next = Scene { ..old, work: raw.work };
-    return apply_layer(plan, job.ordinal, layer, layer.opacity * place.opacity, Source { raw: raw, group: [] }, false, next);
+    return apply_layer(art, scope, job.ordinal, layer, layer.opacity * place.opacity, Source { raw: raw, group: [] }, false, next);
 }
 
-fn composite(plan: Plan, inputs: List<json.Json>) -> Scene {
+fn composite(art: Artwork, scope: Scope) -> Scene {
     let todo: Buffer<Job> = Buffer.empty();
-    let initial = Scene { canvas: empty_canvas(plan, true), ancestors: Buffer.empty(),
-        todo: children(plan.layers, "", todo), capture: no_capture(), work: paint.untouched(), issue: "" };
-    return repeat_until(length(plan.layers) * 2, initial, fn(scene) => scene.issue != "" || scene.todo.len() == 0,
-        fn(i) => fn(scene) => step(plan, inputs, scene));
+    let initial = Scene { canvas: empty_canvas(art, true), ancestors: Buffer.empty(),
+        todo: children(art.layers, "", todo), capture: no_capture(), work: paint.untouched(), issue: "" };
+    return repeat_until(length(art.layers) * 2, initial, fn(scene) => scene.issue != "" || scene.todo.len() == 0,
+        fn(i) => fn(scene) => step(art, scope, scene));
 }
 
 fn frame_name(row: json.Json) -> String { return value.text(value.get(value.fields(row), "id")); }
@@ -320,42 +322,87 @@ fn raw_rgba(capture: Captured, colors: List<u32>, i: u32, slot: i32) -> u32 {
     return rgba(color_at(colors, slot), capture.alpha.at_or(i, 255));
 }
 
-fn finish(plan: Plan, scene: Scene, frame: String) -> Result<Raster, String> {
+fn finish(art: Artwork, scene: Scene, scope: Scope) -> Result<Raster, String> {
     if scene.issue != "" { return Err(scene.issue); }
     let capture = scene.capture;
     let pixels = scene.canvas.pixels.freeze();
-    if plan.target != "" && !capture.found { return Err(string_concat("Unknown pixel layer ", plan.target)); }
+    if scope.layer != "" && !capture.found { return Err(string_concat("Unknown pixel layer ", scope.layer)); }
     let slots = if capture.found { capture.slots } else { pixels.map(fn(cell) => cell.slot) };
     let alpha = if capture.found { capture.alpha } else { pixels.map(fn(cell) => cell.alpha) };
-    let words = if capture.found { slots.map_indexed(fn(i) => fn(slot) => raw_rgba(capture, plan.colors, i, slot)) }
+    let words = if capture.found { slots.map_indexed(fn(i) => fn(slot) => raw_rgba(capture, art.colors, i, slot)) }
         else { pixels.map(fn(cell) => rgba(cell.color, cell.alpha)) };
-    return Ok(Raster { width: plan.grid.width, height: plan.grid.height, frame: frame,
-        slots: slots, alpha: alpha, clipping: capture.clipping, ids: plan.ids, rgba: words });
+    let palette = mask.PaletteRaster { slots: slots, alpha: alpha, clipping: capture.clipping, ids: art.ids };
+    return Ok(Raster { width: art.grid.width, height: art.grid.height, frame: scope.frame,
+        image: selection.Image { palette: palette, rgba: words } });
 }
 
-fn compile(document: json.Json, frame: String, layer: String, cel: String) -> Result<Raster, String> {
-    if layer != "" && cel != "" { return Err("Select from the composite, a layer or a cel"); }
+fn empty_artwork() -> Artwork {
+    return Artwork { grid: mask.Grid { width: 0, height: 0 }, layers: [], ids: [], colors: [],
+        cels: [], locations: [], frames: [], inputs: [] };
+}
+
+fn artwork_grid(art: Artwork) -> mask.Grid { return art.grid; }
+
+fn prepare(document: json.Json) -> Artwork {
     let spec = value.fields(document);
     let frames = value.items(value.get(spec, "frames"));
-    let cels = all_cels(frames);
-    let selected = find_cel(cels, cel);
-    if frame != "" && length(frames.filter(fn(row) => frame_name(row) == frame)) == 0 {
-        return Err(string_concat("Unknown pixel frame ", frame));
-    }
-    if cel != "" && (selected.id == "" || (frame != "" && frame != selected.frame)) {
-        let suffix = if frame == "" { "" } else { string_concat(" on frame ", frame) };
-        return Err(string_concat("Unknown pixel cel ", string_concat(cel, suffix)));
-    }
-    let active = if frame != "" { frame } else { if cel != "" { selected.frame } else {
-        frame_name(frames.at_or(0, json.null()))
-    } };
     let palette = value.fields(value.get(spec, "palette"));
     let layers = value.items(value.get(spec, "layers"));
     let g = mask.Grid { width: value.word(value.get(spec, "width"), 512),
         height: value.word(value.get(spec, "height"), 512) };
-    let plan = Plan { grid: g, layers: layers.map(fn(raw) => layer_spec(raw)),
+    let cels = all_cels(frames);
+    return Artwork { grid: g, layers: layers.map(fn(raw) => layer_spec(raw)),
         ids: palette.map(fn(swatch) => swatch.key), colors: palette.map(fn(swatch) => palette_color(swatch.value)),
-        cels: cels, active: active, target: if cel != "" { selected.layer } else { layer } };
-    let result = composite(plan, layers);
-    return finish(plan, result, active);
+        cels: cels, locations: cels.map(fn(cel) => Location { id: cel.id, frame: cel.frame, layer: cel.layer }), frames: frames.map(fn(row) => frame_name(row)), inputs: layers };
+}
+
+fn known_frame(frames: List<String>, frame: String) -> Bool {
+    return foldl(frames, false, fn(id) => fn(found) => found || id == frame);
+}
+
+fn optional_scope(id: String) -> Option<String> { return if id == "" { None } else { Some(id) }; }
+
+fn location(rows: List<Location>, id: String) -> Location {
+    let missing = Location { id: "", frame: "", layer: "" };
+    return repeat_until(length(rows), missing, fn(found) => found.frame != "",
+        fn(i) => fn(found) => lookup_location(rows.at_or(i, missing), id, found));
+}
+
+fn lookup_location(row: Location, id: String, found: Location) -> Location {
+    return if row.id == id { row } else { found };
+}
+
+fn resolve(art: Artwork, frame: Option<String>, layer: Option<String>, cel: Option<String>) -> Result<Scope, String> {
+    let layer_set = layer.fold(fn(id) => true, fn(unit) => false);
+    let cel_set = cel.fold(fn(id) => true, fn(unit) => false);
+    if layer_set && cel_set { return Err("Select from the composite, a layer or a cel"); }
+    let chosen = frame.fold(fn(id) => id, fn(unit) => "");
+    if !frame.fold(fn(id) => known_frame(art.frames, id), fn(unit) => true) {
+        return Err(string_concat("Unknown pixel frame ", chosen));
+    }
+    if cel_set { return cel_scope(art.locations, chosen, cel.fold(fn(id) => id, fn(unit) => "")); }
+    let target = layer.fold(fn(id) => id, fn(unit) => "");
+    if layer_set && target == "" { return Err("Unknown pixel layer "); }
+    let active = if chosen == "" { art.frames.at_or(0, "") } else { chosen };
+    return Ok(Scope { frame: active, layer: target });
+}
+
+fn cel_scope(locations: List<Location>, frame: String, cel: String) -> Result<Scope, String> {
+    let selected = location(locations, cel);
+    if selected.frame == "" || (frame != "" && frame != selected.frame) {
+        let suffix = if frame == "" { "" } else { string_concat(" on frame ", frame) };
+        return Err(string_concat("Unknown pixel cel ", string_concat(cel, suffix)));
+    }
+    return Ok(Scope { frame: selected.frame, layer: selected.layer });
+}
+
+fn raster(art: Artwork, scope: Scope) -> Result<Raster, String> {
+    let result = composite(art, scope);
+    return finish(art, result, scope);
+}
+
+fn compile(document: json.Json, frame: String, layer: String, cel: String) -> Result<Raster, String> {
+    let art = prepare(document);
+    let scope = resolve(art, optional_scope(frame), optional_scope(layer), optional_scope(cel))?;
+    return raster(art, scope);
 }
