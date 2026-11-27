@@ -9,7 +9,7 @@ record Header { width: u32, height: u32, bits: u32, color: u32, interlace: Bool,
 record Chunks { at: u32, done: Bool, issue: String, header: Header, table: Bytes,
     transparency: Bytes, annotation: Bytes, data: Buffer<Bytes>, }
 record Samples { pixels: List<u32>, indices: List<u32>, }
-record Rows { previous: List<u32>, pixels: Buffer<u32>, indices: Buffer<u32>, cursor: u32, issue: String, }
+record Rows { previous: List<u32>, pixels: Buffer<u32>, indices: Buffer<u32>, counted: Bool, cursor: u32, issue: String, }
 
 fn empty_bytes() -> Bytes { return Bytes { start: 0, length: 0 }; }
 fn words_for(size: u32) -> u32 { return wrapping_shr(size, 2) + (if word_and(size, 3) == 0 { 0 } else { 1 }); }
@@ -32,7 +32,7 @@ fn header(words: List<u32>, span: Bytes, chunks: Chunks) -> Chunks {
         bits: byte(words, p + 8), color: byte(words, p + 9), interlace: byte(words, p + 12) != 0 } };
 }
 
-fn chunk(words: List<u32>, size: u32, old: Chunks) -> Chunks {
+fn chunk(words: List<u32>, size: u32, old: Chunks, reference: Bool) -> Chunks {
     let p = old.at;
     if size - p < 12 { return Chunks { ..old, done: true }; }
     let n = big_word(words, p);
@@ -43,7 +43,7 @@ fn chunk(words: List<u32>, size: u32, old: Chunks) -> Chunks {
     if kind == 1229472850 { return header(words, span, next); } // IHDR
     if kind == 1347179589 { return Chunks { ..next, table: span }; } // PLTE
     if kind == 1951551059 { return Chunks { ..next, transparency: span }; } // tRNS
-    if kind == 1768835908 { // inKD
+    if kind == 1768835908 && !reference { // inKD
         if next.annotation.start != 0 { return Chunks { ..next, issue: "Duplicate Ink palette metadata" }; }
         return Chunks { ..next, annotation: span };
     }
@@ -70,13 +70,17 @@ fn packed_rgb(words: List<u32>, p: u32) -> u32 {
 }
 
 fn inspect(words: List<u32>, size: u32) -> Result<Layout, String> {
+    return inspect_mode(words, size, false);
+}
+
+fn inspect_mode(words: List<u32>, size: u32, reference: Bool) -> Result<Layout, String> {
     if size < 33 || length(words) != words_for(size) ||
         big_word(words, 0) != 2303741511 || big_word(words, 4) != 218765834 { return Err("Not a PNG file"); }
     let empty = empty_bytes();
     let start = Chunks { at: 8, done: false, issue: "", table: empty, transparency: empty, annotation: empty,
         data: Buffer.empty(), header: Header { width: 0, height: 0, bits: 0, color: 0, interlace: false } };
     let result = repeat_until(quot_or(size, 12, 0), start, fn(out) => out.done || out.issue != "",
-        fn(i) => fn(out) => chunk(words, size, out));
+        fn(i) => fn(out) => chunk(words, size, out, reference));
     if result.issue != "" { return Err(result.issue); }
     let h = result.header;
     let channels = sample_channels(h.color);
@@ -89,7 +93,7 @@ fn inspect(words: List<u32>, size: u32) -> Result<Layout, String> {
     let entries = quot_or(table.length, 3, 0);
     if h.color == 3 && (rem_or(table.length, 3, 0) != 0 || entries == 0 || entries > wrapping_shl(1, h.bits)
         || transparency.length > entries) { return Err("Invalid indexed PNG palette"); }
-    if h.width > 512 || h.height > 512 || h.bits > 8 {
+    if !reference && (h.width > 512 || h.height > 512 || h.bits > 8) {
         return Err("Pixel art import needs a PNG up to 512 × 512 with 8-bit or smaller channels");
     }
     let all = if h.interlace {
@@ -138,6 +142,7 @@ fn unfilter(words: List<u32>, cursor: u32, filter: u32, bpp: u32, previous: List
 
 fn channel(row: List<u32>, bits: u32, i: u32) -> u32 {
     if bits == 8 { return row.at_or(i, 0); }
+    if bits == 16 { return row.at_or(i * 2, 0) * 256 + row.at_or(i * 2 + 1, 0); }
     let p = i * bits;
     return word_and(wrapping_shr(row.at_or(wrapping_shr(p, 3), 0), 8 - bits - word_and(p, 7)), wrapping_shl(1, bits) - 1);
 }
@@ -146,7 +151,29 @@ fn transparent(values: List<u32>, i: u32) -> u32 {
     return if length(values) >= i * 2 + 2 { values.at_or(i * 2, 0) * 256 + values.at_or(i * 2 + 1, 0) } else { 65536 };
 }
 
+fn byte16(word: u32) -> u32 { return quot_or(word * 255 + 32767, 65535, 0); }
+
+fn alpha_class(word: u32) -> u32 {
+    return if word == 65535 { 255 } else { if word == 0 { 0 } else { 1 } };
+}
+
+fn straight16(h: Layout, row: List<u32>, i: u32, first: u32) -> u32 {
+    if h.color == 0 || h.color == 4 {
+        let alpha = if h.color == 4 { alpha_class(channel(row, 16, i + 1)) }
+            else { if first == transparent(h.transparency, 0) { 0 } else { 255 } };
+        return byte16(first) * 16843008 + alpha;
+    }
+    let g = channel(row, 16, i + 1);
+    let b = channel(row, 16, i + 2);
+    let alpha = if h.color == 6 { alpha_class(channel(row, 16, i + 3)) }
+        else { if first == transparent(h.transparency, 0) && g == transparent(h.transparency, 1) &&
+            b == transparent(h.transparency, 2) { 0 } else { 255 } };
+    return wrapping_shl(byte16(first), 24) + byte16(g) * 65536 + byte16(b) * 256 + alpha;
+}
+
 fn straight(h: Layout, row: List<u32>, i: u32, first: u32) -> u32 {
+    if h.bits == 16 { return straight16(h, row, i, first); }
+
     if h.color == 0 || h.color == 4 {
         let gray = first * quot_or(255, wrapping_shl(1, h.bits) - 1, 0);
         let alpha = if h.color == 4 { channel(row, h.bits, i + 1) } else {
@@ -169,6 +196,10 @@ fn pixel(h: Layout, row: List<u32>, pass: Pass, y: u32, x: u32, old: Rows) -> Ro
     let first = channel(row, h.bits, i);
     if h.color == 3 {
         if first >= length(h.palette) { return Rows { ..old, issue: "PNG references a colour outside its palette" }; }
+        if old.counted {
+            let total = old.indices.at_or(first, 0);
+            return Rows { ..old, indices: old.indices.set(first, total + 1) };
+        }
         let word = h.palette.at_or(first, 0) * 256 + h.transparency.at_or(first, 255);
         return Rows { ..old, pixels: old.pixels.set(p, word), indices: old.indices.set(p, first) };
     }
@@ -193,11 +224,55 @@ fn scan_pass(h: Layout, words: List<u32>, pass: Pass, out: Rows) -> Rows {
         scanline(h, words, pass, y, row));
 }
 
+record IndexCounts { counts: Buffer<u32>, invalid: Bool, }
+
+fn flat_filters(words: List<u32>, width: u32, height: u32) -> Bool {
+    return repeat_until(height, true, fn(valid) => !valid,
+        fn(y) => fn(valid) => byte(words, y * (width + 1)) == 0);
+}
+
+fn flat_index_row(words: List<u32>, width: u32, entries: u32, y: u32, counts: IndexCounts) -> IndexCounts {
+    let start = y * (width + 1) + 1;
+    return repeat_until(width, counts, fn(out) => out.invalid,
+        fn(x) => fn(out) => increment_index(byte(words, start + x), entries, out));
+}
+
+fn increment_index(slot: u32, entries: u32, out: IndexCounts) -> IndexCounts {
+    if slot >= entries { return IndexCounts { ..out, invalid: true }; }
+    let next = out.counts.at_or(slot, 0) + 1;
+    return IndexCounts { counts: out.counts.set(slot, next), invalid: false };
+}
+
+fn flat_indexed(h: Layout, words: List<u32>) -> Result<Samples, String> {
+    let entries = length(h.palette);
+    let initial = IndexCounts { counts: buffer_fill(entries, 0), invalid: false };
+    let counted = repeat_until(h.height, initial, fn(out) => out.invalid,
+        fn(y) => fn(out) => flat_index_row(words, h.width, entries, y, out));
+    if counted.invalid { return Err("PNG references a colour outside its palette"); }
+    return Ok(Samples { pixels: [], indices: counted.counts.freeze() });
+}
+
+fn plain_indices(h: Layout) -> Bool {
+    if h.color != 3 || h.bits != 8 || length(h.passes) != 1 { return false; }
+    let row = h.passes.at_or(0, Pass { x: 0, y: 0, dx: 0, dy: 0, width: 0, height: 0, row_bytes: 0 });
+    return row.dx == 1 && row.dy == 1;
+}
+
 fn decode(h: Layout, words: List<u32>, size: u32) -> Result<Samples, String> {
+    return decode_mode(h, words, size, false);
+}
+
+fn decode_mode(h: Layout, words: List<u32>, size: u32, reference: Bool) -> Result<Samples, String> {
     if size != h.raw_size || length(words) != words_for(size) { return Err("Invalid PNG scanline length"); }
+    if reference && plain_indices(h) && flat_filters(words, h.width, h.height) {
+        return flat_indexed(h, words);
+    }
     let n = h.width * h.height;
-    let indices: Buffer<u32> = if h.color == 3 { buffer_fill(n, 0) } else { Buffer.empty() };
-    let start = Rows { previous: [], pixels: buffer_fill(n, 0), indices: indices, cursor: 0, issue: "" };
+    let counted = h.color == 3 && reference;
+    let indices: Buffer<u32> = if counted { buffer_fill(length(h.palette), 0) }
+        else { if h.color == 3 { buffer_fill(n, 0) } else { Buffer.empty() } };
+    let pixels: Buffer<u32> = if counted { Buffer.empty() } else { buffer_fill(n, 0) };
+    let start = Rows { previous: [], pixels: pixels, indices: indices, counted: counted, cursor: 0, issue: "" };
     let finished = foldl(h.passes, start, fn(pass) => fn(out) =>
         if out.issue == "" { scan_pass(h, words, pass, out) } else { out });
     if finished.issue != "" { return Err(finished.issue); }

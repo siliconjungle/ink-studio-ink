@@ -396,11 +396,17 @@ fn saved_cel(cel: frame.Cel) -> paint.SavedCel {
 
 record Recolored { artwork: frame.Artwork, saved: List<paint.SavedCel>, }
 
+fn definition(source: json.Json) -> Palette {
+    let fields = value.fields(source);
+    return Palette { swatches: value.fields(value.get(fields, "palette")).map(fn(row) => commands.swatch(row)),
+        ramps: value.items(value.get(fields, "ramps")) };
+}
+
 fn apply(source: json.Json, art: frame.Artwork, raw: json.Json, scoped: Bool) -> Result<ArtEdit, json.Json> {
     if scoped { return Err(bad("Palette edits apply to the whole document")); }
     let document = value.fields(source);
     let fields = value.fields(value.get(document, "palette"));
-    let before = Palette { swatches: fields.map(fn(row) => commands.swatch(row)), ramps: value.items(value.get(document, "ramps")) };
+    let before = definition(source);
     let op = value.fields(raw);
     let kind = value.text(value.get(op, "type"));
     let edit = operation(before, op, kind)?;

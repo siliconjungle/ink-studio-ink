@@ -654,6 +654,11 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
     receipts: () => enqueue(() => structuredClone(receiptChain())),
     snapshot: () => enqueue(editor.snapshot),
     select: (query, options) => enqueue(() => editor.select(query, options)),
+    palette: () => enqueue(editor.palette),
+    extractPalette(options = {}) {
+      const saved = capture(options);
+      return enqueue(() => editor.extractPalette(saved));
+    },
     captureBrush: options => enqueue(() => editor.captureBrush(options)),
     copySelection: options => enqueue(() => editor.copySelection(options)),
     begin: (label = '') => enqueue(() => unwrap(begin(label))),

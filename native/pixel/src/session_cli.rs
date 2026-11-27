@@ -52,7 +52,7 @@ fn read(directory: &Path) -> Result<PixelCommandEditor, String> {
     Err("Could not read the current pixel edit session checkpoint".into())
 }
 
-fn stage(directory: &Path, data: &str) -> Result<PathBuf, String> {
+pub(crate) fn stage(directory: &Path, data: &str) -> Result<PathBuf, String> {
     static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
     loop {
         let id = NEXT_FILE.fetch_add(1, Ordering::Relaxed);

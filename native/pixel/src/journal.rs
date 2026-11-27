@@ -421,6 +421,14 @@ impl PixelCommandEditor {
         self.editor.snapshot()
     }
 
+    pub fn palette(&mut self) -> Result<String, String> {
+        self.editor.palette()
+    }
+
+    pub fn extract_palette(&mut self, options: &str) -> Result<String, String> {
+        self.editor.extract_palette(options)
+    }
+
     pub fn snapshot(&mut self) -> Result<String, String> {
         self.editor.snapshot()
     }

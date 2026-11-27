@@ -7,7 +7,7 @@ mod png_import;
 pub use journal::{
     EditHistory, PixelCommandEditor, PixelEditError, PixelPreviewOptions, StagedPixelEdit,
 };
-pub use png_import::open_pixel_png;
+pub use png_import::{extract_png_palette, open_pixel_png};
 
 use compiled_state::{State, ValueWireLimits, Wire};
 use document_input::{CelPlanes, read_document};
@@ -1642,6 +1642,22 @@ impl PixelEditor {
                 .collect(),
             alpha: result.l_alpha,
         })
+    }
+
+    pub fn palette(&mut self) -> Result<String, String> {
+        let asset = self.program.invoke_view_l_pixel_editor_palette()?.result;
+        let limits = Limits::default();
+        Json::from_ink(&asset.to_json(), limits)?.stringify(limits)
+    }
+
+    pub fn extract_palette(&mut self, options: &str) -> Result<String, String> {
+        let OrderedJson(options) = serde_json::from_str(options).map_err(|error| error.to_string())?;
+        let wire = compiled_json(options, &|kind, scalar, flag, values, keys| {
+            self.program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
+        });
+        let asset = self.program.invoke_view_l_extract_pixel_editor_palette(wire)?.result?;
+        let limits = Limits::default();
+        Json::from_ink(&asset.to_json(), limits)?.stringify(limits)
     }
 
     pub fn snapshot(&mut self) -> Result<String, String> {

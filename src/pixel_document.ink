@@ -15,6 +15,7 @@ import "pixel_commands.ink" as commands;
 import "pixel_batch.ink" as batch;
 import "pixel_session.ink" as session;
 import "pixel_palette_edit.ink" as palette_edits;
+import "pixel_palette_extract.ink" as extract_palette;
 import "pixel_asset_export.ink" as assets;
 import "pixel_png.ink" as png;
 import "pixel_png_input.ink" as png_input;
@@ -82,6 +83,15 @@ pub fn inspect_pixel_png(words: List<u32>, size: u32) -> Result<png_input.Layout
 
 pub fn decode_pixel_png(layout: png_input.Layout, words: List<u32>, size: u32) -> Result<png_input.Samples, String> {
     return png_input.decode(layout, words, size);
+}
+
+pub fn inspect_palette_png(words: List<u32>, size: u32) -> Result<png_input.Layout, String> {
+    return png_input.inspect_mode(words, size, true);
+}
+
+pub fn extract_png_palette(layout: png_input.Layout, words: List<u32>, size: u32, options: json.Json) -> Result<json.Json, String> {
+    let samples = png_input.decode_mode(layout, words, size, true)?;
+    return extract_palette.reference(layout, samples, options);
 }
 
 pub fn restore_pixel_png(layout: png_input.Layout, samples: png_input.Samples, metadata: json.Json, slots: List<i32>,
@@ -640,6 +650,14 @@ change paint_pixel_editor(operation: json.Json, slots: List<i32>, alpha: List<u3
 pub fn pixel_guarded_input(point: Option<Vec2<u32>>, at: json.Json, layer: Option<json.Json>, from: Option<json.Json>,
     to: Option<json.Json>) -> guarded.Input {
     return guarded.Input { point: point, at: at, layer: layer, from: from, to: to };
+}
+
+query pixel_editor_palette() -> json.Json reads(EditorSource) {
+    return palette_edits.asset(palette_edits.definition(EditorSource));
+}
+
+query extract_pixel_editor_palette(options: json.Json) -> Result<json.Json, String> reads(EditorSource, EditorArtwork) {
+    return extract_palette.document(EditorSource, EditorArtwork, options);
 }
 
 change edit_pixel_editor_palette(operation: json.Json, scoped: Bool) -> Result<json.Json, json.Json>

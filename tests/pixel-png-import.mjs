@@ -27,7 +27,7 @@ function predictor(filter, left, up, corner) {
   return [left, up, corner][distances.indexOf(Math.min(...distances))];
 }
 
-function authoredPng(chunk, { width, height, color, bits, interlace = false, sample, palette, transparency }) {
+export function authoredPng(chunk, { width, height, color, bits, interlace = false, sample, palette, transparency }) {
   const channels = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[color];
   const header = Buffer.alloc(13);
   header.writeUInt32BE(width);

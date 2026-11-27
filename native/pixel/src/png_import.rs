@@ -125,15 +125,30 @@ fn parse_metadata(bytes: &[u8]) -> Result<Metadata, String> {
     })
 }
 
+fn scanlines(bytes: &[u8], parts: impl Iterator<Item = (u32, u32)>, limit: u32) -> Result<Vec<u8>, String> {
+    let slices = parts.map(|(start, length)| &bytes[start as usize..(start as usize + length as usize)]);
+    inflate(slices, limit as usize)
+}
+
+pub fn extract_png_palette(bytes: &[u8], options: &str) -> Result<String, String> {
+    let size = u32::try_from(bytes.len()).map_err(|_| "PNG file exceeds the import byte limit")?;
+    let program = State::new();
+    let layout = program.function_l_inspect_palette_png(words(bytes), size)?;
+    let raw = scanlines(bytes, layout.l_data.iter().map(|row| (row.l_start, row.l_length)), layout.l_raw_size)?;
+    let OrderedJson(options) = serde_json::from_str(options).map_err(|error| error.to_string())?;
+    let settings = compiled_json(options, &|kind, scalar, flag, values, keys| {
+        program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
+    });
+    let asset = program.function_l_extract_png_palette(layout, words(&raw), raw.len() as u32, settings)?;
+    let limits = Limits::default();
+    Json::from_ink(&asset.to_json(), limits)?.stringify(limits)
+}
+
 pub fn open_pixel_png(bytes: &[u8]) -> Result<OpenedDocument, String> {
     let size = u32::try_from(bytes.len()).map_err(|_| "PNG file exceeds the import byte limit")?;
     let program = State::new();
     let layout = program.function_l_inspect_pixel_png(words(bytes), size)?;
-    let slices = layout.l_data.iter().map(|range| {
-        let start = range.l_start as usize;
-        &bytes[start..start + range.l_length as usize]
-    });
-    let scanlines = inflate(slices, layout.l_raw_size as usize)?;
+    let scanlines = scanlines(bytes, layout.l_data.iter().map(|row| (row.l_start, row.l_length)), layout.l_raw_size)?;
     let samples = program.function_l_decode_pixel_png(
         layout.clone(),
         words(&scanlines),

@@ -1,7 +1,7 @@
 import { call, callOwned, compiledValues, createState, JsonCodec } from '../build/pixel_document.mjs';
 import { openPixelJournal } from './pixel-journal.mjs';
 import { parsePixelSession } from './pixel-session.mjs';
-import { decodePixelPng } from './pixel-png-import.mjs';
+import { decodePixelPng, extractPngPalette } from './pixel-png-import.mjs';
 import { packRun, unpackRun } from './pixel-run-words.mjs';
 
 const codec = new JsonCodec(compiledValues.open_pixel_document.params[0]);
@@ -33,6 +33,10 @@ export async function openPixelDocument(source) {
 export async function openPixelPng(bytes) {
   const document = await decodePixelPng(bytes, codec);
   return { document, revision: await revision(document), legacyRevision: null };
+}
+
+export function extractPixelPngPalette(bytes, options = {}) {
+  return extractPngPalette(bytes, codec, options);
 }
 
 export function rasterizePixelFrame(source, { frame = '', layer = '', cel = '' } = {}) {
@@ -78,6 +82,8 @@ function createPixelEditorCore(source, fromText = false) {
   const pick = state.bind('select_pixel_editor', { resultOnly: true });
   const draw = state.bind('paint_pixel_editor', { resultOnly: true });
   const read = state.bind('snapshot_pixel_editor', { resultOnly: true });
+  const readPalette = state.bind('pixel_editor_palette', { resultOnly: true });
+  const extractPalette = state.bind('extract_pixel_editor_palette', { resultOnly: true });
   const capture = state.bind('capture_pixel_editor_brush', { resultOnly: true });
   const copy = state.bind('copy_pixel_editor_selection', { resultOnly: true });
   const save = state.bind('save_pixel_editor_selection', { resultOnly: true });
@@ -188,7 +194,8 @@ function createPixelEditorCore(source, fromText = false) {
   if (fromText) installDocument(source, true);
   else replaceDocument(source);
   return { state, restoreSnapshot, setGrid: restored => { grid = restored; }, editor: Object.freeze({ replaceDocument, select, saveSelection, paint, captureBrush,
-    copySelection, snapshot: () => restoreSnapshot(read()) }) };
+    copySelection, snapshot: () => restoreSnapshot(read()), palette: () => codec.toJS(readPalette()),
+    extractPalette: (options = {}) => codec.toJS(unwrap(extractPalette(codec.fromJS(options)))) }) };
 }
 
 function ownData(value, key) {

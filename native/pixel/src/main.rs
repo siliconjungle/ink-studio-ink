@@ -1,4 +1,5 @@
 mod journal_cli;
+mod palette_cli;
 mod session_cli;
 
 use ink_studio_pixel::{
@@ -143,9 +144,10 @@ fn select(path: std::ffi::OsString, packed: bool) -> Result<(), String> {
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel import-png FILE | ink-studio-pixel select|select-mask|raster|select-document|paint-document|save-selection-document|capture-brush-document|copy-selection-document|journal-document|command-document REQUEST | ink-studio-pixel session ACTION DIRECTORY";
+    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel import-png FILE | ink-studio-pixel select|select-mask|raster|select-document|paint-document|save-selection-document|capture-brush-document|copy-selection-document|journal-document|command-document REQUEST | ink-studio-pixel session ACTION DIRECTORY | ink-studio-pixel palette ACTION SOURCE --out OUTPUT";
     let path = args.next().ok_or(usage)?;
     if path == "session" { return session_cli::run(args); }
+    if path == "palette" { return palette_cli::run(args); }
     if let Some(request) = args.next() {
         if args.next().is_some() {
             return Err(usage.into());

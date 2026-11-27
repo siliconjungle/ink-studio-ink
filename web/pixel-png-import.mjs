@@ -70,14 +70,25 @@ function unpackMetadata(metadata) {
   return packed;
 }
 
-export async function decodePixelPng(bytes, codec) {
+async function pngScanlines(bytes, inspect) {
   if (!(bytes instanceof Uint8Array)) throw new TypeError('PNG import needs a Uint8Array');
   if (bytes.byteLength > 0xffffffff) throw new RangeError('PNG file exceeds the import byte limit');
-  const layout = unwrap(callOwned('inspect_pixel_png', [packBytes(bytes), bytes.byteLength]));
-  const part = ({ start, length }) => bytes.subarray(start, start + length);
-  const image = new Blob(layout.data.map(part));
-  const palette = layout.annotation.start === 0 ? null : new Blob([part(layout.annotation)]);
-  const data = await inflate(image, layout.raw_size);
+  const layout = unwrap(callOwned(inspect, [packBytes(bytes), bytes.byteLength]));
+  const parts = layout.data.map(({ start, length }) => bytes.subarray(start, start + length));
+  return { layout, data: await inflate(new Blob(parts), layout.raw_size) };
+}
+
+export async function extractPngPalette(bytes, codec, options) {
+  const { layout, data } = await pngScanlines(bytes, 'inspect_palette_png');
+  return codec.toJS(unwrap(callOwned('extract_png_palette', [
+    layout, packBytes(data), data.byteLength, codec.fromJS(options),
+  ])));
+}
+
+export async function decodePixelPng(bytes, codec) {
+  const { layout, data } = await pngScanlines(bytes, 'inspect_pixel_png');
+  const { start, length } = layout.annotation;
+  const palette = start === 0 ? null : new Blob([bytes.subarray(start, start + length)]);
   const samples = unwrap(callOwned('decode_pixel_png', [layout, packBytes(data), data.byteLength]));
   let metadata = null;
   if (palette) {

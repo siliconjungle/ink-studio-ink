@@ -69,6 +69,8 @@ fn execute(
         "preview" => raw(editor.preview()?),
         "execute" => raw(editor.execute(step.command.map_or("null", RawValue::get))?),
         "snapshot" => raw(editor.snapshot()?),
+        "palette" => raw(editor.palette()?),
+        "extract-palette" => raw(editor.extract_palette(step.options.map_or("{}", RawValue::get))?),
         "apply" => raw(editor.apply(step.patch.map_or("null", RawValue::get))?),
         "replay" => raw(editor.replay(step.receipt.map_or("null", RawValue::get))?),
         "copy" => encoded(editor.copy_selection(step.options.map_or("{}", RawValue::get))?),
