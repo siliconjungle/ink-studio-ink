@@ -13,7 +13,7 @@ record Edition { authored: json.Json, art: frame.Artwork, named: selection.Named
     positions: List<List<u32>>, cursor: Cursor, }
 record Entry { id: u32, label: String, receipt: u32, }
 record View { cursor: Cursor, pending: Bool, undo: List<String>, redo: List<String>, roots: List<u32>, }
-record Route { id: String, kind: String, }
+record Route { id: String, kind: String, channel: String, }
 record Command { destination: String, kind: String, frame: String, cel: Option<String>, conflict: json.Json, }
 record Location { cel: String, frame: String, layer: String, }
 record SharedDrawing { source: Location, holds: List<Location>, }
@@ -59,14 +59,34 @@ fn builtin(name: String) -> String {
 fn destination(source: json.Json, raw: json.Json) -> Route {
     let name = value.text(raw);
     let kind = builtin(name);
-    let rows = value.items(value.get(value.fields(source), "destinations"));
-    return foldl(rows, Route { id: kind, kind: kind }, fn(row) => fn(old) => route_row(row, name, old));
+    let spec = value.fields(source);
+    let resolved = destination_name(spec, name);
+    let rows = value.items(value.get(spec, "destinations"));
+    return foldl(rows, Route { id: kind, kind: kind, channel: "" },
+        fn(row) => fn(old) => route_row(row, resolved, old));
+}
+
+fn destination_name(spec: List<json.Member>, name: String) -> String {
+    let prefix = string_slice(name, 0, 6).fold(fn(s) => s, fn(unit) => "");
+    if prefix != "layer:" { return name; }
+    let layer = string_slice(name, 6, string_byte_len(name)).fold(fn(s) => s, fn(unit) => "");
+    return layer_destination(value.items(value.get(spec, "layers")), layer);
+}
+
+fn layer_destination(layers: List<json.Json>, name: String) -> String {
+    return foldl(layers, "", fn(layer) => fn(id) => destination_field(value.fields(layer), name, id));
+}
+
+fn destination_field(fields: List<json.Member>, name: String, old: String) -> String {
+    return if value.text(value.get(fields, "id")) == name && value.text(value.get(fields, "kind")) == "surface" {
+        value.text(value.get(fields, "destination"))
+    } else { old };
 }
 
 fn route_row(raw: json.Json, name: String, old: Route) -> Route {
     let fields = value.fields(raw);
     if name == "" || value.text(value.get(fields, "id")) != name { return old; }
-    return Route { id: name, kind: value.text(value.get(fields, "kind")) };
+    return Route { id: name, kind: value.text(value.get(fields, "kind")), channel: value.text(value.get(fields, "channel")) };
 }
 
 fn requested_scope(raw: Option<json.Json>) -> Option<String> {

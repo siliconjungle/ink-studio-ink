@@ -22,15 +22,17 @@ record Canvas { pixels: Buffer<Pixel>, masks: Buffer<List<u32>>, trace: Buffer<u
 record Parked { pixels: List<Pixel>, masks: List<List<u32>>, trace: List<u32>,
     uses_alpha: Bool, shown: Bool, protected: Bool, }
 record Job { ordinal: u32, closing: Bool, }
+record CaptureSpec { owners: Bool, layers: Bool, alpha: Bool, references: Bool, }
 record RawLayer { owner: u32, view: Captured, }
 record Scene { canvas: Canvas, ancestors: Buffer<Parked>, todo: Buffer<Job>,
-    capture: Captured, sources: Buffer<RawLayer>, exact: Bool, work: paint.Work, issue: String, }
+    capture: Captured, sources: Buffer<RawLayer>, spec: CaptureSpec, work: paint.Work, issue: String, }
 record Overlay { pixels: Buffer<Pixel>, coverage: Buffer<u32>, trace: Buffer<u32>, issue: String, }
 enum Blend { Normal, Multiply, Screen, Overlay, Add, }
 record Style { id: String, opacity: f64, blend: Blend, kind: String, protect: Bool, owner: u32, }
 record Raster { width: u32, height: u32, frame: String, image: selection.Image, }
 record PaintView { captured: Captured, pixels: List<Pixel>, }
 record PreviewView { pixels: List<Pixel>, trace: List<u32>, uses_alpha: Bool, sources: List<RawLayer>, }
+record ExportView { pixels: List<Pixel>, uses_alpha: Bool, raw: Captured, sources: List<RawLayer>, }
 
 fn palette_color(raw: json.Json) -> u32 {
     let s = json.as_text(raw).fold(fn(color) => color, fn(issue) => value.text(value.get(value.fields(raw), "color")));
@@ -108,27 +110,34 @@ fn offset(pair: List<json.Json>, index: u32) -> i32 {
     return value.integer(pair.at_or(index, json.null()), -1000000, 1000000).fold(fn(n) => n, fn(unit) => 0);
 }
 
-fn source_index(g: mask.Grid, p: u32, move: Placement) -> u32 {
-    let x = f64_from_u32(rem_or(p, g.width, 0)) - f64_from_i32(move.x);
-    let y = f64_from_u32(quot_or(p, g.width, 0)) - f64_from_i32(move.y);
-    if x < 0.0f64 || y < 0.0f64 || x >= f64_from_u32(g.width) || y >= f64_from_u32(g.height) {
-        return mask.size(g);
-    }
-    return value.as_word(y) * g.width + value.as_word(x);
+// A translated axis is (source start, destination start, shared extent).
+fn translated_axis(extent: u32, offset: i32) -> Vec3<u32> {
+    let distance = value.as_word(if offset < 0 { -f64_from_i32(offset) } else { f64_from_i32(offset) });
+    let shared = if distance < extent { extent - distance } else { 0 };
+    return if offset < 0 { vec3(distance, 0, shared) } else { vec3(0, distance, shared) };
+}
+
+fn translated_row<T>(values: List<T>, fill: T, count: u32, from: u32, to: u32, output: Buffer<T>) -> Buffer<T> {
+    return repeat_until(count, output, fn(out) => false, fn(x) => fn(out) =>
+        out.set(to + x, values.at_or(from + x, fill)));
+}
+
+fn translated_plane<T>(g: mask.Grid, values: List<T>, fill: T, x: Vec3<u32>, y: Vec3<u32>) -> List<T> {
+    let start: Buffer<T> = buffer_fill(mask.size(g), fill);
+    if x.z == 0 { return start.freeze(); }
+    let from = y.x * g.width + x.x;
+    let to = y.y * g.width + x.y;
+    return repeat_until(y.z, start, fn(out) => false, fn(row) => fn(out) =>
+        translated_row<T>(values, fill, x.z, from + row * g.width, to + row * g.width, out)).freeze();
 }
 
 fn translated(g: mask.Grid, raw: paint.Raw, move: Placement) -> paint.Raw {
     if (move.x == 0 && move.y == 0) || raw.issue != "" { return raw; }
-    let slots: Buffer<i32> = buffer_fill(mask.size(g), -1);
-    let mapped = repeat_until(mask.size(g), slots, fn(out) => false, fn(p) => fn(out) =>
-        out.set(p, raw.slots.at_or(source_index(g, p, move), -1)));
-    if length(raw.alpha) == 0 {
-        return paint.Raw { ..raw, slots: mapped.freeze() };
-    }
-    let alpha: Buffer<u32> = buffer_fill(mask.size(g), 255);
-    let bytes = repeat_until(mask.size(g), alpha, fn(out) => false, fn(p) => fn(out) =>
-        out.set(p, raw.alpha.at_or(source_index(g, p, move), 255)));
-    return paint.Raw { ..raw, slots: mapped.freeze(), alpha: bytes.freeze() };
+    let x = translated_axis(g.width, move.x);
+    let y = translated_axis(g.height, move.y);
+    let slots = translated_plane<i32>(g, raw.slots, -1, x, y);
+    let alpha: List<u32> = if length(raw.alpha) == 0 { [] } else { translated_plane<u32>(g, raw.alpha, 255, x, y) };
+    return paint.Raw { ..raw, slots: slots, alpha: alpha };
 }
 
 fn blend_mode(name: String) -> Blend {
@@ -224,7 +233,7 @@ fn paint_cell(g: mask.Grid, source: Source, style: Style, colors: List<u32>, cli
     if style.kind == "mask" { return touched; }
     let rear = touched.pixels.at_or(p, blank());
     let slot: i32 = if erase { -1 } else { raw };
-    if rear.locked {
+    if rear.locked && style.kind != "reference" {
         if slot != rear.slot {
             let at = string_concat(decimal(rem_or(p, g.width, 0)), string_concat(",", decimal(quot_or(p, g.width, 0))));
             return Overlay { ..touched, issue: string_concat(style.id, string_concat(" changes a protected pixel at ", at)) };
@@ -271,8 +280,8 @@ fn empty_canvas(art: Artwork, shown: Bool, preview: Bool) -> Canvas {
         uses_alpha: false, shown: shown, protected: false };
 }
 
-fn visible(layer: Layer, shown: Bool, opacity: f64) -> Bool {
-    return shown && layer.visible && opacity > 0.0f64 && layer.kind != "reference";
+fn visible(layer: Layer, shown: Bool, opacity: f64, references: Bool) -> Bool {
+    return shown && layer.visible && opacity > 0.0f64 && (references || layer.kind != "reference");
 }
 
 fn children(layers: List<Layer>, parent: String, todo: Buffer<Job>) -> Buffer<Job> {
@@ -287,7 +296,7 @@ fn add_child(layers: List<Layer>, parent: String, ordinal: u32, todo: Buffer<Job
 }
 
 fn open_group(art: Artwork, ordinal: u32, layer: Layer, old: Scene) -> Scene {
-    let shown = visible(layer, old.canvas.shown, layer.opacity);
+    let shown = visible(layer, old.canvas.shown, layer.opacity, old.spec.references);
     let parent = Parked { pixels: old.canvas.pixels.freeze(), masks: old.canvas.masks.freeze(),
         trace: old.canvas.trace.freeze(), uses_alpha: old.canvas.uses_alpha,
         shown: old.canvas.shown, protected: old.canvas.protected };
@@ -302,11 +311,11 @@ fn apply_layer(art: Artwork, scope: Scope, ordinal: u32, layer: Layer, opacity: 
     let clip: List<u32> = canvas.masks.at_or(clip_from, []);
     let raw = Captured { found: true, slots: source.raw.slots, alpha: source.raw.alpha, clipping: clip };
     let capture = if layer.kind != "group" && scope.layer == layer.id { raw } else { old.capture };
-    let sources = if old.exact && layer.kind != "group" {
+    let sources = if old.spec.layers && layer.kind != "group" {
         old.sources.push(RawLayer { owner: ordinal + 1, view: raw })
     } else { old.sources };
     let coverage: Buffer<u32> = buffer_fill(mask.size(art.grid), 0);
-    if !visible(layer, canvas.shown, opacity) {
+    if !visible(layer, canvas.shown, opacity, old.spec.references) {
         return Scene { ..old, capture: capture, sources: sources,
             canvas: Canvas { ..canvas, masks: canvas.masks.set(ordinal, coverage.freeze()) } };
     }
@@ -315,7 +324,7 @@ fn apply_layer(art: Artwork, scope: Scope, ordinal: u32, layer: Layer, opacity: 
         protect: layer.protect, owner: if tracking { ordinal + 1 } else { 0 } };
     let start = Overlay { pixels: canvas.pixels, coverage: coverage, trace: canvas.trace, issue: "" };
     let result = draw_layer(art, source, style, clip, canvas.protected, start);
-    let uses_alpha = canvas.uses_alpha || tracking && (opacity != 1.0f64 || layer.blend != "normal" ||
+    let uses_alpha = canvas.uses_alpha || old.spec.alpha && (opacity != 1.0f64 || layer.blend != "normal" ||
         if layer.kind == "group" { source.uses_alpha } else {
             length(source.raw.alpha) != 0 || art.layers.at_or(clip_from, empty_layer()).kind == "mask"
         });
@@ -365,21 +374,31 @@ fn step(art: Artwork, scope: Scope, scene: Scene) -> Scene {
     return apply_layer(art, scope, job.ordinal, layer, layer.opacity * place.opacity, input, false, next);
 }
 
-fn compose(art: Artwork, scope: Scope, preview: Bool, exact: Bool) -> Scene {
+fn compose(art: Artwork, scope: Scope, spec: CaptureSpec) -> Scene {
     let todo: Buffer<Job> = Buffer.empty();
-    let initial = Scene { canvas: empty_canvas(art, true, preview), ancestors: Buffer.empty(),
-        todo: children(art.layers, "", todo), capture: no_capture(), sources: Buffer.empty(), exact: exact,
+    let initial = Scene { canvas: empty_canvas(art, true, spec.owners), ancestors: Buffer.empty(),
+        todo: children(art.layers, "", todo), capture: no_capture(), sources: Buffer.empty(), spec: spec,
         work: paint.untouched(), issue: "" };
     return repeat_until(length(art.layers) * 2, initial, fn(scene) => scene.issue != "" || scene.todo.len() == 0,
         fn(i) => fn(scene) => step(art, scope, scene));
 }
 
-fn composite(art: Artwork, scope: Scope) -> Scene { return compose(art, scope, false, false); }
+fn composite(art: Artwork, scope: Scope) -> Scene {
+    return compose(art, scope, CaptureSpec { owners: false, layers: false, alpha: false, references: false });
+}
 
 fn preview_view(art: Artwork, id: String, exact: Bool) -> Result<PreviewView, String> {
-    let scene = compose(art, Scope { frame: id, layer: "" }, true, exact);
+    let scene = compose(art, Scope { frame: id, layer: "" },
+        CaptureSpec { owners: true, layers: exact, alpha: true, references: false });
     if scene.issue != "" { return Err(scene.issue); }
     return Ok(PreviewView { pixels: scene.canvas.pixels.freeze(), trace: scene.canvas.trace.freeze(),
+        uses_alpha: scene.canvas.uses_alpha, sources: scene.sources.freeze() });
+}
+
+fn export_view(art: Artwork, scope: Scope, references: Bool, layers: Bool) -> Result<ExportView, String> {
+    let scene = compose(art, scope, CaptureSpec { owners: false, layers: layers, alpha: true, references: references });
+    if scene.issue != "" { return Err(scene.issue); }
+    return Ok(ExportView { pixels: scene.canvas.pixels.freeze(), raw: scene.capture,
         uses_alpha: scene.canvas.uses_alpha, sources: scene.sources.freeze() });
 }
 

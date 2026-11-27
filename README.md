@@ -98,6 +98,10 @@ Use `createPixelCommandEditor(source, { historyLimit })` for revision-checked, i
 
 Rust exposes the same journal through `PixelCommandEditor`, with `PixelPreviewOptions` for both diff methods. Its `journal-document` command accepts `{ document, historyLimit, steps }` and writes one JSON reply per step. Each step has an `op` such as `begin`, `apply`, `preview-patch`, `preview-edit`, `preview-changes`, `commit`, `undo`, or `replay`. Pass `label`, `patch`, or `receipt` on the corresponding step and `options` for either diff.
 
+Use `editor.execute(command)` with an `{ format: 'ink-studio/pixel-command', version: 1, action, … }` envelope. The shared Ink dispatcher handles local `draw`, `mask`, `recolor`, and `transform` aliases, guarded raster and selection operations, `validate`, `select`, `preview`, `replay`, and journal travel. Export the authored document, an indexed `stamp`, or a `layer-deck`. Stamp and layer-deck exports include held-cel rasters, opacity, knockouts and the applicable palette and frame metadata.
+
+Rust callers can pass a command JSON string to `PixelCommandEditor::execute` and receive the serialized reply. For an existing native journal sequence, pass `{ "op": "execute", "command": … }` in its steps. For a single command, `command-document` reads a request file with `{ "document": …, "command": … }` and prints the original reply shape. An invalid envelope exits with status 1. A rejected edit with a receipt or an invalid preview prints its JSON and exits with status 2.
+
 `raster` and `select-document` are the native equivalents. Their JSON request contains `document` and optional `frame`, `layer` or `cel`. Add `query` for `select-document`.
 
 `selectPixels(width, height, query, { rgba, saved, indexed })` in the same browser module returns selected `[x, y]` coordinates in native row order. The shared Ink implementation covers rectangular and elliptical marquees, lassos and polygons, literal and saved masks, mask combinations and modifiers, wand fills, swatches, and clusters. Wand fills take one packed `0xRRGGBBAA` word per pixel. Saved masks map selection IDs to coordinate lists.

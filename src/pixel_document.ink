@@ -11,6 +11,8 @@ import "pixel_brush_capture.ink" as brushes;
 import "pixel_transform.ink" as transforms;
 import "pixel_history.ink" as history;
 import "pixel_preview.ink" as preview;
+import "pixel_commands.ink" as commands;
+import "pixel_asset_export.ink" as assets;
 
 record Layer { id: String, kind: String, parent: String, }
 record Cel { id: String, hold: String, }
@@ -743,6 +745,22 @@ change begin_pixel_edit(label: String) -> Result<Unit, String>
 
 query resolve_pixel_edit(patch: json.Json) -> history.Command reads(EditorSource, EditorArtwork, JournalCursor) {
     return history.resolve(EditorSource, EditorArtwork, JournalCursor, patch);
+}
+
+query plan_pixel_command(command: json.Json) -> Result<commands.Plan, String> reads(EditorSource) {
+    return commands.plan(EditorSource, command);
+}
+
+query describe_pixel_command_document() -> Result<json.Json, String> reads(EditorSource, EditorArtwork, JournalCursor) {
+    return commands.describe(EditorSource, EditorArtwork, JournalCursor.revision);
+}
+
+query export_pixel_command_stamp(options: json.Json) -> Result<assets.Stamp, String> reads(EditorSource, EditorArtwork, EditorPositions) {
+    return assets.stamp(EditorSource, EditorArtwork, EditorPositions, options);
+}
+
+query export_pixel_command_layer_deck() -> Result<assets.Deck, String> reads(EditorSource, EditorArtwork, EditorPositions) {
+    return assets.deck(EditorSource, EditorArtwork, EditorPositions);
 }
 
 change observe_pixel_edit() -> Unit reads(EditorArtwork) writes(JournalEditCels) {

@@ -38,6 +38,52 @@ function gateFields(patch) {
   return fields;
 }
 
+function commandMetadata(raw, nested = false) {
+  if (!isRecord(raw)) return null;
+  return Object.fromEntries(Object.entries(raw).map(([key, value]) => {
+    if (['format', 'version', 'action', 'label', 'artifact'].includes(key)) return [key, value];
+    if (key === 'edit' && !nested) return [key, commandMetadata(value, true)];
+    if (key === 'options' && isRecord(value)) return [key, Object.fromEntries(Object.keys(value).map(name => [name, null]))];
+    if (key === 'patch' && isRecord(value)) {
+      const patch = {};
+      if (Object.hasOwn(value, 'destination')) patch.destination = value.destination;
+      if (Object.hasOwn(value, 'edits')) patch.edits = Array.isArray(value.edits) ? [] : null;
+      if (Object.hasOwn(value, 'operation')) {
+        const operation = value.operation;
+        patch.operation = isRecord(operation) ? Object.fromEntries(
+          Object.entries(operation).filter(([name]) => name === 'tool' || name === 'type')) : null;
+      }
+      return [key, patch];
+    }
+    return [key, null];
+  }));
+}
+
+function normalizedPatch(patch, { destination, tool }) {
+  if (destination.Some !== undefined) patch.destination = destination.Some;
+  if (tool.Some !== undefined) patch.operation.tool = tool.Some;
+  return patch;
+}
+
+function rasterAsset({ slots, alpha, knockouts }) {
+  return { slots: slots.map(slot => slot < 0 ? null : slot),
+    ...(alpha.length && { alpha }), ...(knockouts.length && { knockouts }) };
+}
+
+function stampAsset(codec, { info, raster, selections }) {
+  return { ...codec.toJS(info), ...rasterAsset(raster), ...(selections.length && { selections }) };
+}
+
+function deckAsset(codec, { info, frames, shared, show_selections: showSelections }) {
+  const baked = frames.map(frame => {
+    const { durationMs, ...fields } = codec.toJS(frame.info);
+    const cels = Object.fromEntries(frame.cels.map(cel =>
+      [cel.layer, { ...codec.toJS(cel.info), ...rasterAsset(cel.raster) }]));
+    return { ...fields, duration: durationMs / 1000, cels, ...(showSelections && { selections: frame.selections }) };
+  });
+  return { ...codec.toJS(info), frames: baked, ...(shared.length && { sharedSelections: shared }) };
+}
+
 function previewOptions({ limit = 256, exact, shotHitFrame } = {}) {
   if (exact !== undefined && typeof exact !== 'boolean') throw new TypeError('Exact preview must be a boolean');
   if (shotHitFrame !== undefined && (!exact || !Number.isInteger(shotHitFrame) || shotHitFrame < 0 || shotHitFrame > 1e9)) {
@@ -89,6 +135,8 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
   const read = bind('pixel_journal'), begin = bind('begin_pixel_edit');
   const commit = bind('commit_pixel_edit'), cancel = bind('cancel_pixel_edit');
   const travel = bind('travel_pixel_history'), check = bind('resolve_pixel_edit');
+  const plan = bind('plan_pixel_command'), describe = bind('describe_pixel_command_document');
+  const stamp = bind('export_pixel_command_stamp'), deck = bind('export_pixel_command_layer_deck');
   const observe = bind('observe_pixel_edit'), links = bind('pixel_edit_links');
   const observePreview = bind('observe_pixel_preview'), editDiff = bind('pixel_preview_diff');
   const draftDiff = bind('pixel_draft_diff');
@@ -130,9 +178,9 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
     return rows.reverse();
   }
 
-  async function attempt(patch, { dryRun = false, expected, preview } = {}) {
+  async function attempt(patch, { dryRun = false, expected, preview, options: editOptions } = {}) {
     const { cursor, pending, redo } = read();
-    const shot = expected?.command.options.shotHitFrame;
+    const shot = (expected?.command.options ?? editOptions)?.shotHitFrame;
     const options = shot === undefined ? {} : { shotHitFrame: shot };
     const command = { runner: 'sdk', action: 'edit', options, patch };
     const common = { format: receiptFormat, version: 1, command, inputs: { documentRevision: cursor.revision } };
@@ -207,12 +255,77 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
     }
   }
 
+  function history() {
+    const { undo, redo } = read();
+    return { undo, redo };
+  }
+
+  function transition(action) {
+    if (action === 'undo' || action === 'redo') return unwrap(travel(action === 'redo'));
+    const discard = action === 'cancel' || read().redo.length !== 0;
+    const changed = unwrap(action === 'cancel' ? cancel() : commit());
+    if (discard && changed) trim();
+    return changed;
+  }
+
+  function previewDraft(options) {
+    const { limit, exact } = previewOptions(options);
+    const { cursor } = read();
+    const result = unwrap(draftDiff(limit, exact));
+    const targets = [];
+    for (let id = cursor.receipt; id !== result.receipt;) {
+      const row = receipts.get(id);
+      targets.push(row.receipt.affectedTargets[0]);
+      id = row.parent;
+    }
+    return previewReport(codec, result.changes, structuredClone(targets.reverse()), [], result.celLinks.Some, exact);
+  }
+
+  async function execute(raw) {
+    const ready = unwrap(plan(codec.fromJS(commandMetadata(raw))));
+    switch (ready.action) {
+      case 'apply':
+        return structuredClone((await attempt(normalizedPatch(raw.patch, ready), { options: raw.options })).receipt);
+      case 'replay': {
+        const expected = replayReceipt(raw.receipt);
+        return structuredClone((await attempt(expected.command.patch, { expected })).receipt);
+      }
+      case 'begin':
+        unwrap(begin(raw.label ?? ''));
+        return { history: history() };
+      case 'undo': case 'redo': case 'commit': case 'cancel':
+        return { changed: transition(ready.action), history: history() };
+      case 'preview-edit':
+        return attempt(normalizedPatch(raw.edit.patch, ready), { dryRun: true, preview: previewOptions(raw.options) });
+      case 'preview-draft':
+        return previewDraft(raw.options);
+      case 'select': {
+        const result = editor.select(raw.query, raw.options);
+        if (raw.options?.targetRevision !== undefined) throw new Error('A target revision needs an intent query');
+        return { revision: read().cursor.revision, ...result, pixelCount: result.pixels.length };
+      }
+      case 'validate':
+        return codec.toJS(unwrap(describe()));
+      case 'export-document':
+        return { artifact: 'document', data: editor.snapshot() };
+      case 'export-stamp':
+        return { artifact: 'stamp', data: stampAsset(codec, unwrap(stamp(codec.fromJS(raw.options ?? {})))) };
+      case 'export-layer-deck':
+        return { artifact: 'layer-deck', data: deckAsset(codec, unwrap(deck())) };
+      case 'export-scene': case 'export-shot-corrections': case 'export-splat-fit': case 'export-scan-paint':
+        throw new Error('No session artifact named ' + ready.action.slice(7));
+      default:
+        throw new Error('Pixel editor has not implemented command ' + raw.action +
+          (raw.action === 'export' ? ' ' + raw.artifact : ''));
+    }
+  }
+
   const [current, legacy] = await Promise.all([revision(editor.snapshot()), input.version === 1 ? revision(input) : '']);
   unwrap(bind('start_pixel_journal')(current, legacy, historyLimit));
 
   return Object.freeze({
     revision: () => enqueue(() => read().cursor.revision),
-    history: () => enqueue(() => { const { undo, redo } = read(); return { undo, redo }; }),
+    history: () => enqueue(history),
     receipts: () => enqueue(allReceipts),
     snapshot: () => enqueue(editor.snapshot),
     select: (query, options) => enqueue(() => editor.select(query, options)),
@@ -223,19 +336,14 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
       if (!read().pending) throw new Error('No active transaction');
       return editor.snapshot();
     }),
-    commit: () => enqueue(() => {
-      const discard = read().redo.length !== 0;
-      const changed = unwrap(commit());
-      if (discard && changed) trim();
-      return changed;
-    }),
-    cancel: () => enqueue(() => {
-      const changed = unwrap(cancel());
-      if (changed) trim();
-      return changed;
-    }),
-    undo: () => enqueue(() => unwrap(travel(false))),
-    redo: () => enqueue(() => unwrap(travel(true))),
+    commit: () => enqueue(() => transition('commit')),
+    cancel: () => enqueue(() => transition('cancel')),
+    undo: () => enqueue(() => transition('undo')),
+    redo: () => enqueue(() => transition('redo')),
+    execute(raw) {
+      const command = capture(raw);
+      return enqueue(() => execute(command));
+    },
     previewPatch(raw) {
       const patch = capture(raw);
       return enqueue(() => attempt(patch, { dryRun: true }));
@@ -245,18 +353,7 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
       return enqueue(() => attempt(patch, { dryRun: true, preview: previewOptions(options) }));
     },
     previewChanges(options) {
-      return enqueue(() => {
-        const { limit, exact } = previewOptions(options);
-        const { cursor } = read();
-        const result = unwrap(draftDiff(limit, exact));
-        const targets = [];
-        for (let id = cursor.receipt; id !== result.receipt;) {
-          const row = receipts.get(id);
-          targets.push(row.receipt.affectedTargets[0]);
-          id = row.parent;
-        }
-        return previewReport(codec, result.changes, structuredClone(targets.reverse()), [], result.celLinks.Some, exact);
-      });
+      return enqueue(() => previewDraft(options));
     },
     apply(raw) {
       const patch = capture(raw);

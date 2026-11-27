@@ -25,6 +25,7 @@ struct Step<'a> {
     patch: Option<&'a RawValue>,
     receipt: Option<&'a RawValue>,
     options: Option<&'a RawValue>,
+    command: Option<&'a RawValue>,
 }
 
 #[derive(Serialize)]
@@ -49,35 +50,7 @@ fn encoded(value: impl Serialize) -> Result<Box<RawValue>, PixelEditError> {
 }
 
 fn preview_options(raw: Option<&RawValue>) -> Result<PixelPreviewOptions, PixelEditError> {
-    let value: Value =
-        serde_json::from_str(raw.map_or("{}", RawValue::get)).map_err(|error| error.to_string())?;
-    let mut options = PixelPreviewOptions::default();
-    if let Some(exact) = value.get("exact") {
-        options.exact = exact
-            .as_bool()
-            .ok_or_else(|| "Exact preview must be a boolean".to_owned())?;
-    }
-    if let Some(shot) = value.get("shotHitFrame") {
-        if !options.exact
-            || !shot
-                .as_f64()
-                .is_some_and(|n| n.fract() == 0.0 && (0.0..=1e9).contains(&n))
-        {
-            return Err(
-                "A preview shot hit sample needs exact mode and a nonnegative shot frame"
-                    .to_owned()
-                    .into(),
-            );
-        }
-    }
-    if let Some(limit) = value.get("limit") {
-        options.limit = limit
-            .as_f64()
-            .filter(|n| n.fract() == 0.0 && (0.0..=9_007_199_254_740_991.0).contains(n))
-            .ok_or_else(|| "Pixel preview limit must be a nonnegative integer".to_owned())?
-            as u64;
-    }
-    Ok(options)
+    PixelPreviewOptions::from_json(raw.map_or("{}", RawValue::get))
 }
 
 fn execute(
@@ -94,6 +67,7 @@ fn execute(
         "revision" => encoded(editor.revision()?),
         "receipts" => encoded(editor.receipts()?),
         "preview" => raw(editor.preview()?),
+        "execute" => raw(editor.execute(step.command.map_or("null", RawValue::get))?),
         "snapshot" => raw(editor.snapshot()?),
         "apply" => raw(editor.apply(step.patch.map_or("null", RawValue::get))?),
         "replay" => raw(editor.replay(step.receipt.map_or("null", RawValue::get))?),
@@ -137,4 +111,40 @@ pub fn run(path: OsString) -> Result<(), String> {
         stdout.write_all(b"\n").map_err(|error| error.to_string())?;
     }
     stdout.flush().map_err(|error| error.to_string())
+}
+
+pub fn run_command(path: OsString) -> Result<(), String> {
+    #[derive(Deserialize)]
+    struct Command<'a> {
+        #[serde(borrow)]
+        document: &'a RawValue,
+        #[serde(borrow)]
+        command: &'a RawValue,
+    }
+    #[derive(Deserialize)]
+    struct Status {
+        valid: Option<bool>,
+    }
+    let input = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let request: Command<'_> = serde_json::from_str(&input).map_err(|error| error.to_string())?;
+    let mut editor = PixelCommandEditor::new(request.document.get(), 100)?;
+    let run = editor.execute(request.command.get());
+    match run {
+        Ok(reply) => {
+            println!("{reply}");
+            if serde_json::from_str::<Status>(&reply)
+                .is_ok_and(|status| status.valid == Some(false))
+            {
+                std::process::exit(2);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if let Some(receipt) = error.receipt.as_ref() {
+                println!("{receipt}");
+                std::process::exit(2);
+            }
+            Err(error.to_string())
+        }
+    }
 }
