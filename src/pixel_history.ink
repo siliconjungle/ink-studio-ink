@@ -14,7 +14,7 @@ record Edition { authored: json.Json, art: frame.Artwork, named: selection.Named
 record Entry { id: u32, label: String, receipt: u32, }
 record View { cursor: Cursor, pending: Bool, undo: List<String>, redo: List<String>, roots: List<u32>, }
 record Route { id: String, kind: String, channel: String, }
-record Command { destination: String, kind: String, frame: String, cel: Option<String>, conflict: json.Json, }
+record Command { destination: String, kind: String, frame: String, cel: Option<String>, direct: Bool, conflict: json.Json, }
 record Location { cel: String, frame: String, layer: String, }
 record SharedDrawing { source: Location, holds: List<Location>, }
 record UnlinkedDrawing { instance: Location, source: Location, }
@@ -96,7 +96,8 @@ fn requested_scope(raw: Option<json.Json>) -> Option<String> {
 fn resolve(source: json.Json, art: frame.Artwork, current: Cursor, raw: json.Json) -> Command {
     let spec = value.fields(raw);
     let route = destination(source, requested_destination(spec));
-    let base = Command { destination: route.id, kind: route.kind, frame: "", cel: None, conflict: json.null() };
+    let base = Command { destination: route.id, kind: route.kind, frame: "", cel: None,
+        direct: route.kind == "raster" && !value.has(spec, "operation"), conflict: json.null() };
     if route.id == "" {
         let name = requested_destination(spec);
         return invalid(base, problem("unknown-destination", string_concat("Unknown pixel edit destination ", labels.label(name)),
@@ -144,18 +145,22 @@ fn check_command(command: Command, current: Cursor, spec: List<json.Member>,
     if command.kind == "selections" && (value.has(spec, "edits") || value.has(spec, "cel")) {
         return invalid(command, problem("invalid-edit", "A selection edit needs a stable selection ID and a query", []));
     }
-    if command.kind == "raster" && !value.has(spec, "operation") {
-        return invalid(command, problem("unsupported-edit", "Use a raster operation for this pixel edit", []));
-    }
     return check_raster_payload(command, spec);
 }
 
 fn check_raster_payload(command: Command, spec: List<json.Member>) -> Command {
-    if command.kind != "raster" || !value.has(spec, "edits") { return command; }
+    if command.kind != "raster" || command.direct || !value.has(spec, "edits") { return command; }
     let tool = value.text(value.get(value.fields(value.get(spec, "operation")), "tool"));
-    let message = if tool == "transform" || tool == "paste" { "A transform needs a named selection or an indexed clipboard to paste" }
-        else { "A raster tool needs a layer or cel and a pencil, eraser, fill, shape or brush operation" };
+    let message = mixed_payload(tool);
     return invalid(command, problem("invalid-edit", message, []));
+}
+
+fn mixed_payload(tool: String) -> String {
+    if tool == "transform" || tool == "paste" { return "A transform needs a named selection or an indexed clipboard to paste"; }
+    if tool == "rgba" { return "An RGBA edit needs a layer or cel and native pixels"; }
+    if tool == "replace-swatch" { return "Swatch replacement needs a layer or cel and a saved selection"; }
+    if tool == "cleanup" { return "Cleanup needs a saved selection or an explicit list of native pixels"; }
+    return "A raster tool needs a layer or cel and a pencil, eraser, fill, shape or brush operation";
 }
 
 fn holds(cels: List<frame.Cel>) -> Bool {

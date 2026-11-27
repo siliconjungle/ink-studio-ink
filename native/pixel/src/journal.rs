@@ -83,6 +83,14 @@ enum EditOutcome {
     Preview(PixelEditPreview),
 }
 
+struct EditConflicts(Vec<Value>);
+
+impl From<Value> for EditConflicts {
+    fn from(issue: Value) -> Self {
+        Self(vec![issue])
+    }
+}
+
 impl EditOutcome {
     fn staged(self) -> StagedPixelEdit {
         match self {
@@ -483,7 +491,10 @@ impl PixelCommandEditor {
         let mut targets = Vec::new();
         while id != report.receipt {
             let row = self.receipts.get(&id).ok_or("Missing pixel edit receipt")?;
-            targets.push(row.receipt["affectedTargets"][0].clone());
+            let target = &row.receipt["affectedTargets"][0];
+            if target["kind"] != "raster" || target.get("tool").is_some() {
+                targets.push(target.clone());
+            }
             id = row.parent;
         }
         targets.reverse();
@@ -672,6 +683,7 @@ impl PixelCommandEditor {
             }
             "preview-draft" => encode_command(self.preview_changes(preview_options(&options)?)?),
             "select" => self.command_selection(take_member(&mut request, "query"), &options),
+            "inspect" => self.command_inspection(take_member(&mut request, "at"), options),
             "validate" => {
                 let value = self
                     .editor
@@ -731,6 +743,38 @@ impl PixelCommandEditor {
         )
     }
 
+    fn command_inspection(
+        &mut self,
+        coordinate: Json,
+        options: Json,
+    ) -> Result<String, PixelEditError> {
+        let make = |kind, scalar, flag, values, keys| {
+            self.editor
+                .program
+                .function_l_pixel_json_value(kind, scalar, flag, values, keys)
+        };
+        let at = compiled_json(coordinate, &make);
+        let settings = compiled_json(options, &make);
+        let report = self
+            .editor
+            .program
+            .invoke_view_l_inspect_pixel_command(at, settings)?
+            .result?;
+        let limits = Limits::default();
+        let mut branches: HashMap<String, Vec<Value>> = HashMap::new();
+        for row in report.l_layers {
+            let mut layer = json_value(&Json::from_ink(&row.l_fields.to_json(), limits)?)?;
+            layer["opacity"] = json!(row.l_opacity);
+            if layer["kind"] == "group" {
+                layer["children"] = Value::Array(branches.remove(&row.l_id).unwrap_or_default());
+            }
+            branches.entry(row.l_parent).or_default().push(layer);
+        }
+        let mut document = json_value(&Json::from_ink(&report.l_document.to_json(), limits)?)?;
+        document["layers"] = Value::Array(branches.remove("").unwrap_or_default());
+        encode_command(document)
+    }
+
     fn run_raster_edit(
         &mut self,
         mut patch: Json,
@@ -754,6 +798,41 @@ impl PixelCommandEditor {
             }
         };
         report.map_err(|error| invalid(error.to_string()))
+    }
+
+    fn run_guarded_edit(
+        &mut self,
+        mut patch: Json,
+        frame: String,
+        cel: Option<String>,
+        reuse_composites: bool,
+    ) -> Result<Value, EditConflicts> {
+        let id = match take_member(&mut patch, "id") {
+            Json::Text(id) => id,
+            _ => String::new(),
+        };
+        let edits = compiled_json(
+            take_member(&mut patch, "edits"),
+            &|kind, scalar, flag, values, keys| {
+                self.editor
+                    .program
+                    .function_l_pixel_json_value(kind, scalar, flag, values, keys)
+            },
+        );
+        let invalid = |message| EditConflicts::from(conflict("invalid-edit", message));
+        let output = self
+            .editor
+            .program
+            .invoke_view_l_replace_guarded_pixels(id, frame, cel, edits, reuse_composites)
+            .map_err(invalid)?
+            .result;
+        match output {
+            Ok(target) => Ok(
+                json!({ "kind": "raster", "frame": target.l_frame, "layer": target.l_layer,
+                "cel": target.l_cel, "pixels": target.l_pixels }),
+            ),
+            Err(issues) => Err(EditConflicts(preview_rows(&issues).map_err(invalid)?)),
+        }
     }
 
     fn edit(
@@ -785,20 +864,21 @@ impl PixelCommandEditor {
             "inputs": { "documentRevision": view.revision },
         });
         let mut started = false;
-        let outcome = (|| -> Result<_, Value> {
-            let invalid = |error: String| conflict("invalid-edit", error);
+        let outcome = (|| -> Result<_, EditConflicts> {
+            let invalid = |error: String| EditConflicts::from(conflict("invalid-edit", error));
             if let Some(recorded) = &expected {
                 if common["command"]["options"] != recorded["command"]["options"] {
                     return Err(conflict(
                         "receipt-arguments",
                         "Replay needs the same edit options recorded in the receipt",
-                    ));
+                    )
+                    .into());
                 }
                 if recorded["inputs"]["documentRevision"] != view.revision {
                     return Err(json!({
                         "code": "stale-document", "message": "Receipt was recorded against a different pixel document",
                         "expected": recorded["inputs"]["documentRevision"], "actual": view.revision,
-                    }));
+                    }).into());
                 }
             }
             let meta = compiled_json(
@@ -821,13 +901,14 @@ impl PixelCommandEditor {
             let issue =
                 Json::from_ink(&gate.l_conflict.to_json(), Limits::default()).map_err(invalid)?;
             if !matches!(issue, Json::Null) {
-                return Err(json_value(&issue).map_err(invalid)?);
+                return Err(json_value(&issue).map_err(invalid)?.into());
             }
             if !common["command"]["options"].as_object().unwrap().is_empty() {
                 return Err(conflict(
                     "invalid-edit",
                     "A shot hit sample needs a shot-correction edit and a nonnegative shot frame",
-                ));
+                )
+                .into());
             }
             self.editor.program.begin_transaction().map_err(invalid)?;
             started = true;
@@ -845,8 +926,12 @@ impl PixelCommandEditor {
                     .invoke_view_l_observe_pixel_preview()
                     .map_err(invalid)?;
             }
-            let mut target =
-                self.run_raster_edit(patch, &gate.l_kind, &gate.l_frame, gate.l_cel.as_deref())?;
+            let mut target = if gate.l_direct {
+                let reuse = matches!(mode, EditMode::Preview(options) if !options.exact);
+                self.run_guarded_edit(patch, gate.l_frame, gate.l_cel, reuse)?
+            } else {
+                self.run_raster_edit(patch, &gate.l_kind, &gate.l_frame, gate.l_cel.as_deref())?
+            };
             target["destination"] = json!(gate.l_destination);
             if let EditMode::Preview(options) = mode {
                 let preview = if gate.l_kind == "selections" {
@@ -856,7 +941,11 @@ impl PixelCommandEditor {
                 };
                 self.editor.program.rollback_transaction();
                 return Ok(EditOutcome::Preview(preview.report(
-                    vec![target],
+                    if gate.l_direct {
+                        Vec::new()
+                    } else {
+                        vec![target]
+                    },
                     Vec::new(),
                     options.exact,
                 )));
@@ -883,7 +972,8 @@ impl PixelCommandEditor {
                 return Err(conflict(
                     "receipt-mismatch",
                     "Replay did not reproduce the recorded targets, hits, or output revisions",
-                ));
+                )
+                .into());
             }
             if dry_run {
                 self.editor.program.rollback_transaction();
@@ -928,7 +1018,7 @@ impl PixelCommandEditor {
                 }
                 Ok(staged)
             }
-            Err(issue) => {
+            Err(EditConflicts(issues)) => {
                 if started {
                     self.editor.program.rollback_transaction();
                 }
@@ -938,24 +1028,27 @@ impl PixelCommandEditor {
                 if let EditMode::Preview(options) = mode {
                     return Ok(EditOutcome::Preview(Preview::default().report(
                         Vec::new(),
-                        vec![issue],
+                        issues,
                         options.exact,
                     )));
                 }
-                let message = issue["message"]
-                    .as_str()
+                let message = issues
+                    .first()
+                    .and_then(|issue| issue["message"].as_str())
                     .unwrap_or("Pixel edit rejected")
                     .to_owned();
                 let mut receipt = common;
                 receipt.as_object_mut().unwrap().remove("celLinks");
                 receipt["status"] = json!("rejected");
                 receipt["affectedTargets"] = json!([]);
-                receipt["skippedHits"] = if issue.get("at").is_some() {
-                    json!([&issue])
-                } else {
-                    json!([])
-                };
-                receipt["conflicts"] = json!([issue]);
+                receipt["skippedHits"] = Value::Array(
+                    issues
+                        .iter()
+                        .filter(|issue| issue.get("at").is_some() || issue.get("splat").is_some())
+                        .cloned()
+                        .collect(),
+                );
+                receipt["conflicts"] = Value::Array(issues);
                 receipt["outputs"] = Value::Null;
                 if dry_run {
                     Ok(EditOutcome::Staged(StagedPixelEdit {

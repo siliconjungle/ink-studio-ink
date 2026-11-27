@@ -370,6 +370,7 @@ struct SnapshotMark {
     knockout: bool,
     alpha: Option<u32>,
     runs: Vec<[u32; 3]>,
+    point: bool,
 }
 type SnapshotEdits = IndexMap<String, IndexMap<String, Vec<SnapshotMark>>>;
 
@@ -384,6 +385,13 @@ fn append_snapshot_mark(out: &mut String, mark: &SnapshotMark) -> Result<(), Str
         out.push_str("{\"swatch\":null");
     } else {
         out.push_str("{\"clear\":true");
+    }
+    if mark.point {
+        let Some([y, x, 1]) = mark.runs.first() else {
+            return Err("Expected one retained pixel point".into());
+        };
+        write!(out, ",\"at\":[{x},{y}]}}").map_err(|error| error.to_string())?;
+        return Ok(());
     }
     out.push_str(",\"runs\":[");
     for (i, [y, x, length]) in mark.runs.iter().enumerate() {
@@ -1388,6 +1396,7 @@ impl PixelEditor {
                     knockout: mark.l_knockout,
                     alpha: mark.l_alpha,
                     runs: mark.l_runs,
+                    point: mark.l_point,
                 }));
         }
         snapshot_json(

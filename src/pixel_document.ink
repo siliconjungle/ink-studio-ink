@@ -13,6 +13,8 @@ import "pixel_history.ink" as history;
 import "pixel_preview.ink" as preview;
 import "pixel_commands.ink" as commands;
 import "pixel_asset_export.ink" as assets;
+import "pixel_guarded_edit.ink" as guarded;
+import "pixel_inspect.ink" as inspection;
 
 record Layer { id: String, kind: String, parent: String, }
 record Cel { id: String, hold: String, }
@@ -604,6 +606,18 @@ change paint_pixel_editor(operation: json.Json, slots: List<i32>, alpha: List<u3
     return Ok(edit.report);
 }
 
+change replace_guarded_pixels(id: String, frame: String, cel: Option<String>, edits: json.Json, reuse_composites: Bool)
+    -> Result<guarded.Target, List<json.Json>>
+    reads(EditorSource, EditorArtwork) writes(EditorSource, EditorArtwork, EditorImage, EditorPaint, JournalPreviewPair) {
+    let edit = guarded.apply(EditorSource, EditorArtwork, id, frame, cel, edits, reuse_composites)?;
+    if edit.document != json.null() { EditorSource = edit.document; }
+    EditorArtwork = edit.artwork;
+    EditorImage = None;
+    EditorPaint = edit.cache;
+    JournalPreviewPair = edit.diff;
+    return Ok(edit.target);
+}
+
 fn select_cached(g: mask.Grid, scope: frame_raster.Scope, image: Option<selection.Image>,
     named: selection.Named, query: List<json.Json>, saved: json.Json, runs: List<List<u32>>) -> Result<EditorSelection, String> {
     return image.fold(fn(found) => editor_selection(g, scope, found, named, query, saved, runs),
@@ -713,6 +727,7 @@ state JournalSerial: u32 = 0;
 state JournalEditCels: List<frame_raster.Cel> = [];
 state JournalVersions: Table<u32, history.Edition> = Table.empty();
 state JournalPreview: preview.Page = preview.empty_page();
+state JournalPreviewPair: Option<preview.Pair> = None;
 
 record DraftPreview { changes: preview.Report, celLinks: Option<history.Links>, receipt: u32, }
 
@@ -755,6 +770,11 @@ query describe_pixel_command_document() -> Result<json.Json, String> reads(Edito
     return commands.describe(EditorSource, EditorArtwork, JournalCursor.revision);
 }
 
+query inspect_pixel_command(at: json.Json, options: json.Json) -> Result<inspection.Report, String>
+    reads(EditorSource, EditorArtwork, JournalCursor) {
+    return inspection.inspect(EditorSource, EditorArtwork, JournalCursor.revision, at, options);
+}
+
 query export_pixel_command_stamp(options: json.Json) -> Result<assets.Stamp, String> reads(EditorSource, EditorArtwork, EditorPositions) {
     return assets.stamp(EditorSource, EditorArtwork, EditorPositions, options);
 }
@@ -772,13 +792,20 @@ query pixel_edit_links() -> Option<history.Links> reads(JournalEditCels, EditorA
     return history.links(JournalEditCels, EditorArtwork.cels);
 }
 
-change observe_pixel_preview() -> Unit reads(EditorSource, EditorArtwork) writes(JournalPreview) {
+change observe_pixel_preview() -> Unit reads(EditorSource, EditorArtwork) writes(JournalPreview, JournalPreviewPair) {
     JournalPreview = preview.Page { source: EditorSource, art: EditorArtwork };
+    JournalPreviewPair = None;
     return ();
 }
 
 query pixel_preview_diff(limit: u32, exact: Bool) -> Result<preview.Report, String>
-    reads(JournalPreview, EditorSource, EditorArtwork) {
+    reads(JournalPreview, JournalPreviewPair, EditorSource, EditorArtwork) {
+    if !exact {
+        let saved = JournalPreviewPair.map(fn(pair) => preview.composite_diff(pair, limit));
+        if saved.fold(fn(report) => true, fn(unit) => false) {
+            return saved.ok_or("Missing the pixel edit preview");
+        }
+    }
     return preview.compare(JournalPreview.art, JournalPreview.source, EditorArtwork, EditorSource,
         preview.Settings { limit: limit, exact: exact });
 }

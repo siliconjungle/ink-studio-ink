@@ -84,6 +84,21 @@ function deckAsset(codec, { info, frames, shared, show_selections: showSelection
   return { ...codec.toJS(info), frames: baked, ...(shared.length && { sharedSelections: shared }) };
 }
 
+function inspectionReport(codec, { document, layers }) {
+  const branches = new Map();
+  for (const { fields, id, parent, opacity } of layers) {
+    const layer = codec.toJS(fields);
+    layer.opacity = opacity;
+    if (layer.kind === 'group') {
+      layer.children = branches.get(id) ?? [];
+      branches.delete(id);
+    }
+    if (!branches.has(parent)) branches.set(parent, []);
+    branches.get(parent).push(layer);
+  }
+  return { ...codec.toJS(document), layers: branches.get('') ?? [] };
+}
+
 function previewOptions({ limit = 256, exact, shotHitFrame } = {}) {
   if (exact !== undefined && typeof exact !== 'boolean') throw new TypeError('Exact preview must be a boolean');
   if (shotHitFrame !== undefined && (!exact || !Number.isInteger(shotHitFrame) || shotHitFrame < 0 || shotHitFrame > 1e9)) {
@@ -135,7 +150,9 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
   const read = bind('pixel_journal'), begin = bind('begin_pixel_edit');
   const commit = bind('commit_pixel_edit'), cancel = bind('cancel_pixel_edit');
   const travel = bind('travel_pixel_history'), check = bind('resolve_pixel_edit');
+  const guarded = bind('replace_guarded_pixels');
   const plan = bind('plan_pixel_command'), describe = bind('describe_pixel_command_document');
+  const inspect = bind('inspect_pixel_command');
   const stamp = bind('export_pixel_command_stamp'), deck = bind('export_pixel_command_layer_deck');
   const observe = bind('observe_pixel_edit'), links = bind('pixel_edit_links');
   const observePreview = bind('observe_pixel_preview'), editDiff = bind('pixel_preview_diff');
@@ -178,6 +195,15 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
     return rows.reverse();
   }
 
+  function applyGuarded(patch, gate, reuseComposites) {
+    const result = guarded(patch.id, gate.frame, gate.cel, codec.fromJS(patch.edits ?? null), reuseComposites);
+    if (Object.hasOwn(result, 'Err')) {
+      const conflicts = result.Err.map(issue => codec.toJS(issue));
+      throw Object.assign(new Error(conflicts[0].message), { conflicts });
+    }
+    return { kind: 'raster', ...result.Ok };
+  }
+
   async function attempt(patch, { dryRun = false, expected, preview, options: editOptions } = {}) {
     const { cursor, pending, redo } = read();
     const shot = (expected?.command.options ?? editOptions)?.shotHitFrame;
@@ -206,12 +232,13 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
       if (!dryRun && !pending) unwrap(begin(patch.id));
       observe();
       if (preview) observePreview();
-      const target = gate.kind === 'selections' ? editor.saveSelection(patch.operation, { frame: gate.frame })
+      const target = gate.direct ? applyGuarded(patch, gate, !!preview && !preview.exact)
+        : gate.kind === 'selections' ? editor.saveSelection(patch.operation, { frame: gate.frame })
         : editor.paint(patch.operation, { frame: gate.frame, cel: gate.cel.Some });
       target.destination = gate.destination;
       if (preview) {
         const changes = gate.kind === 'selections' ? undefined : unwrap(editDiff(preview.limit, preview.exact));
-        const report = previewReport(codec, changes, [target], [], links().Some, preview.exact);
+        const report = previewReport(codec, changes, gate.direct ? [] : [target], [], links().Some, preview.exact);
         state.rollbackTransaction();
         return report;
       }
@@ -246,10 +273,10 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
         unwrap(cancel());
         trim();
       }
-      const issue = error.conflict ?? { code: 'invalid-edit', message: error.message };
-      if (preview) return previewReport(codec, undefined, [], [issue], undefined, preview.exact);
+      const conflicts = error.conflicts ?? [error.conflict ?? { code: 'invalid-edit', message: error.message }];
+      if (preview) return previewReport(codec, undefined, [], conflicts, undefined, preview.exact);
       const receipt = { ...common, status: 'rejected', affectedTargets: [],
-        skippedHits: Object.hasOwn(issue, 'at') ? [issue] : [], conflicts: [issue], outputs: null };
+        skippedHits: conflicts.filter(issue => Object.hasOwn(issue, 'at') || Object.hasOwn(issue, 'splat')), conflicts, outputs: null };
       if (dryRun) return { document: editor.snapshot(), receipt };
       throw Object.assign(error, { receipt });
     }
@@ -275,7 +302,8 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
     const targets = [];
     for (let id = cursor.receipt; id !== result.receipt;) {
       const row = receipts.get(id);
-      targets.push(row.receipt.affectedTargets[0]);
+      const target = row.receipt.affectedTargets[0];
+      if (target.kind !== 'raster' || target.tool) targets.push(target);
       id = row.parent;
     }
     return previewReport(codec, result.changes, structuredClone(targets.reverse()), [], result.celLinks.Some, exact);
@@ -306,6 +334,8 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
       }
       case 'validate':
         return codec.toJS(unwrap(describe()));
+      case 'inspect':
+        return inspectionReport(codec, unwrap(inspect(codec.fromJS(raw.at), codec.fromJS(raw.options ?? {}))));
       case 'export-document':
         return { artifact: 'document', data: editor.snapshot() };
       case 'export-stamp':

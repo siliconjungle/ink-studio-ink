@@ -11,7 +11,7 @@ record Rect { x: f64, y: f64, right: f64, bottom: f64, }
 record Box { x: u32, y: u32, w: u32, h: u32, }
 record Span { start: u32, length: u32, }
 record Runs { paint: Paint, end: u32, }
-record RunMark { slot: i32, alpha: Option<u32>, spans: List<Vec3<u32>>, }
+record RunMark { slot: i32, alpha: Option<u32>, spans: List<Vec3<u32>>, point: Bool, }
 record Step { x: i32, y: i32, dx: i32, dy: i32, down: Bool, }
 record Stroke { paint: Paint, tip: Step, }
 record Position { x: f64, y: f64, }
@@ -684,7 +684,12 @@ fn retained_runs(g: mask.Grid, row: RunMark, old: Paint) -> Paint {
     let initial = if alpha <= 255 && prepared.alpha.len() == 0 {
         Paint { ..prepared, alpha: buffer_fill(mask.size(g), 255) }
     } else { prepared };
-    return foldl(row.spans, initial, fn(span) => fn(out) =>
+    // Authored knockout points charge the alpha-plane pass. Existing knockout
+    // pixels already have default alpha, so only the new point needs writing.
+    let charged = if row.point && row.slot == -2 && initial.alpha.len() != 0 {
+        spend_runs(initial, mask.size(g))
+    } else { initial };
+    return foldl(row.spans, charged, fn(span) => fn(out) =>
         retained_span(g, span, row.slot, alpha, out));
 }
 

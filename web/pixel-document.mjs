@@ -140,8 +140,11 @@ function createPixelEditorCore(source) {
       const frames = new Map(document.frames.map(frame => [frame.id, frame]));
       for (const edit of saved.edits) {
         const cel = frames.get(edit.frame).cels[edit.layer];
-        for (const { swatch, knockout, alpha, runs } of edit.marks) {
-          cel.marks.push(Object.hasOwn(alpha, 'Some') ? { alpha: alpha.Some, runs }
+        for (const { swatch, knockout, alpha, runs, point } of edit.marks) {
+          if (point) {
+            const [[y, x]] = runs;
+            cel.marks.push({ swatch: swatch.Some ?? null, at: [x, y] });
+          } else cel.marks.push(Object.hasOwn(alpha, 'Some') ? { alpha: alpha.Some, runs }
             : knockout ? { swatch: null, runs }
             : Object.hasOwn(swatch, 'Some') ? { swatch: swatch.Some, runs } : { clear: true, runs });
         }

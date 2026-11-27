@@ -15,7 +15,8 @@ fn get(fields: List<json.Member>, key: String) -> json.Json {
 }
 
 fn has(fields: List<json.Member>, key: String) -> Bool {
-    return json.lookup(fields, key).fold(fn(value) => true, fn(unit) => false);
+    return fold_until(fields, false, fn(field) => fn(found) => found,
+        fn(field) => fn(found) => found || field.key == key);
 }
 
 fn only(fields: List<json.Member>, keys: List<String>) -> Bool {

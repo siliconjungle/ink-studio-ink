@@ -28,9 +28,13 @@ fn swatch_index(slot: i32) -> u32 { return value.as_word(f64_from_i32(slot + 1))
 
 fn raster(art: frame.Artwork, id: String, details: List<paint.Detail>, exact: Bool) -> Result<Raster, String> {
     let view = frame.preview_view(art, id, exact)?;
+    return Ok(index_view(art, id, details, view));
+}
+
+fn index_view(art: frame.Artwork, id: String, details: List<paint.Detail>, view: frame.PreviewView) -> Raster {
     let cels = art.layers.map(fn(layer) => frame.active_cel(art.cels, id, layer.id).id);
-    return Ok(Raster { view: view, layers: [""].concat(art.layers.map(fn(layer) => layer.id)),
-        cels: [""].concat(cels), swatches: [""].concat(art.ids), protected: paint.locked_pixels(art.grid, details) });
+    return Raster { view: view, layers: [""].concat(art.layers.map(fn(layer) => layer.id)),
+        cels: [""].concat(cels), swatches: [""].concat(art.ids), protected: paint.locked_pixels(art.grid, details) };
 }
 
 fn protected(r: Raster, p: u32, cell: frame.Pixel) -> Bool {
@@ -166,9 +170,22 @@ fn frame_pair(before: frame.Artwork, after: frame.Artwork, id: String,
     a: List<paint.Detail>, b: List<paint.Detail>, exact: Bool) -> Result<Pair, String> {
     let left = raster(before, id, a, exact)?;
     let right = raster(after, id, b, exact)?;
-    return Ok(Pair { id: id, grid: after.grid, before: left, after: right,
+    return Ok(pair(id, after.grid, left, right));
+}
+
+fn pair(id: String, grid: mask.Grid, left: Raster, right: Raster) -> Pair {
+    return Pair { id: id, grid: grid, before: left, after: right,
         same_owners: left.layers == right.layers && left.cels == right.cels,
-        same_swatches: left.swatches == right.swatches });
+        same_swatches: left.swatches == right.swatches };
+}
+
+fn composite_diff(pair: Pair, limit: u32) -> Report {
+    let start = Scan { count: 0, rows: Buffer.empty(), cells: Buffer.empty(), protected_cells: Buffer.empty(), issue: "" };
+    let settings = Settings { limit: limit, exact: false };
+    let changes = repeat_until(mask.size(pair.grid), start, fn(out) => false,
+        fn(p) => fn(out) => scan_pixel(pair, settings, p, out));
+    return Report { pixelCount: changes.count, pixels: changes.rows.freeze(),
+        exact: Exact { cells: [], protectedCells: [], details: [] } };
 }
 
 fn details(source: json.Json) -> List<json.Member> {

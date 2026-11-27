@@ -40,7 +40,7 @@ record Ranks { positions: Buffer<u32>, slots: Buffer<u32>, }
 record Groups { marks: Buffer<raster.RunMark>, index: u32, spans: Runs, }
 record Appended { fields: List<json.Member>, runs: List<raster.RunMark>, }
 record SavedCel { frame: String, layer: String, authored: json.Json, }
-record SnapshotMark { swatch: Option<String>, knockout: Bool, alpha: Option<u32>, runs: List<Vec3<u32>>, }
+record SnapshotMark { swatch: Option<String>, knockout: Bool, alpha: Option<u32>, runs: List<Vec3<u32>>, point: Bool, }
 record SnapshotCel { frame: String, layer: String, marks: List<SnapshotMark>, }
 record RasterSnapshot { source: json.Json, edits: List<SnapshotCel>, }
 record Edit { document: json.Json, artwork: frame.Artwork, report: Report,
@@ -178,7 +178,7 @@ fn basic_changes(tool: Tool, guard: Guard, layer: String) -> Result<Changes, fau
     let changed = paint_mask(tool, guard, layer)?;
     let sites = mask.indices(changed);
     let marks: List<raster.RunMark> = if length(sites) == 0 { [] } else {
-        [raster.RunMark { slot: tool.slot, alpha: None, spans: runs(tool.drawing.grid, sites) }]
+        [raster.RunMark { slot: tool.slot, alpha: None, spans: runs(tool.drawing.grid, sites), point: false }]
     };
     return Ok(Changes { sites: sites, marks: marks, added: [], shading: brush_paint.unshaded() });
 }
@@ -205,7 +205,7 @@ fn brush_changes(art: frame.Artwork, override: i32, b: brush.Brush, shade: brush
     aimed: List<brush.Stamp>, captured: frame.Captured) -> Result<Changes, String> {
     if shade.mode == "alpha" {
         let sites = aimed.map(fn(row) => row.pixel).sort();
-        let marks: List<raster.RunMark> = if length(sites) == 0 { [] } else { [raster.RunMark { slot: -1, alpha: Some(shade.opacity), spans: runs(art.grid, sites) }] };
+        let marks: List<raster.RunMark> = if length(sites) == 0 { [] } else { [raster.RunMark { slot: -1, alpha: Some(shade.opacity), spans: runs(art.grid, sites), point: false }] };
         return Ok(Changes { sites: sites, marks: marks, added: [], shading: shade });
     }
     let empty = brush_paint.Colors { palette: [], slots: [], added: [], issue: "" };
@@ -249,7 +249,7 @@ fn end_group(slots: List<u32>, opacity: Bool, old: Groups) -> Buffer<raster.RunM
     let channel = slots.at_or(old.index, 0);
     let slot: i32 = if opacity { -1 } else { drawing.signed(channel) - 2 };
     return old.marks.push(raster.RunMark { slot: slot, alpha: if opacity { Some(channel) } else { None },
-        spans: emit_span(old.spans).freeze() });
+        spans: emit_span(old.spans).freeze(), point: false });
 }
 
 fn group_visit(g: mask.Grid, slots: List<u32>, opacity: Bool, i: u32, p: u32, old: Groups) -> Groups {
@@ -516,11 +516,15 @@ fn append_marks(art: frame.Artwork, scope: frame.Scope, marks: List<raster.RunMa
     if length(rows.filter(fn(row) => row.fold(fn(mark) => false, fn(issue) => true))) != 0 {
         return Err("Edit lies outside the shifted cel grid");
     }
-    let fallback = raster.RunMark { slot: -1, alpha: None, spans: [] };
+    let fallback = raster.RunMark { slot: -1, alpha: None, spans: [], point: false };
     let local = rows.map(fn(row) => row.fold(fn(mark) => mark, fn(issue) => fallback));
+    return Ok(append_local_marks(art, scope, target, local, cel));
+}
+
+fn append_local_marks(art: frame.Artwork, scope: frame.Scope, target: frame.Cel, local: List<raster.RunMark>, cel: String) -> Appended {
     let source = frame.resolved_cel(art.cels, target);
     let fields = independent_fields(scope, target, source.fields, cel);
-    return Ok(Appended { fields: fields, runs: source.runs.concat(local) });
+    return Appended { fields: fields, runs: source.runs.concat(local) };
 }
 
 fn independent_fields(scope: frame.Scope, target: frame.Cel, source: List<json.Member>, id: String) -> List<json.Member> {
@@ -557,7 +561,7 @@ fn unused_cel(locations: List<frame.Location>, scope: frame.Scope, index: u32) -
 
 fn serialize_mark(ids: List<String>, row: raster.RunMark) -> SnapshotMark {
     let swatch: Option<String> = if row.slot < 0 { None } else { Some(ids.at_or(drawing.unsigned(row.slot), "")) };
-    return SnapshotMark { swatch: swatch, knockout: row.slot == -2, alpha: row.alpha, runs: row.spans };
+    return SnapshotMark { swatch: swatch, knockout: row.slot == -2, alpha: row.alpha, runs: row.spans, point: row.point };
 }
 
 fn saved_frame(row: json.Json, edits: List<SavedCel>) -> json.Json {
@@ -861,7 +865,7 @@ fn replace_changes(g: mask.Grid, guard: Guard, from: i32, to: i32, layer: String
         return Err(fault.blocked(g, guard.drawn, guard.protected, layer, p, "Swatch replacement cannot change this pixel"));
     }
     let marks: List<raster.RunMark> = if length(pixels) == 0 { [] }
-        else { [raster.RunMark { slot: to, alpha: None, spans: runs(g, pixels) }] };
+        else { [raster.RunMark { slot: to, alpha: None, spans: runs(g, pixels), point: false }] };
     return Ok(Changes { sites: pixels, marks: marks, added: [], shading: brush_paint.unshaded() });
 }
 
