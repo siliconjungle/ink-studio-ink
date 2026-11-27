@@ -163,6 +163,14 @@ struct RasterPixel {
 fn raster_fragment(input: RasterVertex, hard: bool) -> RasterPixel {
     let power = -4.5 * dot(input.local, input.local);
     if power < -4.5 { discard; }
+    // For unit-alpha hard splats the only use of exp is a comparison
+    // with one half. Keep the existing evaluation close to log(0.5),
+    // within a margin larger than the WGSL exp rounding allowance.
+    if hard && input.color.a == 1.0 {
+        if power < -0.6932 { discard; }
+        if !(power > -0.6931) && !(exp(power) > 0.5) { discard; }
+        return RasterPixel(vec4f(input.color.rgb, 1), vec4f(input.depth, input.light, 1));
+    }
     let gaussian = input.color.a * exp(power);
     let solid = input.color.a >= 1.0;
     var alpha = min(0.99, gaussian);

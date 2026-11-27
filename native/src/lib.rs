@@ -77,7 +77,7 @@ impl GaussianRenderer {
         size: [u32; 2],
         splats: &Value,
     ) -> Result<Self, String> {
-        Self::create(device, queue, format, size, splats, None, None, ContourOptions::default())
+        Self::create(device, queue, format, size, splats, None, None, ContourOptions::default(), false)
     }
 
     pub fn with_camera(
@@ -98,6 +98,7 @@ impl GaussianRenderer {
             Some((camera, ordering)),
             None,
             ContourOptions::default(),
+            false,
         )
     }
 
@@ -139,10 +140,40 @@ impl GaussianRenderer {
         settings: ContourSettings<'_>,
         options: ContourOptions,
     ) -> Result<Self, String> {
+        Self::build_contours(device, queue, format, size, splats, camera, ordering, settings, options, false)
+    }
+
+    /// Keep camera-independent terrain normals resident between terrain writes.
+    pub fn with_retained_terrain_contours(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        size: [u32; 2],
+        splats: &Value,
+        camera: &Value,
+        ordering: WorldOrder,
+        settings: ContourSettings<'_>,
+        options: ContourOptions,
+    ) -> Result<Self, String> {
+        Self::build_contours(device, queue, format, size, splats, camera, ordering, settings, options, true)
+    }
+
+    fn build_contours(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        size: [u32; 2],
+        splats: &Value,
+        camera: &Value,
+        ordering: WorldOrder,
+        settings: ContourSettings<'_>,
+        options: ContourOptions,
+        retain_terrain: bool,
+    ) -> Result<Self, String> {
         if matches!(ordering, WorldOrder::Preordered | WorldOrder::Actor(_)) {
             return Err("Colored Contours requires sorted world or skinned splats".into());
         }
-        Self::create(device, queue, format, size, splats, Some((camera, ordering)), Some(settings), options)
+        Self::create(device, queue, format, size, splats, Some((camera, ordering)), Some(settings), options, retain_terrain)
     }
 
     fn create(
@@ -154,6 +185,7 @@ impl GaussianRenderer {
         camera: Option<(&Value, WorldOrder)>,
         contours: Option<ContourSettings<'_>>,
         options: ContourOptions,
+        retain_terrain: bool,
     ) -> Result<Self, String> {
         if size.contains(&0) {
             return Err("Gaussian render target must have positive dimensions".into());
@@ -248,8 +280,17 @@ impl GaussianRenderer {
             args.push(json!({ "input": "contourLight" }));
             function = "project_lit_contour_scene";
         }
+        let retained_steps = if directional && retain_terrain {
+            steps.push(json!({"id": "terrain-normals", "call": "prepare_contour_terrain",
+                "args": [{"input": "splats"}]}));
+            args[0] = json!({"step": "terrain-normals"});
+            function = "project_prepared_lit_contour_scene";
+            &["terrain-normals"][..]
+        } else {
+            &[]
+        };
         steps.push(json!({"id": "ellipses", "call": function, "args": args}));
-        let plan = json!({"inputs": inputs, "steps": steps, "outputs": ["ellipses"]});
+        let plan = json!({"inputs": inputs, "steps": steps, "outputs": ["ellipses"], "retained_steps": retained_steps});
         let count = count.checked_add(skin_rows).ok_or("Too many splats")?;
         let session = engine.open(&plan, Backend::GpuRequired)?["session"]
             .as_u64()

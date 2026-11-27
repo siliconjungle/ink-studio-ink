@@ -64,7 +64,7 @@ Lathe profiles can ripple as they taper, including the phase-shifted power profi
 
 ## Build and check
 
-Use [Ink Lang commit `b9ff90f`](https://github.com/siliconjungle/ink-lang/commit/b9ff90fc7e3a82de14dab5130b465ce4c04097a3) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for the bake's immutable geometry inputs, including optional geometry. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
+Use [Ink Lang commit `fa29d8f`](https://github.com/siliconjungle/ink-lang/commit/fa29d8fb5468b8b9dfbfe77b895e4b4226ac321d) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for the bake's immutable geometry inputs, including optional geometry. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
 
 ```sh
 ./scripts/build.sh --gpu
