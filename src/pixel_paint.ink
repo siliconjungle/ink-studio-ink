@@ -38,7 +38,7 @@ record Details { rows: Buffer<Detail>, issue: String, }
 record Changes { sites: List<u32>, marks: List<raster.RunMark>, added: List<brush.Swatch>, shading: brush_paint.Shading, }
 record Ranks { positions: Buffer<u32>, slots: Buffer<u32>, }
 record Groups { marks: Buffer<raster.RunMark>, index: u32, spans: Runs, }
-record Appended { fields: List<json.Member>, runs: List<raster.RunMark>, }
+record Appended { fields: List<json.Member>, runs: List<raster.RunMark>, plane: u32, }
 record SavedCel { frame: String, layer: String, authored: json.Json, }
 record SnapshotMark { swatch: Option<String>, knockout: Bool, alpha: Option<u32>, runs: List<Vec3<u32>>, point: Bool, }
 record SnapshotCel { frame: String, layer: String, marks: List<SnapshotMark>, }
@@ -524,7 +524,7 @@ fn append_marks(art: frame.Artwork, scope: frame.Scope, marks: List<raster.RunMa
 fn append_local_marks(art: frame.Artwork, scope: frame.Scope, target: frame.Cel, local: List<raster.RunMark>, cel: String) -> Appended {
     let source = frame.resolved_cel(art.cels, target);
     let fields = independent_fields(scope, target, source.fields, cel);
-    return Appended { fields: fields, runs: source.runs.concat(local) };
+    return Appended { fields: fields, runs: source.runs.concat(local), plane: source.plane };
 }
 
 fn independent_fields(scope: frame.Scope, target: frame.Cel, source: List<json.Member>, id: String) -> List<json.Member> {
@@ -597,7 +597,7 @@ fn revised_palette(source: json.Json, added: List<brush.Swatch>) -> json.Json {
 
 fn attach(art: frame.Artwork, scope: frame.Scope, id: String, added: Appended) -> frame.Artwork {
     let cel = frame.Cel { id: id, frame: scope.frame, layer: scope.layer, fields: added.fields,
-        runs: added.runs };
+        runs: added.runs, plane: added.plane };
     if frame.location(art.locations, id).id != "" {
         return frame.Artwork { ..art, cels: art.cels.map(fn(row) => if row.id == id { cel } else { row }) };
     }

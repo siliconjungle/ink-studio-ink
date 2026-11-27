@@ -11,9 +11,11 @@ async function revision(document) {
 
 export async function openPixelDocument(source) {
   const input = typeof source === 'string' ? JSON.parse(source) : source;
-  const opened = callOwned('open_pixel_document', [codec.fromJS(input)]);
+  const { document: metadata, planes } = packSlotPlanes(input);
+  const opened = callOwned('open_pixel_document', [codec.fromJS(metadata)]);
   if (Object.hasOwn(opened, 'Err')) throw new Error(opened.Err);
   const document = codec.toJS(opened.Ok.document);
+  if (planes.length) restoreSlotPlanes(document, planes, plane => plane.pixels);
   const [current, legacy] = await Promise.all([
     revision(document),
     opened.Ok.legacy ? revision(input) : null,
@@ -23,7 +25,8 @@ export async function openPixelDocument(source) {
 
 export function rasterizePixelFrame(source, { frame = '', layer = '', cel = '' } = {}) {
   const input = typeof source === 'string' ? JSON.parse(source) : source;
-  const raster = call('rasterize_pixel_frame', [codec.fromJS(input), frame, layer, cel]);
+  const { document, planes } = packSlotPlanes(input);
+  const raster = call('rasterize_packed_pixel_frame', [codec.fromJS(document), planes, frame, layer, cel]);
   if (Object.hasOwn(raster, 'Err')) throw new Error(raster.Err);
   const { width, height, frame: active, slots, alpha, clipping, ids, rgba } = raster.Ok;
   return { width, height, frame: active || null, slots: Int32Array.from(slots),
@@ -60,8 +63,9 @@ function createPixelEditorCore(source) {
   let grid;
   function replaceDocument(source) {
     const input = typeof source === 'string' ? JSON.parse(source) : source;
-    const { document, positions } = packNamedPixels(input);
-    grid = unwrap(load(codec.fromJS(document), positions));
+    const named = packNamedPixels(input);
+    const { document, planes } = packSlotPlanes(named.document);
+    grid = unwrap(load(codec.fromJS(document), named.positions, planes));
   }
   function select(query, { frame, layer, cel, saved = {} } = {}) {
     const { encoded, packedSaved, runs } = prepareSelection(grid.width, grid.height, query, saved);
@@ -132,6 +136,9 @@ function createPixelEditorCore(source) {
   function snapshot() {
     const saved = read();
     const document = codec.toJS(saved.document);
+    if (saved.slot_owners.length) {
+      restoreSlotPlanes(document, saved.slot_owners, owner => saved.slot_planes[owner.plane - 1]);
+    }
     for (const [i, positions] of saved.positions.entries()) {
       if (!positions.length) continue;
       document.selections[i].pixels = positions.map(p => [p % document.width, Math.floor(p / document.width)]);
@@ -160,6 +167,72 @@ function ownData(value, key) {
   if (!value || typeof value !== 'object') return undefined;
   const field = Object.getOwnPropertyDescriptor(value, key);
   return field?.enumerable && Object.hasOwn(field, 'value') ? field.value : undefined;
+}
+
+function restoreSlotPlanes(document, owners, pixels) {
+  const frames = new Map(document.frames.map(frame => [frame.id, frame]));
+  const ids = Object.keys(document.palette);
+  for (const owner of owners) {
+    frames.get(owner.frame).cels[owner.layer].slots = Array.from(pixels(owner), slot => slot < 0 ? null : ids[slot]);
+  }
+}
+
+function packedArray(value) {
+  return Array.isArray(value) && Object.getPrototypeOf(value) === Array.prototype &&
+    Reflect.ownKeys(value).length === value.length + 1;
+}
+
+function packSlotPlanes(input) {
+  const version = ownData(input, 'version');
+  const width = ownData(input, 'width'), height = ownData(input, 'height');
+  const palette = ownData(input, 'palette');
+  const planes = [];
+  if ((version !== 1 && version !== 2) || !palette || typeof palette !== 'object' || Array.isArray(palette) ||
+      ![width, height].every(n => Number.isInteger(n) && n > 0 && n <= 512)) {
+    return { document: input, planes };
+  }
+  const ids = new Map(Object.keys(palette).map((id, slot) => [id, slot]));
+  const count = width * height;
+  function pack(cel, frame, layer) {
+    const slots = ownData(cel, 'slots');
+    if (typeof frame !== 'string' || typeof layer !== 'string' ||
+        !Array.isArray(slots) || slots.length !== count || !packedArray(slots)) return cel;
+    const pixels = new Int32Array(count);
+    for (let i = 0; i < count; i++) {
+      const swatch = ownData(slots, i);
+      const slot = swatch === null ? -1 : ids.get(swatch);
+      if (slot === undefined) return cel;
+      pixels[i] = slot;
+    }
+    planes.push({ frame, layer, pixels });
+    // Keep the authored field in its original position for snapshot and SHA-256.
+    return replacingDataField(cel, 'slots', []);
+  }
+  const key = version === 1 ? 'layers' : 'frames';
+  const rows = ownData(input, key);
+  if (!packedArray(rows)) return { document: input, planes };
+  const packed = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = ownData(rows, i);
+    if (version === 1) {
+      packed.push(pack(row, 'artwork', ownData(row, 'id')));
+      continue;
+    }
+    const cels = ownData(row, 'cels');
+    if (!cels || typeof cels !== 'object' || Array.isArray(cels)) {
+      packed.push(row);
+      continue;
+    }
+    let updated = cels;
+    for (const layer of Object.keys(cels)) {
+      const cel = ownData(cels, layer);
+      const frame = ownData(row, 'id');
+      const next = pack(cel, frame, layer);
+      if (next !== cel) updated = replacingDataField(updated, layer, next);
+    }
+    packed.push(updated === cels ? row : replacingDataField(row, 'cels', updated));
+  }
+  return { document: planes.length ? replacingDataField(input, key, packed) : input, planes };
 }
 
 function documentPoint(width, height, point) {

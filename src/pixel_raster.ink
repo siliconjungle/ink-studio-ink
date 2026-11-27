@@ -35,12 +35,12 @@ fn slot(ids: List<String>, swatch: json.Json) -> i32 {
         } else { index });
 }
 
-fn initial(g: mask.Grid, ids: List<String>, content: List<json.Member>, work: Work) -> Paint {
+fn initial(g: mask.Grid, ids: List<String>, content: List<json.Member>, packed: List<i32>, work: Work) -> Paint {
     let count = mask.size(g);
     let empty: Buffer<u32> = Buffer.empty();
-    let slots: Buffer<i32> = buffer_fill(count, -1);
+    let slots: Buffer<i32> = if length(packed) == 0 { buffer_fill(count, -1) } else { buffer(packed) };
     let base = Paint { slots: slots, alpha: empty, work: work, drawing: 0, issue: "" };
-    if !values.has(content, "slots") { return base; }
+    if length(packed) != 0 || !values.has(content, "slots") { return base; }
     let authored = values.items(values.get(content, "slots"));
     if length(authored) != count {
         return Paint { ..base, issue: "Pixel layer slots need a named swatch or null per art pixel" };
@@ -704,9 +704,12 @@ fn retained_span(g: mask.Grid, span: Vec3<u32>, slot: i32, alpha: u32, old: Pain
     return write_span(charged, Span { start: first, length: span.z }, slot);
 }
 
-fn raster(g: mask.Grid, ids: List<String>, content: List<json.Member>, runs: List<RunMark>, work: Work) -> Raw {
-    let base = initial(g, ids, content, work);
+fn raster(g: mask.Grid, ids: List<String>, content: List<json.Member>, packed: List<i32>, runs: List<RunMark>, work: Work) -> Raw {
     let marks = values.items(values.get(content, "marks"));
+    if length(packed) != 0 && length(runs) == 0 && length(marks) == 0 {
+        return Raw { slots: packed, alpha: [], work: work, issue: "" };
+    }
+    let base = initial(g, ids, content, packed, work);
     let authored = foldl(marks, base, fn(row) => fn(out) =>
         if out.issue == "" { mark(g, ids, row, out) } else { out });
     let drawn = foldl(runs, authored, fn(row) => fn(out) => retained_runs(g, row, out));

@@ -179,7 +179,7 @@ fn root(cels: List<frame.Cel>, cel: frame.Cel) -> String {
 }
 
 fn drawing_changed(old: frame.Cel, next: frame.Cel) -> Bool {
-    return old.id != "" && (old.runs != next.runs || value.get(old.fields, "slots") != value.get(next.fields, "slots") ||
+    return old.id != "" && (old.runs != next.runs || old.plane != next.plane || value.get(old.fields, "slots") != value.get(next.fields, "slots") ||
         value.get(old.fields, "marks") != value.get(next.fields, "marks"));
 }
 
