@@ -1304,6 +1304,16 @@ fn clipboard_metadata(clipboard: &CopiedSelection) -> Json {
     Json::Object(fields)
 }
 
+fn document_width(document: &Json) -> Option<u32> {
+    let Json::Object(fields) = document else { return None };
+    fields.iter().find(|(name, _)| name == "width").and_then(|(_, value)| coordinate(value, 513))
+}
+
+struct PixelCheckpointCursor {
+    legacy: String,
+    receipt: u32,
+}
+
 pub struct PixelEditor {
     program: State,
     grid: [u32; 2],
@@ -1635,7 +1645,17 @@ impl PixelEditor {
     }
 
     pub fn snapshot(&mut self) -> Result<String, String> {
-        let snapshot = self.program.invoke_view_l_snapshot_pixel_editor()?.result;
+        Ok(self.snapshot_version(None)?.0)
+    }
+
+    fn snapshot_version(&mut self, id: Option<u32>) -> Result<(String, Option<PixelCheckpointCursor>), String> {
+        let (snapshot, cursor) = if let Some(id) = id {
+            let edition = self.program.invoke_view_l_snapshot_pixel_checkpoint(id)?.result?;
+            let cursor = PixelCheckpointCursor { legacy: edition.l_cursor.l_legacy, receipt: edition.l_cursor.l_receipt };
+            (edition.l_snapshot, Some(cursor))
+        } else {
+            (self.program.invoke_view_l_snapshot_pixel_editor()?.result, None)
+        };
         let limits = Limits::default();
         let document = Json::from_ink(&snapshot.l_document.to_json(), limits)?;
         let mut edits = SnapshotEdits::new();
@@ -1671,15 +1691,16 @@ impl PixelEditor {
         }
         let slots: Vec<_> = snapshot.l_slot_planes.iter().map(Vec::as_slice).collect();
         let runs: Vec<_> = snapshot.l_run_planes.iter().map(Vec::as_slice).collect();
-        snapshot_json(
+        let text = snapshot_json(
             &document,
-            self.grid[0],
+            id.and_then(|_| document_width(&document)).unwrap_or(self.grid[0]),
             &snapshot.l_positions,
             &edits,
             &slots,
             &runs,
             limits,
-        )
+        )?;
+        Ok((text, cursor))
     }
 
     pub fn select(

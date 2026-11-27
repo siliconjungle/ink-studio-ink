@@ -1,15 +1,18 @@
 import { call, callOwned, compiledValues, createState, JsonCodec } from '../build/pixel_document.mjs';
 import { openPixelJournal } from './pixel-journal.mjs';
+import { parsePixelSession } from './pixel-session.mjs';
 import { decodePixelPng } from './pixel-png-import.mjs';
 import { packRun, unpackRun } from './pixel-run-words.mjs';
 
 const codec = new JsonCodec(compiledValues.open_pixel_document.params[0]);
 const utf8 = new TextEncoder();
 
-async function revision(document) {
-  const bytes = await crypto.subtle.digest('SHA-256', utf8.encode(JSON.stringify(document)));
+async function revisionText(json) {
+  const bytes = await crypto.subtle.digest('SHA-256', utf8.encode(json));
   return Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('');
 }
+
+const revision = document => revisionText(JSON.stringify(document));
 
 export async function openPixelDocument(source) {
   const fromText = typeof source === 'string';
@@ -58,7 +61,14 @@ export async function createPixelCommandEditor(source, { historyLimit = 100 } = 
   const fromText = typeof source === 'string';
   const input = fromText ? JSON.parse(source) : source;
   const core = createPixelEditorCore(input, fromText);
-  return openPixelJournal({ ...core, codec, revision }, input, historyLimit);
+  return openPixelJournal({ ...core, codec, revision, revisionText }, input, historyLimit);
+}
+
+export async function openPixelCommandSession(source) {
+  const checkpoint = parsePixelSession(typeof source === 'string' ? source : structuredClone(source));
+  const input = checkpoint.baseline.design;
+  const core = createPixelEditorCore(input, true);
+  return openPixelJournal({ ...core, codec, revision, revisionText }, input, checkpoint.journal.historyLimit, checkpoint);
 }
 
 function createPixelEditorCore(source, fromText = false) {
@@ -147,8 +157,7 @@ function createPixelEditorCore(source, fromText = false) {
       palette: palette.map(({ id, color }) => ({ ...(id && { id }), color })),
       slots: slots.map(slot => slot === -3 ? null : slot), ...(alpha.length && { alpha }) };
   }
-  function snapshot() {
-    const saved = read();
+  function restoreSnapshot(saved) {
     const document = codec.toJS(saved.document);
     if (saved.slot_owners.length) {
       restoreSlotPlanes(document, saved.slot_owners, owner => saved.slot_planes[owner.plane - 1]);
@@ -178,7 +187,8 @@ function createPixelEditorCore(source, fromText = false) {
   }
   if (fromText) installDocument(source, true);
   else replaceDocument(source);
-  return { state, editor: Object.freeze({ replaceDocument, select, saveSelection, paint, captureBrush, copySelection, snapshot }) };
+  return { state, restoreSnapshot, setGrid: restored => { grid = restored; }, editor: Object.freeze({ replaceDocument, select, saveSelection, paint, captureBrush,
+    copySelection, snapshot: () => restoreSnapshot(read()) }) };
 }
 
 function ownData(value, key) {

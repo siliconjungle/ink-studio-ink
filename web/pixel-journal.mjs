@@ -1,5 +1,6 @@
 import { callOwned } from '../build/pixel_document.mjs';
 import { pixelPng, pngBase64 } from './pixel-png.mjs';
+import { pixelSessionCheckpoint, readPixelEdition } from './pixel-session.mjs';
 
 const receiptFormat = 'ink-studio/pixel-edit-receipt';
 const isRevision = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
@@ -180,11 +181,12 @@ function previewReport(codec, changes, targets, conflicts, links, exact) {
   return report;
 }
 
-export async function openPixelJournal({ editor, state, codec, revision }, input, historyLimit) {
+export async function openPixelJournal({ editor, state, codec, revision, revisionText, restoreSnapshot, setGrid }, input, historyLimit, checkpoint) {
   const bind = name => state.bind(name, { resultOnly: true });
   const read = bind('pixel_journal'), begin = bind('begin_pixel_edit');
   const commit = bind('commit_pixel_edit'), cancel = bind('cancel_pixel_edit');
   const travel = bind('travel_pixel_history'), check = bind('resolve_pixel_edit');
+  const grid = bind('pixel_editor_grid');
   const guarded = bind('replace_guarded_pixels');
   const plan = bind('plan_pixel_command'), describe = bind('describe_pixel_command_document');
   const inspect = bind('inspect_pixel_command');
@@ -229,9 +231,9 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
     for (const id of receipts.keys()) if (!reachable.has(id)) receipts.delete(id);
   }
 
-  function receiptChain(base = 0) {
+  function receiptChain(id = read().cursor.receipt, base = 0) {
     const rows = [];
-    for (let id = read().cursor.receipt; id !== base;) {
+    for (; id !== base;) {
       const row = receipts.get(id);
       rows.push(row.receipt);
       id = row.parent;
@@ -345,10 +347,15 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
   }
 
   function transition(action) {
-    if (action === 'undo' || action === 'redo') return unwrap(travel(action === 'redo'));
+    if (action === 'undo' || action === 'redo') {
+      const changed = unwrap(travel(action === 'redo'));
+      if (changed) setGrid(grid());
+      return changed;
+    }
     const discard = action === 'cancel' || read().redo.length !== 0;
     const changed = unwrap(action === 'cancel' ? cancel() : commit());
     if (discard && changed) trim();
+    if (action === 'cancel' && changed) setGrid(grid());
     return changed;
   }
 
@@ -437,7 +444,7 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
     try {
       if (!read().pending) throw editError('missing-transaction', 'Open a pixel transaction before recording a batch');
       const base = unwrap(batchDraft());
-      const steps = receiptChain(base.receipt);
+      const steps = receiptChain(read().cursor.receipt, base.receipt);
       unwrap(batchPure('count', steps.length));
       return sealBatch(base.label, codec.toJS(base.anchor), anchor(), steps);
     } catch (error) {
@@ -557,8 +564,72 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
     }
   }
 
-  const [current, legacy] = await Promise.all([revision(editor.snapshot()), input.version === 1 ? revision(input) : '']);
-  unwrap(bind('start_pixel_journal')(current, legacy, historyLimit));
+  const layout = bind('pixel_checkpoint_layout');
+  const checkpointSnapshot = bind('snapshot_pixel_checkpoint');
+  const baselineText = JSON.stringify(editor.snapshot());
+  const [current, legacy] = await Promise.all([revisionText(baselineText), input.version === 1 ? revision(input) : '']);
+  const legacyRevision = checkpoint ? checkpoint.baseline.legacyRevision : legacy || null;
+  let slot = checkpoint?.slot;
+  const generation = checkpoint?.revision ?? 1;
+  const identity = (name, revision) => unwrap(callOwned('pixel_checkpoint_identity',
+    [name, codec.fromJS(legacyRevision), BigInt(revision)]));
+
+  async function restoreCheckpoint(saved) {
+    identity(slot, generation);
+    const stage = bind('stage_pixel_checkpoint'), restore = bind('restore_pixel_checkpoint');
+    const children = new Map();
+    const { journal, baseline } = saved;
+    const snapshots = [journal.current, ...journal.undo.map(row => row.snapshot), ...journal.redo.map(row => row.snapshot)];
+    if (journal.draft) snapshots.push(journal.draft.snapshot);
+    let activeRevision = current;
+    for (const [index, snapshot] of snapshots.entries()) {
+      const edition = readPixelEdition(snapshot, slot, baseline);
+      let parent = 0, observed = current;
+      for (const raw of edition.receipts) {
+        const receipt = replayReceipt(raw);
+        if (receipt.inputs.documentRevision !== observed || !isRevision(receipt.outputs.documentRevision))
+          throw new Error('Invalid retained pixel edit receipt chain');
+        observed = receipt.outputs.documentRevision;
+        const branch = children.get(parent) ?? [];
+        let next = branch.find(id => equal(receipt, receipts.get(id).receipt));
+        if (!next) {
+          next = ++nextReceipt;
+          if (next > 0xffffffff) throw new Error('Pixel edit history has reached its receipt limit');
+          branch.push(next);
+          children.set(parent, branch);
+          receipts.set(next, { parent, receipt });
+        }
+        parent = next;
+      }
+      const documentRevision = edition.receipts.length ? await revision(edition.design) : current;
+      if (documentRevision !== observed) throw new Error('Invalid retained pixel document revision');
+      if (documentRevision !== activeRevision) {
+        editor.replaceDocument(edition.design);
+        activeRevision = documentRevision;
+      }
+      unwrap(stage(index + 1, documentRevision, edition.legacyRevision ?? '', parent));
+    }
+    setGrid(unwrap(restore(BigInt(journal.revision), journal.historyLimit, journal.undo.map(row => row.label),
+      journal.redo.map(row => row.label), journal.draft ? { Some: journal.draft.label } : { None: null })));
+  }
+
+  function exportSession(requested = generation) {
+    if (!Number.isSafeInteger(requested) || requested < 1) throw new Error('Invalid pixel edit session checkpoint');
+    slot ??= 'pixel-editor-' + crypto.randomUUID();
+    const seed = identity(slot, requested);
+    return pixelSessionCheckpoint({
+      slot, seed, revision: requested, baseline: { design: JSON.parse(baselineText), legacyRevision }, layout: layout(),
+      snapshot(id) {
+        const edition = unwrap(checkpointSnapshot(id));
+        const { cursor } = edition;
+        return { cursor, document: cursor.receipt ? restoreSnapshot(edition.snapshot) : null,
+          receipts: cursor.receipt ? receiptChain(cursor.receipt) : [] };
+      },
+    });
+  }
+
+  if (checkpoint) await restoreCheckpoint(checkpoint);
+  else unwrap(bind('start_pixel_journal')(current, legacy, historyLimit));
 
   return Object.freeze({
     png(options = {}) {
@@ -567,6 +638,7 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
     },
     revision: () => enqueue(() => read().cursor.revision),
     history: () => enqueue(history),
+    exportSession: generation => enqueue(() => exportSession(generation)),
     receipts: () => enqueue(() => structuredClone(receiptChain())),
     snapshot: () => enqueue(editor.snapshot),
     select: (query, options) => enqueue(() => editor.select(query, options)),

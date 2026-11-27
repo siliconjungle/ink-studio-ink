@@ -1,4 +1,5 @@
 mod batch;
+mod session;
 
 use super::edit_preview::{CellChange, Color, Location, PixelEditPreview, Preview, Sample, Site};
 use super::{
@@ -122,6 +123,7 @@ pub struct PixelCommandEditor {
     editor: PixelEditor,
     receipts: HashMap<u32, RecordedEdit>,
     next_receipt: u32,
+    session: session::SessionIdentity,
 }
 
 fn conflict(code: &str, message: impl Into<String>) -> Value {
@@ -341,7 +343,9 @@ impl PixelCommandEditor {
         };
         let mut editor = PixelEditor::empty();
         editor.replace_packed_document(input, planes)?;
-        let current = revision(&editor.snapshot()?);
+        let baseline = editor.snapshot()?;
+        let current = revision(&baseline);
+        let session = session::SessionIdentity::fresh(baseline, legacy.clone());
         editor
             .program
             .invoke_view_l_start_pixel_journal(current, legacy, history_limit)?
@@ -350,6 +354,7 @@ impl PixelCommandEditor {
             editor,
             receipts: HashMap::new(),
             next_receipt: 0,
+            session,
         })
     }
 
@@ -441,22 +446,31 @@ impl PixelCommandEditor {
             .result?;
         if changed {
             self.trim()?;
+            self.refresh_grid()?;
         }
         Ok(changed)
     }
 
     pub fn undo(&mut self) -> Result<bool, String> {
-        self.editor
-            .program
-            .invoke_view_l_travel_pixel_history(false)?
-            .result
+        self.travel(false)
     }
 
     pub fn redo(&mut self) -> Result<bool, String> {
-        self.editor
-            .program
-            .invoke_view_l_travel_pixel_history(true)?
-            .result
+        self.travel(true)
+    }
+
+    fn travel(&mut self, redo: bool) -> Result<bool, String> {
+        let moved = self.editor.program.invoke_view_l_travel_pixel_history(redo)?.result?;
+        if moved {
+            self.refresh_grid()?;
+        }
+        Ok(moved)
+    }
+
+    fn refresh_grid(&mut self) -> Result<(), String> {
+        let grid = self.editor.program.invoke_view_l_pixel_editor_grid()?.result;
+        self.editor.grid = [grid.l_width, grid.l_height];
+        Ok(())
     }
 
     pub fn copy_selection(&mut self, options: &str) -> Result<super::CopiedSelection, String> {

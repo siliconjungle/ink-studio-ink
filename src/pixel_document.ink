@@ -13,6 +13,7 @@ import "pixel_history.ink" as history;
 import "pixel_preview.ink" as preview;
 import "pixel_commands.ink" as commands;
 import "pixel_batch.ink" as batch;
+import "pixel_session.ink" as session;
 import "pixel_asset_export.ink" as assets;
 import "pixel_png.ink" as png;
 import "pixel_png_input.ink" as png_input;
@@ -594,11 +595,19 @@ change load_pixel_editor(document: json.Json, positions: List<List<u32>>, planes
     return Ok(grid);
 }
 
+query pixel_editor_grid() -> mask.Grid reads(EditorArtwork) {
+    return frame_raster.artwork_grid(EditorArtwork);
+}
+
 query snapshot_pixel_editor() -> EditorSnapshot reads(EditorSource, EditorArtwork, EditorPositions) {
-    let snapshot = paint.snapshot(EditorSource, EditorArtwork);
-    return EditorSnapshot { document: snapshot.source, positions: EditorPositions, edits: snapshot.edits,
-        slot_owners: frame_raster.slot_owners(EditorArtwork), slot_planes: EditorArtwork.planes,
-        run_owners: frame_raster.run_owners(EditorArtwork), run_planes: EditorArtwork.run_planes };
+    return snapshot_editor(EditorSource, EditorArtwork, EditorPositions);
+}
+
+fn snapshot_editor(source: json.Json, art: frame_raster.Artwork, positions: List<List<u32>>) -> EditorSnapshot {
+    let snapshot = paint.snapshot(source, art);
+    return EditorSnapshot { document: snapshot.source, positions: positions, edits: snapshot.edits,
+        slot_owners: frame_raster.slot_owners(art), slot_planes: art.planes,
+        run_owners: frame_raster.run_owners(art), run_planes: art.run_planes };
 }
 
 change paint_pixel_editor(operation: json.Json, slots: List<i32>, alpha: List<u32>, pixels: List<u32>, names: List<String>, frame: Option<String>, cel: Option<String>) -> Result<paint.Report, fault.Fault>
@@ -750,8 +759,10 @@ state JournalPast: List<history.Entry> = [];
 state JournalFuture: List<history.Entry> = [];
 state JournalLimit: u32 = 100;
 state JournalSerial: u32 = 0;
+state JournalRevision: u64 = 0;
 state JournalEditCels: List<frame_raster.Cel> = [];
 state JournalVersions: Table<u32, history.Edition> = Table.empty();
+state JournalCheckpointReceipts: List<u32> = [0];
 state JournalPreview: preview.Page = preview.empty_page();
 state JournalPreviewPair: Option<preview.Pair> = None;
 
@@ -782,6 +793,79 @@ change begin_pixel_edit(label: String) -> Result<Unit, String>
         receipt: JournalCursor.receipt };
     JournalSerial = id;
     return Ok(());
+}
+
+query pixel_checkpoint_layout() -> session.Layout
+    reads(JournalRevision, JournalLimit, JournalCursor, JournalDraft, JournalPast, JournalFuture) {
+    return session.Layout { revision: JournalRevision, limit: JournalLimit, cursor: JournalCursor,
+        past: JournalPast, future: JournalFuture, draft: JournalDraft };
+}
+
+record CheckpointEdition { cursor: history.Cursor, snapshot: EditorSnapshot, }
+
+query snapshot_pixel_checkpoint(id: u32) -> Result<CheckpointEdition, String>
+    reads(JournalVersions, JournalCursor, EditorSource, EditorArtwork, EditorPositions) {
+    if id == 0 {
+        return Ok(CheckpointEdition { cursor: JournalCursor,
+            snapshot: snapshot_editor(EditorSource, EditorArtwork, EditorPositions) });
+    }
+    let edition = JournalVersions.get(id).ok_or("Missing pixel session history version")?;
+    return Ok(CheckpointEdition { cursor: edition.cursor,
+        snapshot: snapshot_editor(edition.authored, edition.art, edition.positions) });
+}
+
+change stage_pixel_checkpoint(id: u32, revision: String, legacy: String, receipt: u32) -> Result<Unit, String>
+    reads(JournalCursor, JournalCheckpointReceipts, EditorSource, EditorArtwork, EditorNamed, EditorPositions)
+    writes(JournalVersions, JournalCheckpointReceipts) {
+    if JournalCursor.revision != "" || id != session.receipt_count(JournalCheckpointReceipts) {
+        return Err("Cannot stage a pixel checkpoint in an active journal");
+    }
+    let cursor = history.Cursor { revision: revision, legacy: legacy, receipt: receipt };
+    JournalVersions.put(id, history.Edition { authored: EditorSource, art: EditorArtwork, named: EditorNamed,
+        positions: EditorPositions, cursor: cursor });
+    JournalCheckpointReceipts = session.append_receipt(JournalCheckpointReceipts, receipt);
+    return Ok(());
+}
+
+change restore_pixel_checkpoint(revision: u64, limit: u32, undo: List<String>, redo: List<String>, draft: Option<String>)
+    -> Result<mask.Grid, String> reads(JournalCursor, JournalVersions, JournalCheckpointReceipts)
+    writes(JournalVersions, JournalCheckpointReceipts, JournalRevision, JournalLimit, JournalSerial, JournalCursor, JournalPast, JournalFuture,
+        JournalDraft, EditorSource, EditorArtwork, EditorNamed, EditorPositions, EditorScope, EditorImage, EditorPaint) {
+    let retained = session.count(undo, redo);
+    if JournalCursor.revision != "" || !session.fits(retained, limit) || !session.safe_serial(revision) {
+        return Err("Invalid authoring session or incompatible history limit");
+    }
+    let opened: history.Entry = session.saved_draft(draft, JournalCheckpointReceipts);
+    let last = session.last_id(retained);
+    let active = if opened.id == 0 { 1 } else { last + 1 };
+    let serial = if opened.id == 0 { last } else { active };
+    if session.receipt_count(JournalCheckpointReceipts) != serial + 1 {
+        return Err("Missing pixel session history version");
+    }
+    let past = session.entries(JournalCheckpointReceipts, 2, undo);
+    let future = session.entries(JournalCheckpointReceipts, session.future_id(undo), redo);
+    let edition = JournalVersions.remove(active).ok_or("Missing pixel session history version")?;
+    let grid = frame_raster.artwork_grid(edition.art);
+    JournalRevision = revision;
+    JournalLimit = limit;
+    JournalSerial = serial;
+    JournalCheckpointReceipts = [0];
+    JournalCursor = edition.cursor;
+    JournalPast = past;
+    JournalFuture = future;
+    JournalDraft = opened;
+    EditorSource = edition.authored;
+    EditorArtwork = edition.art;
+    EditorNamed = edition.named;
+    EditorPositions = edition.positions;
+    EditorScope = frame_raster.Scope { frame: "", layer: "" };
+    EditorImage = None;
+    EditorPaint = paint.empty_cache();
+    return Ok(grid);
+}
+
+pub fn pixel_checkpoint_identity(slot: String, legacy: json.Json, revision: u64) -> Result<u32, String> {
+    return session.identity(slot, legacy, revision);
 }
 
 query resolve_pixel_edit(patch: json.Json) -> history.Command reads(EditorSource, EditorArtwork, JournalCursor) {
@@ -888,8 +972,8 @@ change accept_pixel_edit(revision: String, receipt: u32) -> Result<Unit, String>
 }
 
 change commit_pixel_edit() -> Result<Bool, String>
-    reads(JournalDraft, JournalCursor, JournalPast, JournalFuture, JournalLimit)
-    writes(JournalDraft, JournalPast, JournalFuture, JournalVersions) {
+    reads(JournalDraft, JournalCursor, JournalPast, JournalFuture, JournalLimit, JournalRevision)
+    writes(JournalDraft, JournalPast, JournalFuture, JournalVersions, JournalRevision) {
     let draft = JournalDraft;
     if draft.id == 0 { return Err("No active transaction"); }
     JournalDraft = history.empty_entry();
@@ -897,12 +981,14 @@ change commit_pixel_edit() -> Result<Bool, String>
         JournalVersions.remove(draft.id);
         return Ok(false);
     }
+    let next_revision = session.next_serial(JournalRevision)?;
     let rows = JournalPast.concat([draft]);
     let retain = mask.min(history.entry_count(rows), JournalLimit);
     let prune = history.entry_count(rows) - retain;
     JournalVersions.remove_many(history.retired(rows, prune, JournalFuture));
     JournalPast = history.kept(rows, prune);
     JournalFuture = [];
+    JournalRevision = next_revision;
     return Ok(true);
 }
 
@@ -925,13 +1011,14 @@ change cancel_pixel_edit() -> Result<Bool, String>
 }
 
 change travel_pixel_history(redo: Bool) -> Result<Bool, String>
-    reads(JournalDraft, JournalPast, JournalFuture, JournalVersions, JournalCursor, EditorSource, EditorArtwork, EditorNamed, EditorPositions)
-    writes(JournalPast, JournalFuture, JournalVersions, JournalCursor, EditorSource, EditorArtwork, EditorNamed, EditorPositions, EditorScope, EditorImage, EditorPaint) {
+    reads(JournalDraft, JournalPast, JournalFuture, JournalVersions, JournalCursor, JournalRevision, EditorSource, EditorArtwork, EditorNamed, EditorPositions)
+    writes(JournalPast, JournalFuture, JournalVersions, JournalCursor, JournalRevision, EditorSource, EditorArtwork, EditorNamed, EditorPositions, EditorScope, EditorImage, EditorPaint) {
     if JournalDraft.id != 0 {
         return Err(if redo { "Finish the active transaction before redo" } else { "Finish the active transaction before undo" });
     }
     let rows = if redo { JournalFuture } else { JournalPast };
     if history.entry_count(rows) == 0 { return Ok(false); }
+    let next_revision = session.next_serial(JournalRevision)?;
     let target = history.last(rows);
     let current = history.Edition { authored: EditorSource, art: EditorArtwork, named: EditorNamed,
         positions: EditorPositions, cursor: JournalCursor };
@@ -946,6 +1033,7 @@ change travel_pixel_history(redo: Bool) -> Result<Bool, String>
         JournalFuture = JournalFuture.concat([replacement]);
     }
     JournalCursor = prior.cursor;
+    JournalRevision = next_revision;
     EditorSource = prior.authored;
     EditorArtwork = prior.art;
     EditorNamed = prior.named;
