@@ -10,6 +10,7 @@ import "pixel_fault.ink" as fault;
 import "pixel_brush_capture.ink" as brushes;
 import "pixel_transform.ink" as transforms;
 import "pixel_history.ink" as history;
+import "pixel_preview.ink" as preview;
 
 record Layer { id: String, kind: String, parent: String, }
 record Cel { id: String, hold: String, }
@@ -709,6 +710,9 @@ state JournalLimit: u32 = 100;
 state JournalSerial: u32 = 0;
 state JournalEditCels: List<frame_raster.Cel> = [];
 state JournalVersions: Table<u32, history.Edition> = Table.empty();
+state JournalPreview: preview.Page = preview.empty_page();
+
+record DraftPreview { changes: preview.Report, celLinks: Option<history.Links>, receipt: u32, }
 
 change start_pixel_journal(revision: String, legacy: String, limit: u32) -> Result<Unit, String>
     reads(JournalCursor) writes(JournalCursor, JournalLimit) {
@@ -748,6 +752,27 @@ change observe_pixel_edit() -> Unit reads(EditorArtwork) writes(JournalEditCels)
 
 query pixel_edit_links() -> Option<history.Links> reads(JournalEditCels, EditorArtwork) {
     return history.links(JournalEditCels, EditorArtwork.cels);
+}
+
+change observe_pixel_preview() -> Unit reads(EditorSource, EditorArtwork) writes(JournalPreview) {
+    JournalPreview = preview.Page { source: EditorSource, art: EditorArtwork };
+    return ();
+}
+
+query pixel_preview_diff(limit: u32, exact: Bool) -> Result<preview.Report, String>
+    reads(JournalPreview, EditorSource, EditorArtwork) {
+    return preview.compare(JournalPreview.art, JournalPreview.source, EditorArtwork, EditorSource,
+        preview.Settings { limit: limit, exact: exact });
+}
+
+query pixel_draft_diff(limit: u32, exact: Bool) -> Result<DraftPreview, String>
+    reads(JournalDraft, JournalVersions, EditorSource, EditorArtwork) {
+    if JournalDraft.id == 0 { return Err("No active transaction"); }
+    let base = JournalVersions.get(JournalDraft.id).ok_or("Missing pixel edit transaction")?;
+    let changes = preview.compare(base.art, base.authored, EditorArtwork, EditorSource,
+        preview.Settings { limit: limit, exact: exact })?;
+    return Ok(DraftPreview { changes: changes, receipt: JournalDraft.receipt,
+        celLinks: history.links(history.affected_cels(base.art), EditorArtwork.cels) });
 }
 
 change accept_pixel_edit(revision: String, receipt: u32) -> Result<Unit, String>

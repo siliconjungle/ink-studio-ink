@@ -38,12 +38,60 @@ function gateFields(patch) {
   return fields;
 }
 
+function previewOptions({ limit = 256, exact, shotHitFrame } = {}) {
+  if (exact !== undefined && typeof exact !== 'boolean') throw new TypeError('Exact preview must be a boolean');
+  if (shotHitFrame !== undefined && (!exact || !Number.isInteger(shotHitFrame) || shotHitFrame < 0 || shotHitFrame > 1e9)) {
+    throw new TypeError('A preview shot hit sample needs exact mode and a nonnegative shot frame');
+  }
+  if (!Number.isSafeInteger(limit) || limit < 0) throw new RangeError('Pixel preview limit must be a nonnegative integer');
+  return { limit: Math.min(limit, 0xffffffff), exact: exact ?? false };
+}
+
+function cellChanges(rows = [], exact = false) {
+  const location = ({ layer, cel, swatch }) => ({ layer: layer || null, cel: cel || null, swatch: swatch || null });
+  return rows.map(({ site, layer, before, after }) => {
+    function describe({ Some: sample }) {
+      if (!sample) return null;
+      const { layer: owner, cel, swatch } = sample.location;
+      const color = swatch ? '#' + sample.rgb.toString(16).padStart(6, '0') : null;
+      const alpha = sample.alpha.Some;
+      if (layer) return { cel: cel || null, swatch: swatch || null, color, alpha, knockout: sample.knockout, clip: sample.clip };
+      const painted = { layer: owner || null, cel: cel || null, swatch: swatch || null, color, protected: sample.protected };
+      if (alpha !== undefined) painted.alpha = alpha;
+      if (!exact) painted.underneath = location(sample.underneath);
+      return painted;
+    }
+    const { frame, at } = site;
+    const left = describe(before), right = describe(after);
+    return layer ? { frame, at, layer, before: left, after: right } : { frame, at, before: left, after: right };
+  });
+}
+
+function previewReport(codec, changes, targets, conflicts, links, exact) {
+  const report = { format: 'ink-studio/pixel-edit-preview', version: 1, valid: conflicts.length === 0,
+    ...(links && { celLinks: links }), pixelCount: changes?.pixelCount ?? 0,
+    pixels: cellChanges(changes?.pixels), sources: [], targets, conflicts };
+  if (exact) {
+    const cells = cellChanges(changes?.exact.cells, true);
+    const protectedCells = changes?.exact.protectedCells ?? [];
+    const details = changes?.exact.details.map(row => codec.toJS(row)) ?? [];
+    const hits = conflicts.filter(issue => Object.hasOwn(issue, 'at'));
+    report.diff = { cells, grids: [], materials: [], geometry: [], other: [], rendered: [], renderErrors: [],
+      skippedHits: hits, protection: { wouldChange: protectedCells.length !== 0 || details.length !== 0,
+        details, geometry: [], cells: protectedCells, renderedCells: [],
+        blocked: hits.filter(issue => issue.code.startsWith('protected-')) } };
+  }
+  return report;
+}
+
 export async function openPixelJournal({ editor, state, codec, revision }, input, historyLimit) {
   const bind = name => state.bind(name, { resultOnly: true });
   const read = bind('pixel_journal'), begin = bind('begin_pixel_edit');
   const commit = bind('commit_pixel_edit'), cancel = bind('cancel_pixel_edit');
   const travel = bind('travel_pixel_history'), check = bind('resolve_pixel_edit');
   const observe = bind('observe_pixel_edit'), links = bind('pixel_edit_links');
+  const observePreview = bind('observe_pixel_preview'), editDiff = bind('pixel_preview_diff');
+  const draftDiff = bind('pixel_draft_diff');
   const accept = bind('accept_pixel_edit');
   const receipts = new Map();
   let nextReceipt = 0, previous = Promise.resolve();
@@ -82,7 +130,7 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
     return rows.reverse();
   }
 
-  async function attempt(patch, { dryRun = false, expected } = {}) {
+  async function attempt(patch, { dryRun = false, expected, preview } = {}) {
     const { cursor, pending, redo } = read();
     const shot = expected?.command.options.shotHitFrame;
     const options = shot === undefined ? {} : { shotHitFrame: shot };
@@ -109,9 +157,16 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
       started = true;
       if (!dryRun && !pending) unwrap(begin(patch.id));
       observe();
+      if (preview) observePreview();
       const target = gate.kind === 'selections' ? editor.saveSelection(patch.operation, { frame: gate.frame })
         : editor.paint(patch.operation, { frame: gate.frame, cel: gate.cel.Some });
       target.destination = gate.destination;
+      if (preview) {
+        const changes = gate.kind === 'selections' ? undefined : unwrap(editDiff(preview.limit, preview.exact));
+        const report = previewReport(codec, changes, [target], [], links().Some, preview.exact);
+        state.rollbackTransaction();
+        return report;
+      }
       const document = editor.snapshot();
       const after = await revision(document);
       const changes = links().Some;
@@ -144,6 +199,7 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
         trim();
       }
       const issue = error.conflict ?? { code: 'invalid-edit', message: error.message };
+      if (preview) return previewReport(codec, undefined, [], [issue], undefined, preview.exact);
       const receipt = { ...common, status: 'rejected', affectedTargets: [],
         skippedHits: Object.hasOwn(issue, 'at') ? [issue] : [], conflicts: [issue], outputs: null };
       if (dryRun) return { document: editor.snapshot(), receipt };
@@ -183,6 +239,24 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
     previewPatch(raw) {
       const patch = capture(raw);
       return enqueue(() => attempt(patch, { dryRun: true }));
+    },
+    previewEdit(raw, options) {
+      const patch = capture(raw);
+      return enqueue(() => attempt(patch, { dryRun: true, preview: previewOptions(options) }));
+    },
+    previewChanges(options) {
+      return enqueue(() => {
+        const { limit, exact } = previewOptions(options);
+        const { cursor } = read();
+        const result = unwrap(draftDiff(limit, exact));
+        const targets = [];
+        for (let id = cursor.receipt; id !== result.receipt;) {
+          const row = receipts.get(id);
+          targets.push(row.receipt.affectedTargets[0]);
+          id = row.parent;
+        }
+        return previewReport(codec, result.changes, structuredClone(targets.reverse()), [], result.celLinks.Some, exact);
+      });
     },
     apply(raw) {
       const patch = capture(raw);

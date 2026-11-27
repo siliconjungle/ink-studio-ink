@@ -16,16 +16,21 @@ record Artwork { grid: mask.Grid, layers: List<Layer>, ids: List<String>, colors
 record Scope { frame: String, layer: String, }
 record Captured { found: Bool, slots: List<i32>, alpha: List<u32>, clipping: List<u32>, }
 record Pixel { slot: i32, color: u32, alpha: u32, locked: Bool, }
-record Source { raw: paint.Raw, group: List<Pixel>, }
-record Canvas { pixels: Buffer<Pixel>, masks: Buffer<List<u32>>, shown: Bool, protected: Bool, }
-record Parked { pixels: List<Pixel>, masks: List<List<u32>>, shown: Bool, protected: Bool, }
+record Source { raw: paint.Raw, group: List<Pixel>, trace: List<u32>, uses_alpha: Bool, }
+record Canvas { pixels: Buffer<Pixel>, masks: Buffer<List<u32>>, trace: Buffer<u32>,
+    uses_alpha: Bool, shown: Bool, protected: Bool, }
+record Parked { pixels: List<Pixel>, masks: List<List<u32>>, trace: List<u32>,
+    uses_alpha: Bool, shown: Bool, protected: Bool, }
 record Job { ordinal: u32, closing: Bool, }
+record RawLayer { owner: u32, view: Captured, }
 record Scene { canvas: Canvas, ancestors: Buffer<Parked>, todo: Buffer<Job>,
-    capture: Captured, work: paint.Work, issue: String, }
-record Overlay { pixels: Buffer<Pixel>, coverage: Buffer<u32>, issue: String, }
-record Style { opacity: f64, blend: String, kind: String, protect: Bool, }
+    capture: Captured, sources: Buffer<RawLayer>, exact: Bool, work: paint.Work, issue: String, }
+record Overlay { pixels: Buffer<Pixel>, coverage: Buffer<u32>, trace: Buffer<u32>, issue: String, }
+enum Blend { Normal, Multiply, Screen, Overlay, Add, }
+record Style { id: String, opacity: f64, blend: Blend, kind: String, protect: Bool, owner: u32, }
 record Raster { width: u32, height: u32, frame: String, image: selection.Image, }
 record PaintView { captured: Captured, pixels: List<Pixel>, }
+record PreviewView { pixels: List<Pixel>, trace: List<u32>, uses_alpha: Bool, sources: List<RawLayer>, }
 
 fn palette_color(raw: json.Json) -> u32 {
     let s = json.as_text(raw).fold(fn(color) => color, fn(issue) => value.text(value.get(value.fields(raw), "color")));
@@ -126,31 +131,38 @@ fn translated(g: mask.Grid, raw: paint.Raw, move: Placement) -> paint.Raw {
     return paint.Raw { ..raw, slots: mapped.freeze(), alpha: bytes.freeze() };
 }
 
-fn channel(front: u32, back: u32, amount: f64, behind: f64, overlap: f64, blend: String) -> u32 {
+fn blend_mode(name: String) -> Blend {
+    if name == "multiply" { return Blend.Multiply; }
+    if name == "screen" { return Blend.Screen; }
+    if name == "overlay" { return Blend.Overlay; }
+    if name == "add" { return Blend.Add; }
+    return Blend.Normal;
+}
+
+fn channel(front: u32, back: u32, amount: f64, behind: f64, overlap: f64, blend: Blend) -> u32 {
     let a = f64_from_u32(front);
     let b = f64_from_u32(back);
-    let combined = if blend == "multiply" { a * b / 255.0f64 } else {
-        if blend == "screen" { 255.0f64 - (255.0f64 - a) * (255.0f64 - b) / 255.0f64 } else {
-            if blend == "overlay" {
-                if b <= 127.5f64 { 2.0f64 * a * b / 255.0f64 }
-                else { 255.0f64 - 2.0f64 * (255.0f64 - a) * (255.0f64 - b) / 255.0f64 }
-            } else { if blend == "add" { value.min(255.0f64, a + b) } else { a } }
-        }
+    let combined = match blend {
+        Blend.Normal => a,
+        Blend.Multiply => a * b / 255.0f64,
+        Blend.Screen => 255.0f64 - (255.0f64 - a) * (255.0f64 - b) / 255.0f64,
+        Blend.Overlay => if b <= 127.5f64 { 2.0f64 * a * b / 255.0f64 }
+            else { 255.0f64 - 2.0f64 * (255.0f64 - a) * (255.0f64 - b) / 255.0f64 },
+        Blend.Add => value.min(255.0f64, a + b),
     };
     return value.round_byte((a * amount + (combined - a) * overlap + b * behind) / (amount + behind));
 }
 
 fn byte(rgb: u32, shift: u32) -> u32 { return word_and(wrapping_shr(rgb, shift), 255); }
 
-fn mix(front: u32, back: Pixel, strength: f64, style: Style) -> u32 {
-    let behind = f64_from_u32(back.alpha) * (255.0f64 - strength) / 255.0f64;
-    if behind == 0.0f64 && (style.blend == "normal" || back.alpha == 0) { return front; }
+fn mix(front: u32, back: Pixel, strength: f64, behind: f64, blend: Blend) -> u32 {
+    if behind == 0.0f64 && (blend == Blend.Normal || back.alpha == 0) { return front; }
     let overlap = strength * f64_from_u32(back.alpha) / 255.0f64;
     return repeat_until(3, 0, fn(rgb) => false, fn(i) => fn(rgb) =>
-        mix_channel(rgb, front, back.color, i * 8, strength, behind, overlap, style.blend));
+        mix_channel(rgb, front, back.color, i * 8, strength, behind, overlap, blend));
 }
 
-fn mix_channel(rgb: u32, front: u32, back: u32, shift: u32, amount: f64, behind: f64, overlap: f64, blend: String) -> u32 {
+fn mix_channel(rgb: u32, front: u32, back: u32, shift: u32, amount: f64, behind: f64, overlap: f64, blend: Blend) -> u32 {
     let mixed = channel(byte(front, shift), byte(back, shift), amount, behind, overlap, blend);
     return word_or(rgb, wrapping_shl(mixed, shift));
 }
@@ -171,8 +183,32 @@ fn color_at(colors: List<u32>, slot: i32) -> u32 {
     return colors.at_or(value.as_word(f64_from_i32(slot)), 0);
 }
 
+// The two seven-bit owner IDs are one-based layer ordinals. The remaining
+// bits store the previous swatch plus one, with zero representing blank.
+fn owner(trace: u32) -> u32 { return word_and(trace, 127); }
+fn under_owner(trace: u32) -> u32 { return owner(wrapping_shr(trace, 7)); }
+fn under_swatch(trace: u32) -> u32 { return wrapping_shr(trace, 14); }
+
+fn pack_trace(front: u32, rear: u32, slot: i32) -> u32 {
+    let swatch = value.as_word(f64_from_i32(slot + 1));
+    return front + wrapping_shl(owner(rear), 7) + wrapping_shl(swatch, 14);
+}
+
+fn stamp_trace(front: u32, slot: i32, p: u32, trace: Buffer<u32>) -> Buffer<u32> {
+    let packed = pack_trace(front, trace.at_or(p, 0), slot);
+    return trace.set(p, packed);
+}
+
+fn overlay_trace(source: Source, style: Style, rear: Pixel, p: u32, trace: Buffer<u32>) -> Buffer<u32> {
+    if style.owner == 0 { return trace; }
+    let inner = source.trace.at_or(p, 0);
+    if under_owner(inner) != 0 { return trace.set(p, inner); }
+    let front = if style.kind == "group" { owner(inner) } else { style.owner };
+    return stamp_trace(front, rear.slot, p, trace);
+}
+
 fn paint_cell(g: mask.Grid, source: Source, style: Style, colors: List<u32>, clip: List<u32>,
-    p: u32, layer_id: String, out: Overlay) -> Overlay {
+    p: u32, out: Overlay) -> Overlay {
     let group = style.kind == "group";
     let cell = source.group.at_or(p, blank());
     let raw = if group { cell.slot } else { source.raw.slots.at_or(p, -1) };
@@ -191,7 +227,7 @@ fn paint_cell(g: mask.Grid, source: Source, style: Style, colors: List<u32>, cli
     if rear.locked {
         if slot != rear.slot {
             let at = string_concat(decimal(rem_or(p, g.width, 0)), string_concat(",", decimal(quot_or(p, g.width, 0))));
-            return Overlay { ..touched, issue: string_concat(layer_id, string_concat(" changes a protected pixel at ", at)) };
+            return Overlay { ..touched, issue: string_concat(style.id, string_concat(" changes a protected pixel at ", at)) };
         }
         return touched;
     }
@@ -202,18 +238,21 @@ fn paint_cell(g: mask.Grid, source: Source, style: Style, colors: List<u32>, cli
     let front = if group { cell.color } else { color_at(colors, slot) };
     let strength = f64_from_u32(amount);
     let behind = f64_from_u32(rear.alpha) * (255.0f64 - strength) / 255.0f64;
-    let color = if amount == 0 { 0 } else { mix(front, rear, strength, style) };
+    let color = if amount == 0 { 0 } else { mix(front, rear, strength, behind, style.blend) };
     let opacity = if amount == 0 { 0 } else { value.round_byte(strength + behind) };
-    return Overlay { ..touched, pixels: touched.pixels.set(p,
+    return Overlay { ..touched, trace: overlay_trace(source, style, rear, p, touched.trace), pixels: touched.pixels.set(p,
         Pixel { slot: slot, color: color, alpha: opacity, locked: style.protect || (group && cell.locked) }) };
 }
 
-fn opaque_cell(slots: List<i32>, colors: List<u32>, protect: Bool, p: u32, out: Overlay) -> Overlay {
+fn opaque_cell(slots: List<i32>, colors: List<u32>, style: Style, p: u32, out: Overlay) -> Overlay {
     let slot = slots.at_or(p, -1);
     if slot == -1 { return out; }
-    let cell = if slot == -2 { Pixel { ..blank(), locked: protect } }
-        else { Pixel { slot: slot, color: color_at(colors, slot), alpha: 255, locked: protect } };
-    return Overlay { ..out, pixels: out.pixels.set(p, cell), coverage: out.coverage.set(p, if slot == -2 { 0 } else { 255 }) };
+    let cell = if slot == -2 { Pixel { ..blank(), locked: style.protect } }
+        else { Pixel { slot: slot, color: color_at(colors, slot), alpha: 255, locked: style.protect } };
+    let trace = if style.owner == 0 { out.trace }
+        else { stamp_trace(style.owner, out.pixels.at_or(p, blank()).slot, p, out.trace) };
+    return Overlay { ..out, trace: trace, pixels: out.pixels.set(p, cell),
+        coverage: out.coverage.set(p, if slot == -2 { 0 } else { 255 }) };
 }
 
 fn clip_index(layers: List<Layer>, id: String, limit: u32) -> u32 {
@@ -226,9 +265,10 @@ fn empty_layer() -> Layer {
         locked: false, visible: false, opacity: 0.0f64 };
 }
 
-fn empty_canvas(art: Artwork, shown: Bool) -> Canvas {
+fn empty_canvas(art: Artwork, shown: Bool, preview: Bool) -> Canvas {
     return Canvas { pixels: buffer_fill(mask.size(art.grid), blank()), masks: buffer_fill(length(art.layers), []),
-        shown: shown, protected: false };
+        trace: if preview { buffer_fill(mask.size(art.grid), 0) } else { Buffer.empty() },
+        uses_alpha: false, shown: shown, protected: false };
 }
 
 fn visible(layer: Layer, shown: Bool, opacity: f64) -> Bool {
@@ -249,47 +289,63 @@ fn add_child(layers: List<Layer>, parent: String, ordinal: u32, todo: Buffer<Job
 fn open_group(art: Artwork, ordinal: u32, layer: Layer, old: Scene) -> Scene {
     let shown = visible(layer, old.canvas.shown, layer.opacity);
     let parent = Parked { pixels: old.canvas.pixels.freeze(), masks: old.canvas.masks.freeze(),
+        trace: old.canvas.trace.freeze(), uses_alpha: old.canvas.uses_alpha,
         shown: old.canvas.shown, protected: old.canvas.protected };
     let todo = children(art.layers, layer.id, old.todo.push(Job { ordinal: ordinal, closing: true }));
-    return Scene { ..old, ancestors: old.ancestors.push(parent), canvas: empty_canvas(art, shown), todo: todo };
+    return Scene { ..old, ancestors: old.ancestors.push(parent),
+        canvas: empty_canvas(art, shown, length(parent.trace) != 0), todo: todo };
 }
 
 fn apply_layer(art: Artwork, scope: Scope, ordinal: u32, layer: Layer, opacity: f64, source: Source, has_protected: Bool, old: Scene) -> Scene {
     let canvas = old.canvas;
-    let clip: List<u32> = if layer.clip == "" { [] } else { canvas.masks.at_or(clip_index(art.layers, layer.clip, ordinal), []) };
-    let capture = if layer.kind != "group" && scope.layer == layer.id {
-        Captured { found: true, slots: source.raw.slots, alpha: source.raw.alpha, clipping: clip }
-    } else { old.capture };
+    let clip_from = if layer.clip == "" { 4294967295 } else { clip_index(art.layers, layer.clip, ordinal) };
+    let clip: List<u32> = canvas.masks.at_or(clip_from, []);
+    let raw = Captured { found: true, slots: source.raw.slots, alpha: source.raw.alpha, clipping: clip };
+    let capture = if layer.kind != "group" && scope.layer == layer.id { raw } else { old.capture };
+    let sources = if old.exact && layer.kind != "group" {
+        old.sources.push(RawLayer { owner: ordinal + 1, view: raw })
+    } else { old.sources };
     let coverage: Buffer<u32> = buffer_fill(mask.size(art.grid), 0);
     if !visible(layer, canvas.shown, opacity) {
-        return Scene { ..old, capture: capture, canvas: Canvas { ..canvas, masks: canvas.masks.set(ordinal, coverage.freeze()) } };
+        return Scene { ..old, capture: capture, sources: sources,
+            canvas: Canvas { ..canvas, masks: canvas.masks.set(ordinal, coverage.freeze()) } };
     }
-    let style = Style { opacity: opacity, blend: layer.blend, kind: layer.kind, protect: layer.protect };
-    let start = Overlay { pixels: canvas.pixels, coverage: coverage, issue: "" };
-    let result = draw_layer(art, layer.id, source, style, clip, canvas.protected, start);
+    let tracking = canvas.trace.len() != 0;
+    let style = Style { id: layer.id, opacity: opacity, blend: blend_mode(layer.blend), kind: layer.kind,
+        protect: layer.protect, owner: if tracking { ordinal + 1 } else { 0 } };
+    let start = Overlay { pixels: canvas.pixels, coverage: coverage, trace: canvas.trace, issue: "" };
+    let result = draw_layer(art, source, style, clip, canvas.protected, start);
+    let uses_alpha = canvas.uses_alpha || tracking && (opacity != 1.0f64 || layer.blend != "normal" ||
+        if layer.kind == "group" { source.uses_alpha } else {
+            length(source.raw.alpha) != 0 || art.layers.at_or(clip_from, empty_layer()).kind == "mask"
+        });
     return Scene { ..old, canvas: Canvas { pixels: result.pixels, masks: canvas.masks.set(ordinal, result.coverage.freeze()),
-        shown: canvas.shown, protected: canvas.protected || layer.protect || has_protected },
-        capture: capture, issue: result.issue };
+        trace: result.trace, uses_alpha: uses_alpha, shown: canvas.shown,
+        protected: canvas.protected || layer.protect || has_protected },
+        capture: capture, sources: sources, issue: result.issue };
 }
 
-fn draw_layer(art: Artwork, id: String, source: Source, style: Style, clip: List<u32>, protected: Bool, start: Overlay) -> Overlay {
+fn draw_layer(art: Artwork, source: Source, style: Style, clip: List<u32>, protected: Bool, start: Overlay) -> Overlay {
     let cells = mask.size(art.grid);
-    if !protected && style.kind != "group" && style.kind != "mask" && style.blend == "normal" &&
+    if !protected && style.kind != "group" && style.kind != "mask" && style.blend == Blend.Normal &&
         style.opacity == 1.0f64 && length(clip) == 0 && length(source.raw.alpha) == 0 {
         return repeat_until(cells, start, fn(out) => false, fn(p) => fn(out) =>
-            opaque_cell(source.raw.slots, art.colors, style.protect, p, out));
+            opaque_cell(source.raw.slots, art.colors, style, p, out));
     }
     return repeat_until(cells, start, fn(out) => out.issue != "", fn(p) => fn(out) =>
-        paint_cell(art.grid, source, style, art.colors, clip, p, id, out));
+        paint_cell(art.grid, source, style, art.colors, clip, p, out));
 }
 
 fn close_group(art: Artwork, scope: Scope, ordinal: u32, layer: Layer, scene: Scene) -> Scene {
-    let ancestor = scene.ancestors.at_or(scene.ancestors.len() - 1, Parked { pixels: [], masks: [], shown: false, protected: false });
+    let ancestor = scene.ancestors.at_or(scene.ancestors.len() - 1,
+        Parked { pixels: [], masks: [], trace: [], uses_alpha: false, shown: false, protected: false });
     let group_protected = scene.canvas.protected;
-    let source = Source { group: scene.canvas.pixels.freeze(),
+    let source = Source { group: scene.canvas.pixels.freeze(), trace: scene.canvas.trace.freeze(),
+        uses_alpha: scene.canvas.uses_alpha,
         raw: paint.Raw { slots: [], alpha: [], work: scene.work, issue: "" } };
     let old = Scene { ..scene, ancestors: scene.ancestors.pop(),
-        canvas: Canvas { pixels: buffer(ancestor.pixels), masks: buffer(ancestor.masks), shown: ancestor.shown, protected: ancestor.protected } };
+        canvas: Canvas { pixels: buffer(ancestor.pixels), masks: buffer(ancestor.masks), trace: buffer(ancestor.trace),
+            uses_alpha: ancestor.uses_alpha, shown: ancestor.shown, protected: ancestor.protected } };
     return apply_layer(art, scope, ordinal, layer, layer.opacity, source, group_protected, old);
 }
 
@@ -305,15 +361,26 @@ fn step(art: Artwork, scope: Scope, scene: Scene) -> Scene {
     let raw = translated(art.grid, paint.raster(art.grid, art.ids, source.fields, source.runs, old.work), place);
     if raw.issue != "" { return Scene { ..old, issue: raw.issue }; }
     let next = Scene { ..old, work: raw.work };
-    return apply_layer(art, scope, job.ordinal, layer, layer.opacity * place.opacity, Source { raw: raw, group: [] }, false, next);
+    let input = Source { raw: raw, group: [], trace: [], uses_alpha: false };
+    return apply_layer(art, scope, job.ordinal, layer, layer.opacity * place.opacity, input, false, next);
 }
 
-fn composite(art: Artwork, scope: Scope) -> Scene {
+fn compose(art: Artwork, scope: Scope, preview: Bool, exact: Bool) -> Scene {
     let todo: Buffer<Job> = Buffer.empty();
-    let initial = Scene { canvas: empty_canvas(art, true), ancestors: Buffer.empty(),
-        todo: children(art.layers, "", todo), capture: no_capture(), work: paint.untouched(), issue: "" };
+    let initial = Scene { canvas: empty_canvas(art, true, preview), ancestors: Buffer.empty(),
+        todo: children(art.layers, "", todo), capture: no_capture(), sources: Buffer.empty(), exact: exact,
+        work: paint.untouched(), issue: "" };
     return repeat_until(length(art.layers) * 2, initial, fn(scene) => scene.issue != "" || scene.todo.len() == 0,
         fn(i) => fn(scene) => step(art, scope, scene));
+}
+
+fn composite(art: Artwork, scope: Scope) -> Scene { return compose(art, scope, false, false); }
+
+fn preview_view(art: Artwork, id: String, exact: Bool) -> Result<PreviewView, String> {
+    let scene = compose(art, Scope { frame: id, layer: "" }, true, exact);
+    if scene.issue != "" { return Err(scene.issue); }
+    return Ok(PreviewView { pixels: scene.canvas.pixels.freeze(), trace: scene.canvas.trace.freeze(),
+        uses_alpha: scene.canvas.uses_alpha, sources: scene.sources.freeze() });
 }
 
 fn frame_name(row: json.Json) -> String { return value.text(value.get(value.fields(row), "id")); }

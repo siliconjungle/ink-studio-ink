@@ -1,4 +1,4 @@
-use ink_studio_pixel::{PixelCommandEditor, PixelEditError};
+use ink_studio_pixel::{PixelCommandEditor, PixelEditError, PixelPreviewOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{
     Value,
@@ -48,6 +48,38 @@ fn encoded(value: impl Serialize) -> Result<Box<RawValue>, PixelEditError> {
     to_raw_value(&value).map_err(|error| error.to_string().into())
 }
 
+fn preview_options(raw: Option<&RawValue>) -> Result<PixelPreviewOptions, PixelEditError> {
+    let value: Value =
+        serde_json::from_str(raw.map_or("{}", RawValue::get)).map_err(|error| error.to_string())?;
+    let mut options = PixelPreviewOptions::default();
+    if let Some(exact) = value.get("exact") {
+        options.exact = exact
+            .as_bool()
+            .ok_or_else(|| "Exact preview must be a boolean".to_owned())?;
+    }
+    if let Some(shot) = value.get("shotHitFrame") {
+        if !options.exact
+            || !shot
+                .as_f64()
+                .is_some_and(|n| n.fract() == 0.0 && (0.0..=1e9).contains(&n))
+        {
+            return Err(
+                "A preview shot hit sample needs exact mode and a nonnegative shot frame"
+                    .to_owned()
+                    .into(),
+            );
+        }
+    }
+    if let Some(limit) = value.get("limit") {
+        options.limit = limit
+            .as_f64()
+            .filter(|n| n.fract() == 0.0 && (0.0..=9_007_199_254_740_991.0).contains(n))
+            .ok_or_else(|| "Pixel preview limit must be a nonnegative integer".to_owned())?
+            as u64;
+    }
+    Ok(options)
+}
+
 fn execute(
     editor: &mut PixelCommandEditor,
     step: Step<'_>,
@@ -66,6 +98,11 @@ fn execute(
         "apply" => raw(editor.apply(step.patch.map_or("null", RawValue::get))?),
         "replay" => raw(editor.replay(step.receipt.map_or("null", RawValue::get))?),
         "copy" => encoded(editor.copy_selection(step.options.map_or("{}", RawValue::get))?),
+        "preview-edit" => encoded(editor.preview_edit(
+            step.patch.map_or("null", RawValue::get),
+            preview_options(step.options)?,
+        )?),
+        "preview-changes" => encoded(editor.preview_changes(preview_options(step.options)?)?),
         "preview-patch" => {
             #[derive(Serialize)]
             struct Preview<'a> {

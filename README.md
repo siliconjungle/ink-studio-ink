@@ -94,7 +94,9 @@ Use `createPixelCommandEditor(source, { historyLimit })` for revision-checked, i
 
 `begin(label)` opens a group. `preview()` returns its draft document. `commit()` makes the group one undo step, and `cancel()` restores the initial revision and receipts. A rejected apply cancels its open group. `undo()` and `redo()` restore the artwork, selection masks, revision and receipts together. The journal covers retained raster edits and named raster masks.
 
-Rust exposes the same journal through `PixelCommandEditor`. Its `journal-document` command accepts `{ document, historyLimit, steps }` and writes one JSON reply per step. Each step has an `op` such as `begin`, `apply`, `preview-patch`, `commit`, `undo`, or `replay`. Pass `label`, `patch`, or `receipt` on the corresponding step.
+`previewEdit(patch, { limit, exact })` compares one proposed local raster or selection edit with the current artwork. `previewChanges({ limit, exact })` compares the active draft with the artwork at `begin()`. The default limit includes the first 256 changed composite pixels in frame and row order, while `pixelCount` covers the entire change. Set `exact: true` to include all composited and raw layer changes and protection evidence. Both previews leave the draft and receipt history intact.
+
+Rust exposes the same journal through `PixelCommandEditor`, with `PixelPreviewOptions` for both diff methods. Its `journal-document` command accepts `{ document, historyLimit, steps }` and writes one JSON reply per step. Each step has an `op` such as `begin`, `apply`, `preview-patch`, `preview-edit`, `preview-changes`, `commit`, `undo`, or `replay`. Pass `label`, `patch`, or `receipt` on the corresponding step and `options` for either diff.
 
 `raster` and `select-document` are the native equivalents. Their JSON request contains `document` and optional `frame`, `layer` or `cel`. Add `query` for `select-document`.
 
@@ -113,7 +115,7 @@ cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- select-m
 
 ## Build and check
 
-Use [Ink Lang commit `dabc35b`](https://github.com/siliconjungle/ink-lang/commit/dabc35b000ad380f8d2c70d4c67d7afc5622d93a) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for immutable geometry and pixel document inputs. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
+Use [Ink Lang commit `282fb64`](https://github.com/siliconjungle/ink-lang/commit/282fb641b92a60d93218b185e11455e1b4a7cab0) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for immutable geometry and pixel document inputs. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
 
 ```sh
 ./scripts/build.sh --gpu

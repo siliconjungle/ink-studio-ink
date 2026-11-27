@@ -1,3 +1,4 @@
+use super::edit_preview::{CellChange, Color, Location, PixelEditPreview, Preview, Sample, Site};
 use super::{Json, Limits, OrderedJson, PixelEditor, Wire, compiled_json, member_mut, revision};
 use serde_json::{Map, Value, json};
 use std::{
@@ -40,6 +41,50 @@ pub struct EditHistory {
 pub struct StagedPixelEdit {
     pub document: String,
     pub receipt: Arc<Value>,
+}
+
+#[derive(Clone, Copy)]
+pub struct PixelPreviewOptions {
+    pub limit: u64,
+    pub exact: bool,
+}
+
+impl Default for PixelPreviewOptions {
+    fn default() -> Self {
+        Self {
+            limit: 256,
+            exact: false,
+        }
+    }
+}
+
+impl PixelPreviewOptions {
+    fn checked_limit(self) -> Result<u32, String> {
+        if self.limit > 9_007_199_254_740_991 {
+            return Err("Pixel preview limit must be a nonnegative integer".into());
+        }
+        Ok(self.limit.min(u64::from(u32::MAX)) as u32)
+    }
+}
+
+enum EditMode {
+    Apply,
+    Stage,
+    Preview(PixelPreviewOptions),
+}
+
+enum EditOutcome {
+    Staged(StagedPixelEdit),
+    Preview(PixelEditPreview),
+}
+
+impl EditOutcome {
+    fn staged(self) -> StagedPixelEdit {
+        match self {
+            Self::Staged(staged) => staged,
+            Self::Preview(_) => unreachable!(),
+        }
+    }
 }
 
 struct JournalView {
@@ -97,6 +142,16 @@ fn parse_json(source: &str) -> Result<Json, String> {
 
 fn json_value(value: &Json) -> Result<Value, String> {
     serde_json::from_str(&value.stringify(Limits::default())?).map_err(|error| error.to_string())
+}
+
+fn preview_rows<T: Wire>(rows: &[T]) -> Result<Vec<Value>, String> {
+    rows.iter()
+        .map(|row| json_value(&Json::from_ink(&row.to_json(), Limits::default())?))
+        .collect()
+}
+
+fn named(text: String) -> Option<String> {
+    (!text.is_empty()).then_some(text)
 }
 
 fn member<'a>(value: &'a Json, name: &str) -> Option<&'a Json> {
@@ -276,11 +331,134 @@ impl PixelCommandEditor {
     }
 
     pub fn apply(&mut self, patch: &str) -> Result<String, PixelEditError> {
-        Ok(self.edit(parse_json(patch)?, None, false)?.document)
+        Ok(self
+            .edit(parse_json(patch)?, None, EditMode::Apply)?
+            .staged()
+            .document)
     }
 
     pub fn preview_patch(&mut self, patch: &str) -> Result<StagedPixelEdit, PixelEditError> {
-        self.edit(parse_json(patch)?, None, true)
+        Ok(self
+            .edit(parse_json(patch)?, None, EditMode::Stage)?
+            .staged())
+    }
+
+    pub fn preview_edit(
+        &mut self,
+        patch: &str,
+        options: PixelPreviewOptions,
+    ) -> Result<PixelEditPreview, PixelEditError> {
+        options.checked_limit()?;
+        match self.edit(parse_json(patch)?, None, EditMode::Preview(options))? {
+            EditOutcome::Preview(report) => Ok(report),
+            EditOutcome::Staged(_) => unreachable!(),
+        }
+    }
+
+    pub fn preview_changes(
+        &mut self,
+        options: PixelPreviewOptions,
+    ) -> Result<PixelEditPreview, String> {
+        let mut id = self.view()?.receipt;
+        let report = self.read_preview(options, true)?;
+        let mut targets = Vec::new();
+        while id != report.receipt {
+            let row = self.receipts.get(&id).ok_or("Missing pixel edit receipt")?;
+            targets.push(row.receipt["affectedTargets"][0].clone());
+            id = row.parent;
+        }
+        targets.reverse();
+        Ok(report.report(targets, Vec::new(), options.exact))
+    }
+
+    fn read_preview(
+        &mut self,
+        options: PixelPreviewOptions,
+        grouped: bool,
+    ) -> Result<Preview, String> {
+        let limit = options.checked_limit()?;
+        let (changes, links, receipt) = if grouped {
+            let draft = self
+                .editor
+                .program
+                .invoke_view_l_pixel_draft_diff(limit, options.exact)?
+                .result?;
+            (draft.l_changes, draft.l_celLinks, draft.l_receipt)
+        } else {
+            let edit = self
+                .editor
+                .program
+                .invoke_view_l_pixel_preview_diff(limit, options.exact)?
+                .result?;
+            let links = self.editor.program.invoke_view_l_pixel_edit_links()?.result;
+            (edit, links, 0)
+        };
+        let mut report = Preview {
+            count: changes.l_pixelCount,
+            pixels: Vec::with_capacity(changes.l_pixels.len()),
+            cells: Vec::with_capacity(changes.l_exact.l_cells.len()),
+            protected_cells: changes
+                .l_exact
+                .l_protectedCells
+                .into_iter()
+                .map(|site| Site {
+                    frame: site.l_frame,
+                    at: site.l_at,
+                })
+                .collect(),
+            details: preview_rows(&changes.l_exact.l_details)?,
+            links: links.map(|links| links.to_json()),
+            receipt,
+        };
+        for (rows, output, exact) in [
+            (changes.l_pixels, &mut report.pixels, false),
+            (changes.l_exact.l_cells, &mut report.cells, true),
+        ] {
+            for row in rows {
+                let layer = named(row.l_layer);
+                let [before, after] = [row.l_before, row.l_after].map(|sample| {
+                    sample.map(|sample| {
+                        let location = sample.l_location;
+                        let cel = named(location.l_cel);
+                        let swatch = named(location.l_swatch);
+                        let color = swatch.as_ref().map(|_| Color(sample.l_rgb));
+                        if layer.is_some() {
+                            Sample::Raw {
+                                cel,
+                                swatch,
+                                color,
+                                alpha: sample.l_alpha.unwrap_or(0),
+                                knockout: sample.l_knockout,
+                                clip: sample.l_clip,
+                            }
+                        } else {
+                            let beneath = sample.l_underneath;
+                            Sample::Composite {
+                                layer: named(location.l_layer),
+                                cel,
+                                swatch,
+                                color,
+                                protected: sample.l_protected,
+                                alpha: sample.l_alpha,
+                                underneath: (!exact).then(|| Location {
+                                    layer: named(beneath.l_layer),
+                                    cel: named(beneath.l_cel),
+                                    swatch: named(beneath.l_swatch),
+                                }),
+                            }
+                        }
+                    })
+                });
+                output.push(CellChange {
+                    frame: row.l_site.l_frame,
+                    at: row.l_site.l_at,
+                    layer,
+                    before,
+                    after,
+                });
+            }
+        }
+        Ok(report)
     }
 
     pub fn replay(&mut self, receipt: &str) -> Result<String, PixelEditError> {
@@ -307,7 +485,10 @@ impl PixelCommandEditor {
             .and_then(|value| member_mut(value, "patch"))
             .map(|value| std::mem::replace(value, Json::Null))
             .unwrap_or(Json::Null);
-        Ok(self.edit(patch, Some(expected), false)?.document)
+        Ok(self
+            .edit(patch, Some(expected), EditMode::Apply)?
+            .staged()
+            .document)
     }
 
     fn run_raster_edit(
@@ -339,10 +520,15 @@ impl PixelCommandEditor {
         &mut self,
         patch: Json,
         expected: Option<Value>,
-        dry_run: bool,
-    ) -> Result<StagedPixelEdit, PixelEditError> {
+        mode: EditMode,
+    ) -> Result<EditOutcome, PixelEditError> {
+        let dry_run = !matches!(mode, EditMode::Apply);
         let view = self.view()?;
-        let raw_patch = json_value(&patch)?;
+        let raw_patch = if matches!(mode, EditMode::Preview(_)) {
+            Value::Null
+        } else {
+            json_value(&patch)?
+        };
         let mut options = Map::new();
         if let Some(shot) = expected
             .as_ref()
@@ -410,9 +596,28 @@ impl PixelCommandEditor {
                 .program
                 .invoke_view_l_observe_pixel_edit()
                 .map_err(invalid)?;
+            if matches!(mode, EditMode::Preview(_)) {
+                self.editor
+                    .program
+                    .invoke_view_l_observe_pixel_preview()
+                    .map_err(invalid)?;
+            }
             let mut target =
                 self.run_raster_edit(patch, &gate.l_kind, &gate.l_frame, gate.l_cel.as_deref())?;
             target["destination"] = json!(gate.l_destination);
+            if let EditMode::Preview(options) = mode {
+                let preview = if gate.l_kind == "selections" {
+                    Preview::default()
+                } else {
+                    self.read_preview(options, false).map_err(invalid)?
+                };
+                self.editor.program.rollback_transaction();
+                return Ok(EditOutcome::Preview(preview.report(
+                    vec![target],
+                    Vec::new(),
+                    options.exact,
+                )));
+            }
             let document = self.editor.snapshot().map_err(invalid)?;
             let after = revision(&document);
             let links = self
@@ -471,7 +676,7 @@ impl PixelCommandEditor {
                     },
                 );
             }
-            Ok(StagedPixelEdit { document, receipt })
+            Ok(EditOutcome::Staged(StagedPixelEdit { document, receipt }))
         })();
         match outcome {
             Ok(staged) => {
@@ -486,6 +691,13 @@ impl PixelCommandEditor {
                 }
                 if view.pending && !dry_run {
                     self.cancel()?;
+                }
+                if let EditMode::Preview(options) = mode {
+                    return Ok(EditOutcome::Preview(Preview::default().report(
+                        Vec::new(),
+                        vec![issue],
+                        options.exact,
+                    )));
                 }
                 let message = issue["message"]
                     .as_str()
@@ -503,10 +715,10 @@ impl PixelCommandEditor {
                 receipt["conflicts"] = json!([issue]);
                 receipt["outputs"] = Value::Null;
                 if dry_run {
-                    Ok(StagedPixelEdit {
+                    Ok(EditOutcome::Staged(StagedPixelEdit {
                         document: self.editor.snapshot()?,
                         receipt: Arc::new(receipt),
-                    })
+                    }))
                 } else {
                     Err(PixelEditError {
                         message,

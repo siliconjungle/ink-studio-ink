@@ -1,5 +1,6 @@
+pub mod edit_preview;
 mod journal;
-pub use journal::{EditHistory, PixelCommandEditor, PixelEditError, StagedPixelEdit};
+pub use journal::{EditHistory, PixelCommandEditor, PixelEditError, PixelPreviewOptions, StagedPixelEdit};
 
 use compiled_state::{State, ValueWireLimits, Wire};
 use indexmap::IndexMap;
