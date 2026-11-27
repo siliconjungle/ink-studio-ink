@@ -2,6 +2,7 @@ module StudioPixelTimelineEdit;
 
 import "std:json" as json;
 import "pixel_brush.ink" as brush;
+import "pixel_canvas_registration.ink" as registration;
 import "pixel_commands.ink" as commands;
 import "pixel_fault.ink" as fault;
 import "pixel_frame.ink" as frame;
@@ -9,6 +10,8 @@ import "pixel_history.ink" as history;
 import "pixel_brush_capture.ink" as labels;
 import "pixel_paint.ink" as paint;
 import "pixel_selection.ink" as selection;
+import "pixel_slices.ink" as slices;
+import "pixel_tilemap.ink" as tilemap;
 import "pixel_timeline.ink" as timeline;
 import "pixel_values.ink" as value;
 
@@ -31,6 +34,9 @@ fn operation_keys(tool: String) -> List<String> {
     if tool == "add-frame" { return ["type", "frame", "durationMs", "label", "before"]; }
     if tool == "duration" { return ["type", "frame", "durationMs"]; }
     if tool == "set-tag" || tool == "remove-tag" { return ["type", "tag"]; }
+    if tool == "set-directional" { return ["type", "directional"]; }
+    if tool == "set-tilemap" { return ["type", "tilemap"]; }
+    if tool == "place-tiles" { return ["type", "points", "tile"]; }
     if tool == "layer-offset" { return ["type", "layer", "offset"]; }
     if tool == "cel-offset" { return ["type", "frame", "layer", "offset"]; }
     if tool == "blank" || tool == "unlink" { return ["type", "frame", "layer"]; }
@@ -39,7 +45,11 @@ fn operation_keys(tool: String) -> List<String> {
 }
 
 fn target(tool: String, details: List<json.Member>) -> json.Json {
-    return json.object([member("destination", json.text("timeline")), member("kind", json.text("timeline")),
+    return asset_target("timeline", tool, details);
+}
+
+fn asset_target(kind: String, tool: String, details: List<json.Member>) -> json.Json {
+    return json.object([member("destination", json.text("timeline")), member("kind", json.text(kind)),
         member("tool", json.text(tool))].concat(details));
 }
 
@@ -81,7 +91,11 @@ fn retime(source: json.Json, art: frame.Artwork, frames: List<json.Json>, op: Li
     let after = replace_at(frames, i, replace(row, "durationMs", next));
     let measured = timing(after)?;
     let revised = replace(source, "frames", json.array(after));
-    let tags = timeline.describe_tags(value.fields(revised), art.frames, durations(after), true).map_err(fn(issue) => invalid(issue))?;
+    let times = durations(after);
+    let doc = value.fields(revised);
+    let tags = timeline.describe_tags(doc, art.frames, times, true).map_err(fn(issue) => invalid(issue))?;
+    let map = value.fields(value.get(doc, "tilemap"));
+    let schedules = tilemap.check_schedules(value.fields(value.get(map, "variants")), art.frames, times).map_err(fn(issue) => invalid(issue))?;
     return Ok(Edit { source: revised, artwork: art, changes_art: false,
         target: target("duration", [member("frame", value.get(op, "frame")),
             member("before", value.get(value.fields(row), "durationMs")), member("after", next)]) });
@@ -321,14 +335,210 @@ fn check_protection(source: json.Json, art: frame.Artwork, next: frame.Artwork) 
             .map_err(fn(issue) => protected_problem(issue)));
 }
 
+fn metadata(source: json.Json, art: frame.Artwork, kind: String, tool: String, details: List<json.Member>) -> Edit {
+    return Edit { source: source, artwork: art, target: asset_target(kind, tool, details), changes_art: false };
+}
+
+fn configure_asset(source: json.Json, art: frame.Artwork, key: String, tool: String, op: List<json.Member>) ->
+    Result<Edit, json.Json> {
+    let directional = key == "directional";
+    let message = if directional { "Set a directional view set or pass null to remove it" }
+        else { "Set a tilemap or pass null to remove it" };
+    if !value.has(op, key) { return Err(invalid(message)); }
+    let raw = value.get(op, key);
+    let doc = value.fields(source);
+    let frames = value.items(value.get(doc, "frames"));
+    let validated: Result<Unit, String> = if raw == json.null() { Ok(()) } else {
+        if directional { registration.validate(raw, art.frames, art.ids) }
+        else { tilemap.validate(raw, art.frames, art.grid, durations(frames)) }
+    };
+    let checked = validated.map_err(fn(issue) => invalid(issue))?;
+    let rest = doc.filter(fn(row) => row.key != key);
+    let output = if raw == json.null() { rest } else { rest.concat([member(key, raw)]) };
+    return Ok(metadata(json.object(output), art, if directional { "timeline" } else { "tilemap" }, tool,
+        [member("before", value.get(doc, key)), member("after", raw)]));
+}
+
+fn tile_stroke(art: frame.Artwork, tool: String, op: List<json.Member>, source: json.Json) -> Result<Edit, json.Json> {
+    let doc = value.fields(source);
+    if !value.has(doc, "tilemap") { return Err(invalid("Create a tilemap before placing tiles")); }
+    let raw = value.get(doc, "tilemap");
+    let grid = tilemap.prepare(raw, art.frames, art.grid).map_err(fn(issue) => invalid(issue))?;
+    if !value.has(op, "tile") { return Err(invalid("Place a known tile frame ID or use null to erase")); }
+    let stroke = tilemap.place(raw, grid, art.frames, value.get(op, "points"), value.get(op, "tile"))
+        .map_err(fn(issue) => invalid(issue))?;
+    return Ok(metadata(replace(source, "tilemap", stroke.tilemap), art, "tilemap", tool, stroke_details(stroke)));
+}
+
+fn stroke_details(stroke: tilemap.Stroke) -> List<json.Member> {
+    return [member("cellCount", json.number(frame.decimal(length(stroke.changes)))), member("changes", json.array(stroke.changes))];
+}
+
+fn edit_slice(source: json.Json, art: frame.Artwork, tool: String, op: List<json.Member>) -> Result<Edit, json.Json> {
+    let prior = value.items(value.get(value.fields(source), "slices"));
+    let edit = slices.apply(prior, tool, op, art.frames, art.grid).map_err(fn(issue) => invalid(issue))?;
+    return Ok(metadata(replace(source, "slices", json.array(edit.rows)), art, "slice", tool, edit.fields));
+}
+
+fn copy_cel(art: frame.Artwork, to: String, cel: frame.Cel) -> frame.Cel {
+    let root = frame.resolved_cel(art.cels, cel);
+    let id = available_id(art, frame.Scope { frame: to, layer: cel.layer });
+    let fields = paint.replace(independent(cel, root), "id", json.text(id));
+    return restore_drawing(frame.Cel { ..cel, id: id, fields: fields, frame: to }, root);
+}
+
+record Copies { names: List<String>, rows: Buffer<json.Json>, }
+
+fn frame_scoped(raw: json.Json, name: String) -> Bool {
+    return value.get(value.fields(raw), "frame") == json.text(name);
+}
+
+fn variant_name(used: List<String>, id: String) -> String {
+    let n = string_byte_len(id);
+    let short = if n <= 48 { id } else { string_slice(id, 0, 48).fold(fn(slice) => slice, fn(unit) => id) };
+    let stem = string_concat(short, "-variant");
+    if !commands.includes(used, stem) { return stem; }
+    return repeat_until(length(used) + 1, "", fn(name) => name != "", fn(i) => fn(name) =>
+        unique_variant(used, string_concat(stem, string_concat("-", frame.decimal(i + 2)))));
+}
+
+fn unique_variant(used: List<String>, name: String) -> String {
+    return if commands.includes(used, name) { "" } else { name };
+}
+
+fn clone_row(raw: json.Json, to: String, out: Copies) -> Copies {
+    let source = value.fields(raw).filter(fn(row) => row.key != "frames");
+    let id = variant_name(out.names, value.text(value.get(source, "id")));
+    let next = json.object(paint.replace(paint.replace(source, "id", json.text(id)), "frame", json.text(to)));
+    return Copies { names: out.names.concat([id]), rows: out.rows.push(next) };
+}
+
+fn clone_rows(all: List<json.Json>, chosen: List<json.Json>, to: String) -> List<json.Json> {
+    var copies: Copies = Copies { names: all.map(fn(row) => slices.id(row)), rows: buffer(all) };
+    for raw in chosen {
+        copies = clone_row(raw, to, copies);
+    }
+    return copies.rows.freeze();
+}
+
+fn clone_frame_rows(source: json.Json, key: String, from: String, to: String) -> json.Json {
+    let rows = value.items(value.get(value.fields(source), key));
+    let chosen = rows.filter(fn(row) => frame_scoped(row, from));
+    if length(chosen) == 0 { return source; }
+    return replace(source, key, json.array(clone_rows(rows, chosen, to)));
+}
+
+fn clone_protection(source: json.Json, frames: List<String>, from: String, to: String) -> json.Json {
+    let index = selection.named_slot(frames, from);
+    let raw = value.items(value.get(value.fields(source), "protectedDetails"));
+    let chosen = raw.filter(fn(row) => contains_protection(frames, value.fields(row), index));
+    if length(chosen) == 0 { return source; }
+    return replace(source, "protectedDetails", json.array(clone_rows(raw, chosen, to)));
+}
+
+fn contains_protection(frames: List<String>, row: List<json.Member>, index: u32) -> Bool {
+    if !value.has(row, "frame") && !value.has(row, "frames") { return false; }
+    let range = paint.detail_scope(row, frames);
+    return index >= range.x && index <= range.y;
+}
+
+fn variant_frame(art: frame.Artwork, authored: json.Json, from: String, to: String, cels: List<frame.Cel>) -> json.Json {
+    let frames = value.items(value.get(value.fields(authored), "frames"));
+    let old = frames.at_or(selection.named_slot(art.frames, from), json.null());
+    let row = paint.replace(value.fields(old), "id", json.text(to));
+    let label = value.text(value.get(row, "label"));
+    let drawing = json.object(cels.map(fn(cel) => member(cel.layer, json.object(cel.fields))));
+    let next = paint.replace(row, "cels", drawing);
+    return json.object(if label == "" { next } else { paint.replace(next, "label", json.text(string_concat(label, " (variant)"))) });
+}
+
+fn append_variant(source: json.Json, art: frame.Artwork, from: String, to: String, report: json.Json) -> Edit {
+    let authored = paint.authored_cels(source, art.cels.filter(fn(cel) => length(cel.runs) != 0));
+    let frames = value.items(value.get(value.fields(authored), "frames"));
+    let copied = art.cels.filter(fn(cel) => cel.frame == from).map(fn(cel) => copy_cel(art, to, cel));
+    let variant = variant_frame(art, authored, from, to, copied);
+    let revised = replace(authored, "frames", json.array(frames.concat([variant])));
+    let records = clone_frame_rows(clone_frame_rows(revised, "guides", from, to), "selections", from, to);
+    let next = clone_protection(records, art.frames, from, to);
+    let locations = art.locations.concat(copied.map(fn(row) => frame.Location { id: row.id, frame: to, layer: row.layer }));
+    let artwork = frame.Artwork { ..art, frames: art.frames.concat([to]), cels: art.cels.concat(copied), locations: locations };
+    return Edit { source: next, artwork: artwork, target: report, changes_art: true };
+}
+
+fn share_tile(source: json.Json, art: frame.Artwork, tool: String, op: List<json.Member>) -> Result<Edit, json.Json> {
+    let to = value.get(op, "tile");
+    if !value.only(op, ["type", "at", "tile"]) || !brush.stable_id(value.text(to)) {
+        return Err(invalid("Tile sharing needs a cell coordinate and a tile frame ID"));
+    }
+    let doc = value.fields(source);
+    if !value.has(doc, "tilemap") { return Err(invalid("Create a tilemap in a version 2 pixel document")); }
+    let raw = value.get(doc, "tilemap");
+    let grid = tilemap.prepare(raw, art.frames, art.grid).map_err(fn(issue) => invalid(issue))?;
+    let at = value.get(op, "at");
+    let from = tilemap.pick(grid, at).map_err(fn(issue) => invalid(issue))?;
+    return share_from(source, art, tool, from, to, raw, grid, at);
+}
+
+fn share_from(source: json.Json, art: frame.Artwork, tool: String, from: String, tile: json.Json,
+    raw: json.Json, grid: tilemap.Grid, at: json.Json) -> Result<Edit, json.Json> {
+    let to = value.text(tile);
+    let variant = tool == "make-local-variant";
+    let checked = if variant { can_fork(art.frames, to) }
+        else { can_reuse(source, art, grid.variants, from, to) };
+    let allowed = checked?;
+    let ids = if variant { art.frames.concat([to]) } else { art.frames };
+    let stroke = tilemap.place(raw, grid, ids, json.array([at]), tile).map_err(fn(issue) => invalid(issue))?;
+    let revised = replace(source, "tilemap", stroke.tilemap);
+    let details = [member("sourceTile", json.text(from)), member("tile", tile)].concat(stroke_details(stroke));
+    let report = asset_target("tilemap", tool, details);
+    return Ok(if variant { append_variant(revised, art, from, to, report) }
+        else { Edit { source: revised, artwork: art, target: report, changes_art: false } });
+}
+
+fn can_fork(frames: List<String>, id: String) -> Result<Unit, json.Json> {
+    if frame.known_frame(frames, id) { return Err(invalid("A local variant needs an unused tile frame ID")); }
+    return Ok(());
+}
+
+fn can_reuse(source: json.Json, art: frame.Artwork, variants: List<json.Member>, from: String, to: String) -> Result<Unit, json.Json> {
+    if from == to || !frame.known_frame(art.frames, to) { return Err(invalid("Reuse a different existing tile frame")); }
+    if !tilemap.same_behavior(variants, from, to) { return Err(invalid("Reuse needs matching tile animation and neighbor rules")); }
+    let same = tilemap.same_art(source, art, from, to).map_err(fn(issue) => invalid(issue))?;
+    if !same { return Err(invalid("The selected tile artwork and protection must match exactly")); }
+    return Ok(());
+}
+
+fn variant_positions(source: json.Json, from: String, positions: List<List<u32>>) -> List<List<u32>> {
+    let rows = value.items(value.get(value.fields(source), "selections"));
+    let origins = rows.map_indexed(fn(i) => fn(row) => if frame_scoped(row, from) { i } else { 4294967295 })
+        .filter(fn(i) => i != 4294967295);
+    if length(origins) == 0 { return positions; }
+    return rows.map_indexed(fn(i) => fn(row) => positions.at_or(i, []))
+        .concat(origins.map(fn(i) => positions.at_or(i, [])));
+}
+
 fn apply(source: json.Json, art: frame.Artwork, operation: json.Json) -> Result<Edit, json.Json> {
     let message = "Choose add-frame, duration, set-tag, remove-tag, set-directional, set-tilemap, place-tiles, make-local-variant, reuse-exact-tile, layer-offset, cel-offset, blank, duplicate, hold, unlink, move, copy, edit-cels, or write-cels";
     let op = json.members(operation).map_err(fn(issue) => invalid(message))?;
     let tool = value.text(value.get(op, "type"));
+    if commands.includes(["set-slice-key", "remove-slice-key", "remove-slice"], tool) { return edit_slice(source, art, tool, op); }
+    if tool == "make-local-variant" || tool == "reuse-exact-tile" { return share_tile(source, art, tool, op); }
+    return apply_standard(source, art, tool, op, message);
+}
+
+fn apply_standard(source: json.Json, art: frame.Artwork, tool: String, op: List<json.Member>, message: String) ->
+    Result<Edit, json.Json> {
     let keys = operation_keys(tool);
     let replace_ok = json.lookup(op, "replace").fold(fn(raw) =>
         json.as_boolean(raw).fold(fn(b) => true, fn(issue) => false), fn(unit) => true);
     if length(keys) == 0 || !value.only(op, keys) || !replace_ok { return Err(invalid(message)); }
+    if tool == "set-directional" { return configure_asset(source, art, "directional", tool, op); }
+    if tool == "set-tilemap" { return configure_asset(source, art, "tilemap", tool, op); }
+    if tool == "place-tiles" { return tile_stroke(art, tool, op, source); }
+    return apply_cells(source, art, tool, op);
+}
+
+fn apply_cells(source: json.Json, art: frame.Artwork, tool: String, op: List<json.Member>) -> Result<Edit, json.Json> {
     let frames = value.items(value.get(value.fields(source), "frames"));
     if tool == "duration" { return retime(source, art, frames, op); }
     if tool == "add-frame" { return add_frame(source, art, frames, op); }

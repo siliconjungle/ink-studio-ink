@@ -101,6 +101,23 @@ impl PixelFileEditor {
         self.editor.timeline()
     }
 
+    pub fn slices(&mut self, frame: Option<&str>) -> Result<String, PixelEditError> {
+        self.require_slice_document()?;
+        self.editor.slices(frame)
+    }
+
+    pub fn slice_png(&mut self, name: &str, frame: Option<&str>) -> Result<(String, Vec<u8>), PixelEditError> {
+        self.require_slice_document()?;
+        self.editor.slice_png(name, frame)
+    }
+
+    fn require_slice_document(&self) -> Result<(), PixelEditError> {
+        if self.legacy.is_some() {
+            return Err("Upgrade to a version 2 document to use pixel slices".to_owned().into());
+        }
+        Ok(())
+    }
+
     pub fn edit(
         &mut self,
         patch: &str,

@@ -7,6 +7,8 @@ import { packRun, unpackRun } from './pixel-run-words.mjs';
 
 const codec = new JsonCodec(compiledValues.open_pixel_document.params[0]);
 const utf8 = new TextEncoder();
+// Typed JSON adds several schema levels for each level of authored data.
+const documentInputLimits = { depth: 512, nodes: 8000000 };
 
 async function revisionText(json) {
   const bytes = await crypto.subtle.digest('SHA-256', utf8.encode(json));
@@ -110,8 +112,7 @@ function restorePixelSession(source, storage) {
 
 function createPixelEditorCore(source, fromText = false) {
   const state = createState();
-  // JSON's typed representation has multiple schema levels per authored level.
-  const load = state.bind('load_pixel_editor', { resultOnly: true, inputLimits: { depth: 512, nodes: 8000000 } });
+  const load = state.bind('load_pixel_editor', { resultOnly: true, inputLimits: documentInputLimits });
   const pick = state.bind('select_pixel_editor', { resultOnly: true });
   const draw = state.bind('paint_pixel_editor', { resultOnly: true });
   const read = state.bind('snapshot_pixel_editor', { resultOnly: true });
@@ -226,7 +227,7 @@ function createPixelEditorCore(source, fromText = false) {
   }
   if (fromText) installDocument(source, true);
   else replaceDocument(source);
-  return { state, restoreSnapshot, setGrid: restored => { grid = restored; }, editor: Object.freeze({ replaceDocument, select, saveSelection, paint, captureBrush,
+  return { state, restoreSnapshot, documentInputLimits, setGrid: restored => { grid = restored; }, editor: Object.freeze({ replaceDocument, select, saveSelection, paint, captureBrush,
     copySelection, snapshot: () => restoreSnapshot(read()), palette: () => codec.toJS(readPalette()),
     extractPalette: (options = {}) => codec.toJS(unwrap(extractPalette(codec.fromJS(options)))) }) };
 }

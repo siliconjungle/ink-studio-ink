@@ -183,8 +183,8 @@ function previewReport(codec, changes, targets, conflicts, links, exact) {
   return report;
 }
 
-export async function openPixelJournal({ editor, state, codec, revision, revisionText, restoreSnapshot, setGrid }, input, historyLimit, checkpoint, storage) {
-  const bind = name => state.bind(name, { resultOnly: true });
+export async function openPixelJournal({ editor, state, codec, revision, revisionText, restoreSnapshot, setGrid, documentInputLimits }, input, historyLimit, checkpoint, storage) {
+  const bind = (name, inputLimits) => state.bind(name, { resultOnly: true, inputLimits });
   const read = bind('pixel_journal'), begin = bind('begin_pixel_edit');
   const commit = bind('commit_pixel_edit'), cancel = bind('cancel_pixel_edit');
   const travel = bind('travel_pixel_history'), check = bind('resolve_pixel_edit');
@@ -192,11 +192,13 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
   const guarded = bind('replace_guarded_pixels');
   const paletteEdit = bind('edit_pixel_editor_palette');
   const guideEdit = bind('edit_pixel_editor_guides');
-  const timelineEdit = bind('edit_pixel_editor_timeline');
+  const timelineEdit = bind('edit_pixel_editor_timeline', documentInputLimits);
   const canvasEdit = bind('edit_pixel_editor_canvas');
   const plan = bind('plan_pixel_command'), describe = bind('describe_pixel_command_document');
   const inspect = bind('inspect_pixel_command');
   const sample = bind('sample_pixel_editor'), snap = bind('snap_pixel_editor'), timeline = bind('timeline_pixel_editor');
+  const slices = bind('slices_pixel_editor'), exportSlice = bind('export_pixel_slice');
+  const sliceFrame = frame => frame === undefined ? { None: null } : { Some: String(frame) };
   const stamp = bind('export_pixel_command_stamp'), deck = bind('export_pixel_command_layer_deck');
   const png = bind('export_pixel_command_png');
   const observe = bind('observe_pixel_edit'), links = bind('pixel_edit_links');
@@ -404,7 +406,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
     for (let id = cursor.receipt; id !== result.receipt;) {
       const row = receipts.get(id);
       const target = row.receipt.affectedTargets[0];
-      if (target.kind !== 'guides' && (target.kind !== 'raster' || target.tool)) targets.push(target);
+      if (!['guides', 'slice', 'tilemap'].includes(target.kind) && (target.kind !== 'raster' || target.tool)) targets.push(target);
       id = row.parent;
     }
     return previewReport(codec, result.changes, structuredClone(targets.reverse()), [], result.celLinks.Some, exact);
@@ -732,6 +734,18 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
       return enqueue(() => codec.toJS(unwrap(snap(codec.fromJS(point), codec.fromJS(settings)))));
     },
     timeline: () => enqueue(() => codec.toJS(unwrap(timeline()))),
+    slices({ frame } = {}) {
+      return enqueue(() => codec.toJS(unwrap(slices(sliceFrame(frame)))));
+    },
+    slice(id, { frame } = {}) {
+      return enqueue(() => {
+        const { report, width, height, pixels } = unwrap(exportSlice(String(id), sliceFrame(frame)));
+        const rgba = new Uint8Array(width * height * 4);
+        const body = new DataView(rgba.buffer);
+        for (let i = 0; i < pixels.length; i++) body.setUint32(i * 4, pixels[i]);
+        return { ...codec.toJS(report), raster: { w: width, h: height, rgba } };
+      });
+    },
     begin: (label = '') => enqueue(() => unwrap(begin(label)), true),
     preview: () => enqueue(() => {
       if (!read().pending) throw new Error('No active transaction');

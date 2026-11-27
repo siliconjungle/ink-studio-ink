@@ -191,7 +191,7 @@ pub(super) fn png(editor: &mut PixelEditor, options: Json) -> Result<Vec<u8>, St
             colors: &image.l_colors,
             coverage: &image.l_coverage,
         },
-        &ink,
+        Some(&ink),
     )
 }
 

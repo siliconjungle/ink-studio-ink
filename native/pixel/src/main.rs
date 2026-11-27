@@ -5,6 +5,7 @@ mod journal_cli;
 mod palette_cli;
 mod session_cli;
 mod session_commands;
+mod slice_cli;
 
 use ink_studio_pixel::{
     IndexedSelectionRaster, OpenedDocument, PixelEditor, PixelFileEditor, mask_pixels, open_pixel_document,
@@ -155,6 +156,7 @@ fn run() -> Result<(), String> {
     }
     if path == "session" { return session_cli::run(args); }
     if path == "palette" { return palette_cli::run(args); }
+    if path == "slices" { return slice_cli::run(args); }
     if let Some(request) = args.next() {
         if args.next().is_some() {
             return Err(usage.into());

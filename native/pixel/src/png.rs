@@ -68,10 +68,17 @@ fn chunk(out: &mut Vec<u8>, tag: &[u8; 4], bytes: &[u8]) {
     out.extend_from_slice(&crc32fast::hash(&out[start..]).to_be_bytes());
 }
 
-pub(super) fn encode(raster: Raster<'_>, metadata: &[u8]) -> Result<Vec<u8>, String> {
-    let (data, ink) = compress_chunks(&filtered_rows(&raster), metadata)?;
+pub(super) fn encode(raster: Raster<'_>, metadata: Option<&[u8]>) -> Result<Vec<u8>, String> {
+    let rows = filtered_rows(&raster);
+    let (data, ink) = match metadata {
+        Some(metadata) => {
+            let (data, ink) = compress_chunks(&rows, metadata)?;
+            (data, Some(ink))
+        }
+        None => (deflate(&rows)?, None),
+    };
     let mut out = Vec::with_capacity(
-        data.len() + ink.len() + raster.colors.len() * 3 + raster.coverage.len() + 93,
+        data.len() + ink.as_ref().map_or(0, Vec::len) + raster.colors.len() * 3 + raster.coverage.len() + 93,
     );
     out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
     let mut header = [0; 13];
@@ -95,7 +102,9 @@ pub(super) fn encode(raster: Raster<'_>, metadata: &[u8]) -> Result<Vec<u8>, Str
             chunk(&mut out, b"tRNS", &alpha);
         }
     }
-    chunk(&mut out, b"inKD", &ink);
+    if let Some(ink) = ink {
+        chunk(&mut out, b"inKD", &ink);
+    }
     chunk(&mut out, b"IDAT", &data);
     chunk(&mut out, b"IEND", &[]);
     Ok(out)

@@ -427,6 +427,12 @@ fn close_group(art: Artwork, scope: Scope, ordinal: u32, layer: Layer, scene: Sc
     return apply_layer(art, scope, ordinal, layer, layer.opacity, source, group_protected, old);
 }
 
+fn cel_raster(art: Artwork, source: Cel, work: paint.Work) -> paint.Raw {
+    let slots: List<i32> = if source.plane == 0 { [] } else { art.planes.at_or(source.plane - 1, []) };
+    let runs: List<List<u32>> = if source.run_plane == 0 { [] } else { art.run_planes.at_or(source.run_plane - 1, []) };
+    return paint.raster(art.grid, art.ids, source.fields, slots, runs, source.prepared, source.runs, work);
+}
+
 fn step(art: Artwork, scope: Scope, scene: Scene) -> Scene {
     let job = scene.todo.at_or(scene.todo.len() - 1, Job { ordinal: 0, closing: false });
     let old = Scene { ..scene, todo: scene.todo.pop() };
@@ -436,9 +442,7 @@ fn step(art: Artwork, scope: Scope, scene: Scene) -> Scene {
     let active = active_cel(art.cels, scope.frame, layer.id);
     let place = placement(art.inputs.at_or(job.ordinal, json.null()), active);
     let source = resolved_cel(art.cels, active);
-    let slots: List<i32> = if source.plane == 0 { [] } else { art.planes.at_or(source.plane - 1, []) };
-    let runs: List<List<u32>> = if source.run_plane == 0 { [] } else { art.run_planes.at_or(source.run_plane - 1, []) };
-    let raster = paint.raster(art.grid, art.ids, source.fields, slots, runs, source.prepared, source.runs, old.work);
+    let raster = cel_raster(art, source, old.work);
     let raw = if old.spec.sample_only { translated_sample(art.grid, raster, place, old.spec.inspect) }
         else { translated(art.grid, raster, place) };
     if raw.issue != "" { return Scene { ..old, issue: raw.issue }; }

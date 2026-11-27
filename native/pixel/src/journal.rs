@@ -562,7 +562,8 @@ impl PixelCommandEditor {
         while id != report.receipt {
             let row = self.receipts.get(&id).ok_or("Missing pixel edit receipt")?;
             let target = &row.receipt["affectedTargets"][0];
-            if target["kind"] != "guides" && (target["kind"] != "raster" || target.get("tool").is_some()) {
+            if !matches!(target["kind"].as_str(), Some("guides" | "slice" | "tilemap"))
+                && (target["kind"] != "raster" || target.get("tool").is_some()) {
                 targets.push(target.clone());
             }
             id = row.parent;
@@ -818,6 +819,23 @@ impl PixelCommandEditor {
         let report = self.editor.program.invoke_view_l_timeline_pixel_editor()?.result?;
         let limits = Limits::default();
         Ok(Json::from_ink(&report.to_json(), limits)?.stringify(limits)?)
+    }
+
+    pub fn slices(&mut self, frame: Option<&str>) -> Result<String, PixelEditError> {
+        let report = self.editor.program.invoke_view_l_slices_pixel_editor(frame.map(str::to_owned))?.result?;
+        let limits = Limits::default();
+        Ok(Json::from_ink(&report.to_json(), limits)?.stringify(limits)?)
+    }
+
+    pub fn slice_png(&mut self, name: &str, frame: Option<&str>) -> Result<(String, Vec<u8>), PixelEditError> {
+        let image = self.editor.program.invoke_view_l_export_pixel_slice(name.to_owned(), frame.map(str::to_owned))?.result?;
+        let limits = Limits::default();
+        let report = Json::from_ink(&image.l_report.to_json(), limits)?.stringify(limits)?;
+        let bytes = super::png::encode(super::png::Raster {
+            width: image.l_width, height: image.l_height, channels: 4,
+            pixels: &image.l_pixels, colors: &[], coverage: &[],
+        }, None)?;
+        Ok((report, bytes))
     }
 
     fn pixel_location_report(

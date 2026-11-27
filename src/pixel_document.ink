@@ -27,6 +27,10 @@ import "pixel_guides.ink" as guides;
 import "pixel_sample.ink" as sample;
 import "pixel_timeline.ink" as timeline;
 import "pixel_timeline_edit.ink" as timeline_edit;
+import "pixel_canvas_registration.ink" as registration;
+import "pixel_slices.ink" as slices;
+import "pixel_tilemap.ink" as tilemap;
+import "pixel_values.ink" as pixel_values;
 
 record Layer { id: String, kind: String, parent: String, }
 record Cel { id: String, hold: String, }
@@ -424,7 +428,24 @@ fn validate_frames(items: List<json.Member>, known: List<Layer>) -> Result<Unit,
     let frames = pair(field(items, "frames"));
     if length(frames) == 0 { return Err("Pixel documents need at least one frame"); }
     let validated = validate_timeline(frames, known)?;
-    return guides.validate(items, frames.map(fn(row) => frame_raster.frame_name(row)));
+    let ids = frames.map(fn(row) => frame_raster.frame_name(row));
+    let placed = guides.validate(items, ids)?;
+    return validate_timeline_assets(items, frames, ids);
+}
+
+fn validate_timeline_assets(items: List<json.Member>, frames: List<json.Json>, ids: List<String>) -> Result<Unit, String> {
+    let grid = mask.Grid { width: pixel_values.word(field(items, "width"), 512), height: pixel_values.word(field(items, "height"), 512) };
+    let swatches = json.members(field(items, "palette")).fold(fn(rows) => rows.map(fn(row) => row.key), fn(issue) => []);
+    let registered: Result<Unit, String> = if has(items, "directional") { registration.validate(field(items, "directional"), ids, swatches) }
+        else { Ok(()) };
+    let checked = registered?;
+    let mapped: Result<Unit, String> = if has(items, "tilemap") { tilemap.validate(field(items, "tilemap"), ids, grid, timeline_edit.durations(frames)) }
+        else { Ok(()) };
+    let cells = mapped?;
+    let sliced: Result<List<json.Json>, String> = if has(items, "slices") { slices.validate(field(items, "slices"), ids, grid) }
+        else { Ok([]) };
+    let regions = sliced?;
+    return Ok(());
 }
 
 pub fn open_pixel_document(document: json.Json) -> Result<Opened, String> {
@@ -682,17 +703,33 @@ change edit_pixel_editor_guides(operation: json.Json) -> Result<json.Json, json.
 }
 
 change edit_pixel_editor_timeline(operation: json.Json) -> Result<json.Json, json.Json>
-    reads(EditorSource, EditorArtwork) writes(EditorSource, EditorArtwork, EditorImage, EditorPaint) {
+    reads(EditorSource, EditorArtwork, EditorPositions)
+    writes(EditorSource, EditorArtwork, EditorPositions, EditorNamed, EditorImage, EditorPaint) {
     let edited = timeline_edit.apply(EditorSource, EditorArtwork, operation)?;
     if edited.changes_art {
         let checked = open_pixel_document(edited.source).map_err(fn(issue) => timeline_issue(edited.artwork, issue))?;
         let protected = timeline_edit.check_protection(EditorSource, EditorArtwork, edited.artwork)?;
+        let target = json.members(edited.target).fold(fn(rows) => rows, fn(issue) => []);
+        if text(field(target, "tool")) == "make-local-variant" {
+            let positions = timeline_edit.variant_positions(EditorSource, text(field(target, "sourceTile")), EditorPositions);
+            let named = prepare_variant_selections(edited.source, edited.artwork, positions)
+                .map_err(fn(issue) => timeline_edit.invalid(issue))?;
+            EditorNamed = named;
+            EditorPositions = positions;
+        }
         EditorArtwork = edited.artwork;
         EditorImage = None;
         EditorPaint = paint.empty_cache();
     }
     EditorSource = edited.source;
     return Ok(edited.target);
+}
+
+fn prepare_variant_selections(source: json.Json, art: frame_raster.Artwork, positions: List<List<u32>>) ->
+    Result<selection.Named, String> {
+    let doc = json.members(source).fold(fn(rows) => rows, fn(issue) => []);
+    return json.lookup(doc, "selections").fold(fn(rows) => read_named(rows, art.grid, art.frames, positions),
+        fn(unit) => Ok(selection.no_named()));
 }
 
 fn timeline_issue(art: frame_raster.Artwork, issue: String) -> json.Json {
@@ -1020,6 +1057,15 @@ query snap_pixel_editor(at: json.Json, options: json.Json) -> Result<json.Json, 
 
 query timeline_pixel_editor() -> Result<json.Json, String> reads(EditorSource, EditorArtwork, JournalCursor) {
     return timeline.describe(EditorSource, EditorArtwork, JournalCursor.revision);
+}
+
+query slices_pixel_editor(frame: Option<String>) -> Result<json.Json, String> reads(EditorSource, EditorArtwork, JournalCursor) {
+    return slices.describe(EditorSource, EditorArtwork, JournalCursor.revision, frame);
+}
+
+query export_pixel_slice(name: String, frame: Option<String>) -> Result<slices.Image, String>
+    reads(EditorSource, EditorArtwork, JournalCursor) {
+    return slices.picture(EditorSource, EditorArtwork, JournalCursor.revision, name, frame);
 }
 
 query export_pixel_command_stamp(options: json.Json) -> Result<assets.Stamp, String> reads(EditorSource, EditorArtwork, EditorPositions) {
