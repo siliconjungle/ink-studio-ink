@@ -14,6 +14,8 @@ pub struct PixelEditPreview {
     sources: [(); 0],
     pub targets: Vec<Value>,
     pub conflicts: Vec<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub guides: Vec<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff: Option<ExactPreview>,
 }
@@ -78,7 +80,7 @@ pub struct Site {
 #[serde(rename_all = "camelCase")]
 pub struct ExactPreview {
     pub cells: Vec<CellChange>,
-    grids: [(); 0],
+    pub grids: Vec<Value>,
     materials: [(); 0],
     geometry: [(); 0],
     other: [(); 0],
@@ -106,6 +108,8 @@ pub(crate) struct Preview {
     pub cells: Vec<CellChange>,
     pub protected_cells: Vec<Site>,
     pub details: Vec<Value>,
+    pub grids: Vec<Value>,
+    pub guides: Vec<Value>,
     pub links: Option<Value>,
     pub receipt: u32,
 }
@@ -134,7 +138,7 @@ impl Preview {
                 .collect();
             ExactPreview {
                 cells: self.cells,
-                grids: [],
+                grids: self.grids,
                 materials: [],
                 geometry: [],
                 other: [],
@@ -161,6 +165,7 @@ impl Preview {
             sources: [],
             targets,
             conflicts,
+            guides: self.guides,
             diff,
         }
     }

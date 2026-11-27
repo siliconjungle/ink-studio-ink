@@ -16,6 +16,7 @@ import "pixel_batch.ink" as batch;
 import "pixel_session.ink" as session;
 import "pixel_palette_edit.ink" as palette_edits;
 import "pixel_palette_extract.ink" as extract_palette;
+import "pixel_canvas_edit.ink" as canvas_edits;
 import "pixel_asset_export.ink" as assets;
 import "pixel_png.ink" as png;
 import "pixel_png_input.ink" as png_input;
@@ -658,6 +659,25 @@ query pixel_editor_palette() -> json.Json reads(EditorSource) {
 
 query extract_pixel_editor_palette(options: json.Json) -> Result<json.Json, String> reads(EditorSource, EditorArtwork) {
     return extract_palette.document(EditorSource, EditorArtwork, options);
+}
+
+change edit_pixel_editor_canvas(operation: json.Json, scoped: Bool) -> Result<canvas_edits.Target, String>
+    reads(EditorSource, EditorArtwork, EditorPositions)
+    writes(EditorSource, EditorArtwork, EditorPositions, EditorNamed, EditorScope, EditorImage, EditorPaint) {
+    let edited = canvas_edits.apply(EditorSource, EditorArtwork, EditorPositions, operation, scoped)?;
+    if edited.changed {
+        let ready = prepare_editor(edited.source, edited.positions, edited.slots, edited.runs)?;
+        EditorSource = ready.source;
+        EditorArtwork = ready.artwork;
+        EditorNamed = ready.named;
+        EditorPositions = edited.positions;
+        EditorScope = frame_raster.Scope { frame: "", layer: "" };
+        EditorImage = None;
+        EditorPaint = paint.empty_cache();
+    } else {
+        EditorSource = edited.source;
+    }
+    return Ok(edited.target);
 }
 
 change edit_pixel_editor_palette(operation: json.Json, scoped: Bool) -> Result<json.Json, json.Json>

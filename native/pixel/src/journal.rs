@@ -584,6 +584,8 @@ impl PixelCommandEditor {
                 })
                 .collect(),
             details: preview_rows(&changes.l_exact.l_details)?,
+            grids: preview_rows(&changes.l_exact.l_grids)?,
+            guides: preview_rows(&changes.l_guides)?,
             links: links.map(|links| links.to_json()),
             receipt,
         };
@@ -827,7 +829,27 @@ impl PixelCommandEditor {
         let operation = member_mut(&mut patch, "operation")
             .map_or(Json::Null, |value| std::mem::replace(value, Json::Null));
         let invalid = |message: String| conflict("invalid-edit", message);
-        let report = if kind == "palette" {
+        let report = if kind == "canvas" {
+            let encoded = compiled_json(operation, &|kind, scalar, flag, values, keys| {
+                self.editor
+                    .program
+                    .function_l_pixel_json_value(kind, scalar, flag, values, keys)
+            });
+            let target = self
+                .editor
+                .program
+                .invoke_view_l_edit_pixel_editor_canvas(encoded, scoped)
+                .map_err(invalid)?
+                .result
+                .map_err(invalid)?;
+            let mut data = Json::from_ink(&target.l_data.to_json(), Limits::default())
+                .and_then(|row| json_value(&row))
+                .map_err(invalid)?;
+            let scale = [target.l_sx, target.l_sy]
+                .map(|factor| Json::Number(ryu_js::Buffer::new().format_finite(factor).into()));
+            data["scale"] = json_value(&Json::Array(scale.into())).map_err(invalid)?;
+            return Ok(data);
+        } else if kind == "palette" {
             let encoded = compiled_json(operation, &|kind, scalar, flag, values, keys| {
                 self.editor.program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
             });
@@ -951,6 +973,7 @@ impl PixelCommandEditor {
             "inputs": { "documentRevision": view.revision },
         });
         let mut started = false;
+        let previous_grid = self.editor.grid;
         let outcome = (|| -> Result<_, EditConflicts> {
             let invalid = |error: String| EditConflicts::from(conflict("invalid-edit", error));
             if let Some(recorded) = expected {
@@ -983,7 +1006,11 @@ impl PixelCommandEditor {
                 .map_err(invalid)?
                 .result;
             if !gate.l_frame.is_empty() {
-                common["command"]["frame"] = if gate.l_kind == "palette" { Value::Null } else { json!(&gate.l_frame) };
+                common["command"]["frame"] = if matches!(gate.l_kind.as_str(), "canvas" | "palette") {
+                    Value::Null
+                } else {
+                    json!(&gate.l_frame)
+                };
             }
             let issue =
                 Json::from_ink(&gate.l_conflict.to_json(), Limits::default()).map_err(invalid)?;
@@ -1081,6 +1108,9 @@ impl PixelCommandEditor {
                         .result
                         .map_err(invalid)?;
                 }
+                if gate.l_kind == "canvas" {
+                    self.refresh_grid().map_err(invalid)?;
+                }
                 self.editor.program.commit_transaction();
                 self.next_receipt = id;
             }
@@ -1105,6 +1135,7 @@ impl PixelCommandEditor {
                 Ok(staged)
             }
             Err(EditConflicts(issues)) => {
+                self.editor.grid = previous_grid;
                 if started {
                     self.editor.program.rollback_transaction();
                 }

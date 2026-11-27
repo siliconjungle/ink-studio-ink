@@ -16,6 +16,7 @@ record Decoded { palette: Palette, slots: List<i32>, alpha: List<u32>, knockouts
 record Colors { seen: Map<u32, i32>, palette: Buffer<u32>, slots: Buffer<i32>, full: Bool, }
 record Mark { alpha: u32, first: u32, length: u32, }
 record Document { template: json.Json, slots: List<i32>, marks: List<Mark>, spans: List<u32>, }
+record PackedMarks { marks: List<Mark>, spans: List<u32>, }
 record Span { start: u32, length: u32, key: u32, }
 record Runs { pending: Span, words: Buffer<u32>, keys: Buffer<u32>, order: Buffer<u32>, counts: Buffer<u32>, }
 record Groups { offsets: Buffer<u32>, marks: Buffer<Mark>, next: u32, }
@@ -209,9 +210,9 @@ fn range_cell(width: u32, p: u32, key: u32, out: Runs) -> Runs {
     return Runs { ..next, pending: Span { start: p, length: if key < 256 { 1 } else { 0 }, key: key } };
 }
 
-fn alpha_range(width: u32, decoded: Decoded, i: u32, out: Runs) -> Runs {
-    let alpha = decoded.alpha.at_or(i, 255);
-    let key: u32 = if alpha != 255 && decoded.slots.at_or(i, -1) >= 0 { alpha } else { 256 };
+fn alpha_range(width: u32, slots: List<i32>, opacity: List<u32>, i: u32, out: Runs) -> Runs {
+    let alpha = opacity.at_or(i, 255);
+    let key: u32 = if alpha != 255 && slots.at_or(i, -1) >= 0 { alpha } else { 256 };
     return range_cell(width, i, key, out);
 }
 
@@ -231,13 +232,12 @@ fn place_span(keys: List<u32>, words: List<u32>, i: u32, out: Scatter) -> Scatte
     return Scatter { offsets: out.offsets.set(key, slot + 1), words: out.words.set(slot, words.at_or(i, 0)) };
 }
 
-fn make_document(layout: input.Layout, decoded: Decoded) -> Document {
-    let width = layout.width;
+fn packed_marks(width: u32, slots: List<i32>, alpha: List<u32>, knockouts: List<u32>) -> PackedMarks {
     let start = Runs { pending: Span { start: 0, length: 0, key: 256 }, words: Buffer.empty(), keys: Buffer.empty(),
         order: Buffer.empty(), counts: buffer_fill(256, 0) };
-    let alpha_runs: Runs = repeat_until(length(decoded.slots), start, fn(out) => false, fn(i) => fn(out) =>
-        alpha_range(width, decoded, i, out));
-    let finished = foldl(decoded.knockouts, flush_span(width, alpha_runs), fn(p) => fn(out) => range_cell(width, p, 255, out));
+    let alpha_runs: Runs = repeat_until(length(slots), start, fn(out) => false, fn(i) => fn(out) =>
+        alpha_range(width, slots, alpha, i, out));
+    let finished = foldl(knockouts, flush_span(width, alpha_runs), fn(p) => fn(out) => range_cell(width, p, 255, out));
     let ranges = flush_span(width, finished);
     let counts = ranges.counts.freeze();
     let order = ranges.order.freeze();
@@ -247,6 +247,12 @@ fn make_document(layout: input.Layout, decoded: Decoded) -> Document {
     let keys = ranges.keys.freeze();
     let scatter = Scatter { offsets: grouped.offsets, words: buffer_fill(length(words), 0) };
     let organized: Scatter = repeat_until(length(words), scatter, fn(out) => false, fn(i) => fn(out) => place_span(keys, words, i, out));
+    return PackedMarks { marks: grouped.marks.freeze(), spans: organized.words.freeze() };
+}
+
+fn make_document(layout: input.Layout, decoded: Decoded) -> Document {
+    let width = layout.width;
+    let packed = packed_marks(width, decoded.slots, decoded.alpha, decoded.knockouts);
     let palette = decoded.palette;
     let ramps: List<json.Member> = if length(palette.ramps) == 0 { [] } else { [member("ramps", json.array(palette.ramps))] };
     let drawing = json.object([member("slots", json.array([])), member("marks", json.array([]))]);
@@ -258,7 +264,7 @@ fn make_document(layout: input.Layout, decoded: Decoded) -> Document {
         member("palette", json.object(palette.entries))].concat(ramps).concat(
         [member("layers", json.array([layer])), member("frames", json.array([first]))]);
     return Document { template: json.object(document), slots: decoded.slots,
-        marks: grouped.marks.freeze(), spans: organized.words.freeze() };
+        marks: packed.marks, spans: packed.spans };
 }
 
 fn restore(layout: input.Layout, samples: input.Samples, metadata: json.Json, slots: List<i32>,

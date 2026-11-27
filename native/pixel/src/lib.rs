@@ -1709,7 +1709,7 @@ impl PixelEditor {
         let runs: Vec<_> = snapshot.l_run_planes.iter().map(Vec::as_slice).collect();
         let text = snapshot_json(
             &document,
-            id.and_then(|_| document_width(&document)).unwrap_or(self.grid[0]),
+            document_width(&document).unwrap_or(self.grid[0]),
             &snapshot.l_positions,
             &edits,
             &slots,

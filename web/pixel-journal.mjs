@@ -165,15 +165,17 @@ function cellChanges(rows = [], exact = false) {
 }
 
 function previewReport(codec, changes, targets, conflicts, links, exact) {
+  const guides = changes?.guides.map(row => codec.toJS(row)) ?? [];
   const report = { format: 'ink-studio/pixel-edit-preview', version: 1, valid: conflicts.length === 0,
     ...(links && { celLinks: links }), pixelCount: changes?.pixelCount ?? 0,
-    pixels: cellChanges(changes?.pixels), sources: [], targets, conflicts };
+    pixels: cellChanges(changes?.pixels), sources: [], targets, conflicts, ...(guides.length && { guides }) };
   if (exact) {
     const cells = cellChanges(changes?.exact.cells, true);
     const protectedCells = changes?.exact.protectedCells ?? [];
     const details = changes?.exact.details.map(row => codec.toJS(row)) ?? [];
     const hits = conflicts.filter(issue => Object.hasOwn(issue, 'at'));
-    report.diff = { cells, grids: [], materials: [], geometry: [], other: [], rendered: [], renderErrors: [],
+    const grids = changes?.exact.grids.map(row => codec.toJS(row)) ?? [];
+    report.diff = { cells, grids, materials: [], geometry: [], other: [], rendered: [], renderErrors: [],
       skippedHits: hits, protection: { wouldChange: protectedCells.length !== 0 || details.length !== 0,
         details, geometry: [], cells: protectedCells, renderedCells: [],
         blocked: hits.filter(issue => issue.code.startsWith('protected-')) } };
@@ -189,6 +191,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
   const grid = bind('pixel_editor_grid');
   const guarded = bind('replace_guarded_pixels');
   const paletteEdit = bind('edit_pixel_editor_palette');
+  const canvasEdit = bind('edit_pixel_editor_canvas');
   const plan = bind('plan_pixel_command'), describe = bind('describe_pixel_command_document');
   const inspect = bind('inspect_pixel_command');
   const stamp = bind('export_pixel_command_stamp'), deck = bind('export_pixel_command_layer_deck');
@@ -274,6 +277,12 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
     return codec.toJS(result.Ok);
   }
 
+  function applyCanvas(patch) {
+    const scoped = ['frame', 'cel', 'edits'].some(key => Object.hasOwn(patch, key));
+    const { data, sx, sy } = unwrap(canvasEdit(codec.fromJS(patch.operation ?? null), scoped));
+    return { ...codec.toJS(data), scale: [sx, sy] };
+  }
+
   async function attempt(patch, { dryRun = false, expected, preview, options: editOptions } = {}) {
     const { cursor, pending, redo } = read();
     const shot = (expected?.command.options ?? editOptions)?.shotHitFrame;
@@ -290,7 +299,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
           { expected: expected.inputs.documentRevision, actual: cursor.revision });
       }
       const gate = check(codec.fromJS(gateFields(patch)));
-      if (gate.frame) command.frame = gate.kind === 'palette' ? null : gate.frame;
+      if (gate.frame) command.frame = ['canvas', 'palette'].includes(gate.kind) ? null : gate.frame;
       const conflict = codec.toJS(gate.conflict);
       if (conflict) throw Object.assign(new Error(conflict.message), { conflict });
       if (shot !== undefined) {
@@ -303,6 +312,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
       observe();
       if (preview) observePreview();
       const target = gate.direct ? applyGuarded(patch, gate, !!preview && !preview.exact)
+        : gate.kind === 'canvas' ? applyCanvas(patch)
         : gate.kind === 'palette' ? applyPalette(patch)
         : gate.kind === 'selections' ? editor.saveSelection(patch.operation, { frame: gate.frame })
         : editor.paint(patch.operation, { frame: gate.frame, cel: gate.cel.Some });
@@ -332,6 +342,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
         unwrap(accept(after, id));
         if (!pending) unwrap(commit());
         state.commitTransaction();
+        if (gate.kind === 'canvas') setGrid(grid());
         nextReceipt = id;
         receipts.set(id, { parent: cursor.receipt, receipt });
         if (!pending && redo.length) trim();
@@ -340,10 +351,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
       return { document, receipt };
     } catch (error) {
       if (started) state.rollbackTransaction();
-      if (pending && !dryRun) {
-        unwrap(cancel());
-        trim();
-      }
+      if (pending && !dryRun) transition('cancel');
       const conflicts = error.conflicts ?? [error.conflict ?? { code: 'invalid-edit', message: error.message }];
       if (preview) return previewReport(codec, undefined, [], conflicts, undefined, preview.exact);
       const receipt = { ...common, status: 'rejected', affectedTargets: [],
