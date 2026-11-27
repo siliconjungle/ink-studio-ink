@@ -63,9 +63,9 @@ export async function createGaussianRenderer(device, format, { width, height, sp
     projection.input.contourLight = contourLightOff;
     projection.input.contourReveal = contourRevealOff;
     projection.input.terrainArrivals = Array(arrivalBlocks).fill(-100);
-    projection.input.contourClock = { time: 0, latest: 0, block_rows: 0 };
-    steps.at(-1).call = 'project_streamed_lit_contours';
-    steps.at(-1).args.push(...['contourLight', 'contourReveal', 'terrainArrivals', 'contourClock'].map(input => ({ input })));
+    projection.input.contourFrame = { clock: { time: 0, latest: 0, block_rows: 0 }, clip_motion: false, terrain_rows: 0 };
+    steps.at(-1).call = 'project_field_lit_contours';
+    steps.at(-1).args.push(...['contourLight', 'contourReveal', 'terrainArrivals', 'contourFrame'].map(input => ({ input })));
   }
   const compactedWorld = projection.call === 'project_visible_sorted_world' && !contours && !hasSkin;
   const ink = await loadInk(bundleURL, { device, parallelU64Merge: compactedWorld });
@@ -169,10 +169,14 @@ export async function createGaussianRenderer(device, format, { width, height, sp
         if (!directional || !starts.every(Number.isFinite)) throw new Error('Invalid contour terrain arrival times');
         return session.writeChanged('terrainArrivals', starts);
       },
-      stageContourClock(time, latest, blockRows) {
+      stageContourClock(time, latest, blockRows, terrainRows) {
         if (!directional || !Number.isFinite(time) || !Number.isFinite(latest) ||
-            !Number.isInteger(blockRows) || blockRows < 0 || blockRows > 0xffffffff) throw new Error('Invalid contour clock');
-        return session.write('contourClock', { time, latest, block_rows: blockRows });
+            !Number.isInteger(blockRows) || blockRows < 0 || blockRows > 0xffffffff ||
+            (terrainRows !== undefined && (!Number.isInteger(terrainRows) || terrainRows < 0 || terrainRows > 0xffffffff))) {
+          throw new Error('Invalid contour clock');
+        }
+        return session.write('contourFrame', { clock: { time, latest, block_rows: blockRows },
+          clip_motion: terrainRows !== undefined, terrain_rows: terrainRows ?? 0 });
       },
       async updateSkinCamera(value, { bones, light }) {
         if (!hasSkin) throw new Error('Skin updates require a skinned world view');

@@ -452,6 +452,7 @@ record ContourLight {
 record ContourWindow { center: Vec2<f32>, radius: f32, }
 record ContourReveal { center: Vec2<f32>, radius: f32, edge_width: f32, floor_height: f32, }
 record ContourClock { time: f32, latest: f32, block_rows: u32, }
+record ContourFrame { clock: ContourClock, clip_motion: Bool, terrain_rows: u32, }
 
 fn hard_reveal(window: ContourWindow) -> ContourReveal {
     return ContourReveal { center: window.center, radius: window.radius, edge_width: 0.0, floor_height: 0.0 };
@@ -515,6 +516,23 @@ fn outside_reveal(position: Vec3<f32>, reveal: ContourReveal, age: f32) -> Bool 
     if inside_edge && arrival >= 1.0 { return false; }
     let threshold = reveal_cell_threshold(position);
     return arrival <= threshold || (!inside_edge && (outer - sqrt(dist2)) / reveal.edge_width <= threshold);
+}
+
+fn outside_motion_reveal(position: Vec3<f32>, reveal: ContourReveal) -> Bool {
+    if !(reveal.radius > 0.5 && reveal.edge_width > 0.0) { return false; }
+    let x = position.x - reveal.center.x;
+    let z = position.z - reveal.center.y;
+    let distance2 = x * x + z * z;
+    if distance2 >= reveal.radius * reveal.radius { return true; }
+    let inner = reveal.radius - reveal.edge_width;
+    if inner > 0.0 && distance2 <= inner * inner { return false; }
+    return (reveal.radius - sqrt(distance2)) / reveal.edge_width <= reveal_cell_threshold(position);
+}
+
+fn outside_world_row(position: Vec3<f32>, index: u32, reveal: ContourReveal, starts: List<f32>,
+    frame: ContourFrame) -> Bool {
+    if frame.clip_motion && index >= frame.terrain_rows { return outside_motion_reveal(position, reveal); }
+    return outside_reveal(position, reveal, terrain_age(index, starts, frame.clock));
 }
 
 fn near_unit(vector: Vec3<f32>, floor: f32, default: Vec3<f32>) -> Vec3<f32> {
@@ -585,11 +603,23 @@ pub fn project_revealed_lit_contours(terrain: List<WorldGaussian>, actors: List<
 
 pub fn project_streamed_lit_contours(terrain: List<WorldGaussian>, actors: List<WorldGaussian>,
     camera: Camera, light: ContourLight, reveal: ContourReveal, starts: List<f32>, clock: ContourClock) -> List<ContourEllipse> {
+    return project_field_lit_contours(terrain, actors, camera, light, reveal, starts,
+        ContourFrame { clock: clock, clip_motion: false, terrain_rows: 0 });
+}
+
+fn project_field_actors(actors: List<WorldGaussian>, camera: Camera, light: ContourLight, reveal: ContourReveal,
+    motion: Bool) -> List<ContourEllipse> {
+    return actors.map_indexed(fn(i) => fn(splat) =>
+        if !contributes(splat) || (motion && outside_motion_reveal(splat.position, reveal)) { hidden_contour() }
+        else { directional_contour(splat, camera, light, i < light.actor_rows) }).filter(fn(row) => row.alpha > 0.0);
+}
+
+pub fn project_field_lit_contours(terrain: List<WorldGaussian>, actors: List<WorldGaussian>,
+    camera: Camera, light: ContourLight, reveal: ContourReveal, starts: List<f32>, frame: ContourFrame) -> List<ContourEllipse> {
     let ground = terrain.map_indexed(fn(i) => fn(splat) =>
-        if outside_reveal(splat.position, reveal, terrain_age(i, starts, clock)) { hidden_contour() }
+        if !contributes(splat) || outside_world_row(splat.position, i, reveal, starts, frame) { hidden_contour() }
         else { directional_contour(splat, camera, light, false) }).filter(fn(row) => row.alpha > 0.0);
-    let posing = actors.map_indexed(fn(i) => fn(splat) =>
-        directional_contour(splat, camera, light, i < light.actor_rows)).filter(fn(row) => row.alpha > 0.0);
+    let posing = project_field_actors(actors, camera, light, reveal, frame.clip_motion);
     return sort_contours(ground.concat(posing));
 }
 
@@ -631,10 +661,15 @@ pub fn project_revealed_prepared_contours(terrain: List<PreparedContourTerrain>,
 
 pub fn project_streamed_prepared_contours(terrain: List<PreparedContourTerrain>, actors: List<WorldGaussian>,
     camera: Camera, light: ContourLight, reveal: ContourReveal, starts: List<f32>, clock: ContourClock) -> List<ContourEllipse> {
+    return project_field_prepared_contours(terrain, actors, camera, light, reveal, starts,
+        ContourFrame { clock: clock, clip_motion: false, terrain_rows: 0 });
+}
+
+pub fn project_field_prepared_contours(terrain: List<PreparedContourTerrain>, actors: List<WorldGaussian>,
+    camera: Camera, light: ContourLight, reveal: ContourReveal, starts: List<f32>, frame: ContourFrame) -> List<ContourEllipse> {
     let ground = terrain.map_indexed(fn(i) => fn(dab) =>
-        if outside_reveal(dab.splat.position, reveal, terrain_age(i, starts, clock)) { hidden_contour() }
+        if !contributes(dab.splat) || outside_world_row(dab.splat.position, i, reveal, starts, frame) { hidden_contour() }
         else { project_prepared_dab(dab, camera, light) }).filter(fn(row) => row.alpha > 0.0);
-    let posing = actors.map_indexed(fn(i) => fn(splat) =>
-        directional_contour(splat, camera, light, i < light.actor_rows)).filter(fn(row) => row.alpha > 0.0);
+    let posing = project_field_actors(actors, camera, light, reveal, frame.clip_motion);
     return sort_contours(ground.concat(posing));
 }

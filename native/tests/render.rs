@@ -153,6 +153,14 @@ fn computes_and_draws_from_the_same_device_buffer() {
     directional.stage_contour_clock(clock).unwrap();
     directional.project(&device).unwrap();
     assert_eq!(draw_fixture(&device, &queue, &texture, &readback, &directional), data);
+    directional.stage_terrain_arrivals(&[5.0]).unwrap();
+    directional.stage_contour_frame(clock, Some(0)).unwrap();
+    directional.project(&device).unwrap();
+    assert_eq!(draw_fixture(&device, &queue, &texture, &readback, &directional), data);
+    directional.stage_contour_reveal(ContourReveal { center: [0.0, -5.0], radius: 2.5, ..reveal }).unwrap();
+    directional.project(&device).unwrap();
+    let outside_motion = draw_fixture(&device, &queue, &texture, &readback, &directional);
+    assert_eq!(outside_motion[center], outside_motion[0]);
 }
 
 fn draw_fixture(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture,

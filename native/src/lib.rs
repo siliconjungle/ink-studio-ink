@@ -10,7 +10,7 @@ mod render;
 pub use contours::ContourSettings;
 use contours::ContourRaster;
 pub use packed_inputs::{Bone, Camera, ContourClock, ContourLight, ContourReveal, ContourWindow, RigLight, WorldSplat};
-use packed_inputs::{GpuWords, PackedInputs, binding};
+use packed_inputs::{ContourFrame, GpuWords, PackedInputs, binding};
 pub use present::PixelPresenter;
 
 pub struct GaussianRenderer {
@@ -290,15 +290,16 @@ impl GaussianRenderer {
             args.push(json!({ "input": "contourLight" }));
             inputs["contourReveal"] = json!({"center": [0, 0], "radius": 0, "edge_width": 0, "floor_height": 0});
             inputs["terrainArrivals"] = json!(vec![-100.0; terrain.arrival_blocks.max(1)]);
-            inputs["contourClock"] = json!({"time": 0, "latest": 0, "block_rows": 0});
-            args.extend(["contourReveal", "terrainArrivals", "contourClock"].map(|input| json!({ "input": input })));
-            function = "project_streamed_lit_contours";
+            inputs["contourFrame"] = json!({"clock": {"time": 0, "latest": 0, "block_rows": 0},
+                "clip_motion": false, "terrain_rows": 0});
+            args.extend(["contourReveal", "terrainArrivals", "contourFrame"].map(|input| json!({ "input": input })));
+            function = "project_field_lit_contours";
         }
         let retained_steps = if directional && terrain.retain_normals {
             steps.push(json!({"id": "terrain-normals", "call": "prepare_contour_terrain",
                 "args": [{"input": "splats"}]}));
             args[0] = json!({"step": "terrain-normals"});
-            function = "project_streamed_prepared_contours";
+            function = "project_field_prepared_contours";
             &["terrain-normals"][..]
         } else {
             &[]
@@ -493,12 +494,19 @@ impl GaussianRenderer {
     }
 
     pub fn stage_contour_clock(&mut self, clock: ContourClock) -> Result<(), String> {
+        self.stage_contour_frame(clock, None)
+    }
+
+    /// Apply moving-object reveal to the skinned rows and the world rows
+    /// after the terrain range when `terrain_rows` is supplied.
+    pub fn stage_contour_frame(&mut self, clock: ContourClock, terrain_rows: Option<u32>) -> Result<(), String> {
         if !self.directional || !clock.time.is_finite() || !clock.latest.is_finite() {
             return Err("Invalid contour clock".into());
         }
-        let input = binding(&mut self.packed_inputs.contour_clock, &self.engine, self.session,
-            "contourClock", ContourClock::layout)?;
-        self.engine.write_packed(input, clock.words())?;
+        let frame = ContourFrame { clock, clip_motion: terrain_rows.is_some(), terrain_rows: terrain_rows.unwrap_or(0) };
+        let input = binding(&mut self.packed_inputs.contour_frame, &self.engine, self.session,
+            "contourFrame", ContourFrame::layout)?;
+        self.engine.write_packed(input, frame.words())?;
         Ok(())
     }
 

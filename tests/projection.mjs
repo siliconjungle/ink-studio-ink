@@ -163,6 +163,28 @@ const arrivalCases = [
   ];
 });
 for (const { pure, args, expected } of arrivalCases) assert.deepEqual(call(pure, args), expected);
+const motionWorld = [
+  arrivingTerrain[1],
+  { ...arrivingTerrain[1], rgb: 15 },
+  { ...revealTerrain[0], rgb: 16 },
+  { ...revealTerrain[5], rgb: 17 },
+];
+const motionActors = [
+  { ...arrivingTerrain[1], rgb: 18 },
+  { ...revealTerrain[0], rgb: 19 },
+  { ...revealTerrain[5], rgb: 20 },
+];
+const motionFrame = { clock: { time: 5, latest: 5, block_rows: 4 }, clip_motion: true, terrain_rows: 1 };
+const motionArgs = [motionWorld, motionActors, camera, lamp, reveal, [5], motionFrame];
+const motionPrepared = [call('prepare_contour_terrain', [motionWorld]), ...motionArgs.slice(1)];
+const expectedMotion = call('project_lit_contour_scene', [[motionWorld[1]], [motionActors[0]], camera, lamp]);
+const motionCases = [
+  { pure: 'project_field_lit_contours', args: motionArgs, expected: expectedMotion },
+  { pure: 'project_field_prepared_contours', args: motionPrepared, expected: expectedMotion },
+  { pure: 'project_field_lit_contours', args: [...motionArgs.slice(0, 4), { ...reveal, radius: 0.5 }, ...motionArgs.slice(5)],
+    expected: call('project_lit_contour_scene', [motionWorld.slice(1), motionActors, camera, lamp]) },
+];
+for (const { pure, args, expected } of motionCases) assert.deepEqual(call(pure, args), expected);
 const sourceRow = [1, 2, 3, 0.5, 4, 5, 6, 0xf08010, 7, 8, 9, 128, 11, 12, 13, 14];
 const imported = [{ position: [1, 2, 3], covariance0: [4, 5, 6], covariance1: [7, 8, 9],
   reach: 3, rgb: 0xf08010, alpha: 0.5 }];
@@ -212,6 +234,7 @@ try {
     { pure: 'project_revealed_prepared_contours', args: raisedPrepared, expected: expectedRaised },
     { pure: 'project_revealed_lit_contours', args: roundedDot, expected: expectedDot },
     ...arrivalCases,
+    ...motionCases,
     { pure: 'import_builder_splats', args: [sourceRow], expected: imported, cpuOnly: true },
   ];
   writeFileSync(requestsPath, JSON.stringify(tests.map(({ pure, args }) => ({ pure, args }))));
