@@ -198,6 +198,8 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
   const inspect = bind('inspect_pixel_command');
   const sample = bind('sample_pixel_editor'), snap = bind('snap_pixel_editor'), timeline = bind('timeline_pixel_editor');
   const slices = bind('slices_pixel_editor'), exportSlice = bind('export_pixel_slice');
+  const inspectTilemap = bind('inspect_pixel_tilemap'), exportTilemap = bind('export_pixel_tilemap');
+  const exportNeighbors = bind('export_pixel_tilemap_neighbors');
   const sliceFrame = frame => frame === undefined ? { None: null } : { Some: String(frame) };
   const stamp = bind('export_pixel_command_stamp'), deck = bind('export_pixel_command_layer_deck');
   const png = bind('export_pixel_command_png');
@@ -220,6 +222,13 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
   function encodePng(options) {
     const image = unwrap(png(codec.fromJS(options)));
     return pixelPng(image, codec.toJS(image.metadata));
+  }
+
+  function rasterBytes({ width, height, pixels }) {
+    const rgba = new Uint8Array(width * height * 4);
+    const body = new DataView(rgba.buffer);
+    for (let i = 0; i < pixels.length; i++) body.setUint32(i * 4, pixels[i]);
+    return { w: width, h: height, rgba };
   }
 
   async function runWithSave(run) {
@@ -739,11 +748,22 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
     },
     slice(id, { frame } = {}) {
       return enqueue(() => {
-        const { report, width, height, pixels } = unwrap(exportSlice(String(id), sliceFrame(frame)));
-        const rgba = new Uint8Array(width * height * 4);
-        const body = new DataView(rgba.buffer);
-        for (let i = 0; i < pixels.length; i++) body.setUint32(i * 4, pixels[i]);
-        return { ...codec.toJS(report), raster: { w: width, h: height, rgba } };
+        const { report, ...image } = unwrap(exportSlice(String(id), sliceFrame(frame)));
+        return { ...codec.toJS(report), raster: rasterBytes(image) };
+      });
+    },
+    tilemap(at) {
+      const point = capture(at);
+      return enqueue(() => codec.toJS(unwrap(inspectTilemap(codec.fromJS(point || null)))));
+    },
+    tilemapRaster({ time = 0 } = {}) {
+      return enqueue(() => rasterBytes(unwrap(exportTilemap(typeof time === 'number' ? time : NaN))));
+    },
+    tilemapNeighborhood(at, { time = 0 } = {}) {
+      const point = capture(at);
+      return enqueue(() => {
+        const { report, image } = unwrap(exportNeighbors(codec.fromJS(point ?? null), typeof time === 'number' ? time : NaN));
+        return { ...codec.toJS(report), raster: rasterBytes(image) };
       });
     },
     begin: (label = '') => enqueue(() => unwrap(begin(label)), true),

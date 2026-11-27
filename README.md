@@ -120,6 +120,8 @@ Timeline edits also accept `set-directional` with a registered view set, `set-sl
 
 Use `set-tilemap` to configure the map and `place-tiles` with `points` and a tile frame ID or `null` to erase. `make-local-variant` takes an `at` coordinate and an unused `tile` frame ID. It copies the tile's drawing and scoped records and changes that placement. `reuse-exact-tile` takes the same fields with an existing frame ID and checks its drawing, protection and tile rules before reusing it.
 
+Use `editor.tilemap([x, y])` to inspect placements and exact matches, `editor.tilemapRaster({ time })` for the full RGBA grid, or `editor.tilemapNeighborhood([x, y], { time })` for a 3×3 window and its four edge comparisons. Time is in seconds. Both targets resolve neighbor variants before selecting animation frames. The native CLI supports `tilemap inspect DOCUMENT --at X,Y`, `tilemap draw DOCUMENT --t SECONDS --out MAP.png`, and `tilemap neighbors DOCUMENT --at X,Y --t SECONDS --image WINDOW.png`.
+
 Use `editor.execute(command)` with an `{ format: 'ink-studio/pixel-command', version: 1, action, … }` envelope. The shared Ink dispatcher handles local `draw`, `mask`, `recolor`, and `transform` aliases, guarded raster and selection operations, `validate`, `select`, `inspect`, `preview`, `replay`, and journal travel. Export the authored document, an indexed `stamp`, a `layer-deck`, or a `png`. Stamp and layer-deck exports include held-cel rasters, opacity, knockouts and the applicable palette and frame metadata.
 
 The `png` command returns base64 with `frame`, `cel`, `layer`, and `colorMode` options. Choose `auto` to use indexed PNG when the samples fit in 256 entries, `indexed` to require indexed PNG, or `rgba` for straight RGBA. PNGs retain editable palette order, aliases, names, locks, ramps, and knockout locations in the `inKD` chunk. For the PNG bytes directly, use `await editor.png(options)` in JavaScript or `PixelCommandEditor::png` with a JSON options string in Rust.
@@ -198,7 +200,7 @@ cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- select-m
 
 ## Build and check
 
-Use [Ink Lang commit `56fb433`](https://github.com/siliconjungle/ink-lang/commit/56fb433bb1b68b25d592056572598946b6e38f4f) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for immutable geometry and pixel document inputs. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
+Use [Ink Lang commit `5244c917`](https://github.com/siliconjungle/ink-lang/commit/5244c9172da1263fec075cdd0ca5e31722ed9a3e) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for immutable geometry and pixel document inputs. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
 
 ```sh
 ./scripts/build.sh --gpu

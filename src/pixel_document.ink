@@ -30,6 +30,7 @@ import "pixel_timeline_edit.ink" as timeline_edit;
 import "pixel_canvas_registration.ink" as registration;
 import "pixel_slices.ink" as slices;
 import "pixel_tilemap.ink" as tilemap;
+import "pixel_tilemap_render.ink" as tile_render;
 import "pixel_values.ink" as pixel_values;
 
 record Layer { id: String, kind: String, parent: String, }
@@ -498,6 +499,7 @@ state EditorImage: Option<selection.Image> = None;
 state EditorPaint: paint.CachedView = paint.empty_cache();
 state EditorSource: json.Json = json.null();
 state EditorPositions: List<List<u32>> = [];
+keep EditorTilemap: Result<tile_render.Layout, String> = tile_render.layout(EditorSource, EditorArtwork);
 
 fn empty_editor_image() -> selection.Image {
     return selection.Image { rgba: [], palette: mask.no_palette() };
@@ -1066,6 +1068,19 @@ query slices_pixel_editor(frame: Option<String>) -> Result<json.Json, String> re
 query export_pixel_slice(name: String, frame: Option<String>) -> Result<slices.Image, String>
     reads(EditorSource, EditorArtwork, JournalCursor) {
     return slices.picture(EditorSource, EditorArtwork, JournalCursor.revision, name, frame);
+}
+
+query inspect_pixel_tilemap(at: json.Json) -> Result<json.Json, String> reads(EditorSource, EditorArtwork, EditorTilemap, JournalCursor) {
+    return tile_render.inspect(EditorSource, EditorArtwork, EditorTilemap, JournalCursor.revision, at);
+}
+
+query export_pixel_tilemap(time: f64) -> Result<tile_render.Image, String> reads(EditorSource, EditorArtwork, EditorTilemap) {
+    return tile_render.render(EditorSource, EditorArtwork, EditorTilemap, time);
+}
+
+query export_pixel_tilemap_neighbors(at: json.Json, time: f64) -> Result<tile_render.Window, String>
+    reads(EditorSource, EditorArtwork, EditorTilemap, JournalCursor) {
+    return tile_render.window(EditorSource, EditorArtwork, EditorTilemap, JournalCursor.revision, at, time);
 }
 
 query export_pixel_command_stamp(options: json.Json) -> Result<assets.Stamp, String> reads(EditorSource, EditorArtwork, EditorPositions) {

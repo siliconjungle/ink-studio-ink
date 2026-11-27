@@ -139,11 +139,14 @@ fn checked_schedule(raw: json.Json, frames: List<String>, durations: List<f64>) 
     let animation = value.fields(raw);
     let steps = value.items(value.get(animation, "frames")).map(fn(id) =>
         durations.at_or(selection.named_slot(frames, value.text(id)), 0.0f64));
+    return timeline.playback_duration(playback(animation, length(steps)), steps) <= 9007199254740991.0f64;
+}
+
+fn playback(animation: List<json.Member>, count: u32) -> timeline.Playback {
     let direction = value.text(value.get(animation, "direction"));
-    let bounce = direction == "ping-pong" && length(steps) > 1;
-    let plan = timeline.Playback { first: 0, last: length(steps) - 1, reverse: direction == "reverse", bounce: bounce,
+    let bounce = direction == "ping-pong" && count > 1;
+    return timeline.Playback { first: 0, last: count - 1, reverse: direction == "reverse", bounce: bounce,
         loop: value.flag(animation, "loop", true), passes: if bounce { 2 } else { 1 } };
-    return timeline.playback_duration(plan, steps) <= 9007199254740991.0f64;
 }
 
 fn check_schedules(variants: List<json.Member>, frames: List<String>, durations: List<f64>) -> Result<Unit, String> {
@@ -246,6 +249,7 @@ fn same_behavior(variants: List<json.Member>, a: String, b: String) -> Bool {
 
 fn read_art(art: frame.Artwork, layer: u32, cel: frame.Cel) -> Artwork {
     let place = frame.placement(art.inputs.at_or(layer, json.null()), cel);
+    if cel.id == "" { return Artwork { slots: [], alpha: [], issue: "", placement: place }; }
     let root = frame.resolved_cel(art.cels, cel);
     let pixels = frame.cel_raster(art, root, raster.untouched());
     return Artwork { slots: pixels.slots, alpha: pixels.alpha, issue: pixels.issue, placement: place };
@@ -267,8 +271,13 @@ fn same_layer(art: frame.Artwork, layer: u32, before: String, after: String) -> 
     if a.id == "" && b.id == "" { return true; }
     let left = read_art(art, layer, a);
     let right = read_art(art, layer, b);
+    return same_drawing(left, right, mask.size(art.grid));
+}
+
+fn same_drawing(left: Artwork, right: Artwork, pixels: u32) -> Bool {
     return left.issue == "" && right.issue == "" &&
-        repeat_until(mask.size(art.grid), true, fn(ok) => !ok, fn(p) => fn(ok) => same_site(left, right, p));
+        (length(left.slots) + length(right.slots) == 0 ||
+            repeat_until(pixels, true, fn(ok) => !ok, fn(p) => fn(ok) => same_site(left, right, p)));
 }
 
 fn same_detail(a: paint.Detail, b: paint.Detail) -> Bool {
@@ -288,4 +297,27 @@ fn same_art(source: json.Json, art: frame.Artwork, a: String, b: String) -> Resu
     let right = paint.active_details(details, selection.named_slot(art.frames, b));
     return Ok(same_protection(left, right) && repeat_until(length(art.layers), true, fn(ok) => !ok,
         fn(i) => fn(ok) => same_layer(art, i, a, b)));
+}
+
+fn exact_matches(source: json.Json, art: frame.Artwork, variants: List<json.Member>, id: String) -> Result<List<String>, String> {
+    let candidates = art.frames.filter(fn(name) => name != id && same_behavior(variants, id, name));
+    if length(candidates) == 0 { return Ok([]); }
+    let details = paint.protections(source, art)?;
+    let locked = paint.active_details(details, selection.named_slot(art.frames, id));
+    let cache = art.layers.map_indexed(fn(i) => fn(layer) => read_art(art, i, frame.active_cel(art.cels, id, layer.id)));
+    return Ok(candidates.filter(fn(name) => can_match(art, details, locked, cache, name)));
+}
+
+fn can_match(art: frame.Artwork, details: List<paint.Detail>, locked: List<paint.Detail>, base: List<Artwork>, name: String) -> Bool {
+    if !same_protection(locked, paint.active_details(details, selection.named_slot(art.frames, name))) {
+        return false;
+    }
+    return repeat_until(length(art.layers), true, fn(ok) => !ok, fn(i) => fn(ok) => match_layer(art, base, name, i));
+}
+
+fn match_layer(art: frame.Artwork, base: List<Artwork>, name: String, layer: u32) -> Bool {
+    let id = art.layers.at_or(layer, frame.empty_layer()).id;
+    let other = read_art(art, layer, frame.active_cel(art.cels, name, id));
+    let original = base.at_or(layer, Artwork { ..other, issue: "Missing cached tile artwork" });
+    return same_drawing(original, other, mask.size(art.grid));
 }

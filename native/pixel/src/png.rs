@@ -109,3 +109,7 @@ pub(super) fn encode(raster: Raster<'_>, metadata: Option<&[u8]>) -> Result<Vec<
     chunk(&mut out, b"IEND", &[]);
     Ok(out)
 }
+
+pub(super) fn rgba(width: u32, height: u32, pixels: &[u32]) -> Result<Vec<u8>, String> {
+    encode(Raster { width, height, channels: 4, pixels, colors: &[], coverage: &[] }, None)
+}

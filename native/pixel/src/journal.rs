@@ -831,10 +831,36 @@ impl PixelCommandEditor {
         let image = self.editor.program.invoke_view_l_export_pixel_slice(name.to_owned(), frame.map(str::to_owned))?.result?;
         let limits = Limits::default();
         let report = Json::from_ink(&image.l_report.to_json(), limits)?.stringify(limits)?;
-        let bytes = super::png::encode(super::png::Raster {
-            width: image.l_width, height: image.l_height, channels: 4,
-            pixels: &image.l_pixels, colors: &[], coverage: &[],
-        }, None)?;
+        let bytes = super::png::rgba(image.l_width, image.l_height, &image.l_pixels)?;
+        Ok((report, bytes))
+    }
+
+    pub fn tilemap(&mut self, at: Option<&str>) -> Result<String, PixelEditError> {
+        let make = |kind, scalar, flag, values, keys| {
+            self.editor.program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
+        };
+        let point = compiled_json(parse_json(at.unwrap_or("null"))?, &make);
+        let report = self.editor.program.invoke_view_l_inspect_pixel_tilemap(point)?.result?;
+        let limits = Limits::default();
+        Ok(Json::from_ink(&report.to_json(), limits)?.stringify(limits)?)
+    }
+
+    pub fn tilemap_png(&mut self, time: f64) -> Result<Vec<u8>, PixelEditError> {
+        let image = self.editor.program.invoke_view_l_export_pixel_tilemap(time)?.result?;
+        Ok(super::png::rgba(image.l_width, image.l_height, &image.l_pixels)?)
+    }
+
+    pub fn tilemap_neighbors(&mut self, at: &str, time: f64, png: bool)
+        -> Result<(String, Option<Vec<u8>>), PixelEditError> {
+        let make = |kind, scalar, flag, values, keys| {
+            self.editor.program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
+        };
+        let point = compiled_json(parse_json(at)?, &make);
+        let window = self.editor.program.invoke_view_l_export_pixel_tilemap_neighbors(point, time)?.result?;
+        let limits = Limits::default();
+        let report = Json::from_ink(&window.l_report.to_json(), limits)?.stringify(limits)?;
+        let image = window.l_image;
+        let bytes = png.then(|| super::png::rgba(image.l_width, image.l_height, &image.l_pixels)).transpose()?;
         Ok((report, bytes))
     }
 
