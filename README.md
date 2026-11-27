@@ -107,7 +107,7 @@ cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- select-m
 
 ## Build and check
 
-Use [Ink Lang commit `80928a0`](https://github.com/siliconjungle/ink-lang/commit/80928a0cbc0705953d8f40d670c6c2a2d5b64c90) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for immutable geometry and pixel document inputs. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
+Use [Ink Lang commit `dabc35b`](https://github.com/siliconjungle/ink-lang/commit/dabc35b000ad380f8d2c70d4c67d7afc5622d93a) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for immutable geometry and pixel document inputs. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
 
 ```sh
 ./scripts/build.sh --gpu
