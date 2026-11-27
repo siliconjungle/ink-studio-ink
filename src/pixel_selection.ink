@@ -2,6 +2,7 @@ module StudioPixelSelection;
 
 import "std:json" as json;
 import "pixel_mask.ink" as mask;
+import "pixel_labels.ink" as labels;
 
 record Inputs {
     grid: mask.Grid,
@@ -10,6 +11,7 @@ record Inputs {
     saved: List<json.Member>,
     runs: List<List<u32>>,
     packed: Bool,
+    palette: mask.PaletteRaster,
 }
 record Job { operation: String, query: json.Json, }
 record Run { pending: Buffer<Job>, values: Buffer<List<u32>>, count: u32, issue: String, }
@@ -188,6 +190,45 @@ fn wand(input: Inputs, query: List<json.Member>) -> Choice {
     return chosen(mask.wand(input.grid, input.rgba, p, tolerance, connected.fold(fn(value) => value, fn(reason) => true)));
 }
 
+fn find_swatch(ids: List<String>, id: String) -> i32 {
+    let none: i32 = -1;
+    return repeat_until(length(ids), none, fn(slot) => slot >= 0, fn(i) => fn(slot) =>
+        if ids.at_or(i, "") == id {
+            i32_from_f64(f64_from_u32(i)).fold(fn(value) => value, fn(unit) => none)
+        } else { slot });
+}
+
+fn palette_issue(g: mask.Grid, palette: mask.PaletteRaster) -> String {
+    let count = mask.size(g);
+    if length(palette.slots) == 0 { return "A semantic selection needs a source for swatch"; }
+    if length(palette.slots) != count || (length(palette.alpha) != 0 && length(palette.alpha) != count) ||
+        (length(palette.clipping) != 0 && length(palette.clipping) != count) {
+        return "The indexed selection raster must match the native grid";
+    }
+    return "";
+}
+
+fn swatch(g: mask.Grid, palette: mask.PaletteRaster, query: List<json.Member>) -> Choice {
+    if !allowed(query, ["id", "at"]) { return bad("Unknown swatch selection field"); }
+    let id = text(field(query, "id"));
+    let at = point(items(field(query, "at")), g);
+    let has_id = json.lookup(query, "id").fold(fn(value) => true, fn(unit) => false);
+    let has_at = json.lookup(query, "at").fold(fn(value) => true, fn(unit) => false);
+    if has_id == has_at || (if has_id { !labels.present(id) } else { !inside(at, g) }) {
+        return bad("Choose a swatch ID or a native seed pixel and optional part scope");
+    }
+    let issue = palette_issue(g, palette);
+    if issue != "" { return bad(issue); }
+    let blank = mask.blank(g);
+    let seed = mask.index(g, at);
+    if has_at && !mask.palette_visible(palette, seed) { return chosen(blank.freeze()); }
+    let target = if has_at { palette.slots.at_or(seed, -1) } else { find_swatch(palette.ids, id) };
+    if target < 0 { return chosen(blank.freeze()); }
+    let bits = repeat_until(mask.size(g), blank, fn(old) => false, fn(i) => fn(old) =>
+        if mask.palette_match(palette, i, target) { mask.mark(old, i) } else { old });
+    return chosen(bits.freeze());
+}
+
 fn leaf(input: Inputs, operation: String, query: List<json.Member>) -> Choice {
     if operation == "rectangle" || operation == "ellipse" { return marquee(input.grid, query, operation == "ellipse"); }
     if operation == "lasso" || operation == "polygon" { return lasso(input, query, operation == "polygon"); }
@@ -197,7 +238,8 @@ fn leaf(input: Inputs, operation: String, query: List<json.Member>) -> Choice {
         return if allowed(query, ["pixels"]) { literal(input, field(query, "pixels")) }
             else { bad("A literal selection needs native pixels") };
     }
-    if operation == "swatch" || operation == "binding" || operation == "object" || operation == "part" ||
+    if operation == "swatch" { return swatch(input.grid, input.palette, query); }
+    if operation == "binding" || operation == "object" || operation == "part" ||
         operation == "material" || operation == "depth" || operation == "channel" {
         return bad(string_concat("A semantic selection needs a source for ", operation));
     }
@@ -241,11 +283,20 @@ fn schedule(input: Inputs, value: json.Json, old: Run) -> Run {
             !(connectivity == 4 || connectivity == 8) {
             return Run { ..run, issue: "A cluster needs a native seed and optional 4 or 8 connectivity" };
         }
-        let source = json.lookup(query, "source").fold(fn(raw) => child(input, raw), fn(unit) =>
-            json.object([json.Member { key: "type", value: json.text("swatch") }]));
-        return Run { ..run, pending: run.pending.push(finished).push(node(source)) };
+        return json.lookup(query, "source").fold(fn(raw) =>
+            Run { ..run, pending: run.pending.push(finished).push(node(child(input, raw))) },
+            fn(unit) => cluster_swatch(input.grid, input.palette, p, connectivity == 8, run));
     }
     return publish(run, leaf(input, op, query));
+}
+
+fn cluster_swatch(g: mask.Grid, palette: mask.PaletteRaster, p: Vec2<u32>, diagonal: Bool, run: Run) -> Run {
+    // The implicit swatch consumes an operation even when the flood reads it directly.
+    if run.count == 32 { return Run { ..run, issue: "A selection query supports at most 32 operations" }; }
+    let issue = palette_issue(g, palette);
+    if issue != "" { return Run { ..run, issue: issue }; }
+    let result = mask.palette_cluster(g, palette, mask.index(g, p), diagonal);
+    return Run { ..run, count: run.count + 1, values: run.values.push(result) };
 }
 
 fn apply(g: mask.Grid, job: Job, source: List<u32>) -> Choice {
@@ -276,14 +327,14 @@ fn step(input: Inputs, old: Run) -> Run {
 }
 
 fn select(width: u32, height: u32, query: List<json.Json>, rgba: List<u32>, saved: json.Json,
-    runs: List<List<u32>>, packed: Bool, large: Bool) -> Result<List<u32>, String> {
+    runs: List<List<u32>>, packed: Bool, large: Bool, palette: mask.PaletteRaster) -> Result<List<u32>, String> {
     let limit: u32 = if large { 8192 } else { 512 };
     if width == 0 || height == 0 || width > limit || height > limit || width * height > 16777216 {
         return Err(if large { "Selection exceeds the material canvas budget" }
             else { "Pixel selections need a canvas from 1 to 512 pixels on each axis" });
     }
     let input = Inputs { grid: mask.Grid { width: width, height: height }, nodes: query, rgba: rgba,
-        saved: members(saved), runs: runs, packed: packed };
+        saved: members(saved), runs: runs, packed: packed, palette: palette };
     let run = Run { pending: buffer([node(query.at_or(0, json.null()))]), values: Buffer.empty(), count: 0, issue: "" };
     let result = repeat_until(65, run, fn(run) => run.issue != "" || run.pending.len() == 0,
         fn(i) => fn(run) => step(input, run));

@@ -7,7 +7,8 @@ record Edge { a: Position, b: Position, }
 record Pen { x: f64, y: f64, error: f64, mask: Buffer<u32>, }
 record Stroke { end: Position, dx: f64, dy: f64, sx: f64, sy: f64, }
 record Flood { mask: Buffer<u32>, queue: Buffer<u32>, cursor: u32, }
-record Region { grid: Grid, source: List<u32>, keyed: Bool, target: u32, tolerance: u32, }
+record PaletteRaster { slots: List<i32>, alpha: List<u32>, clipping: List<u32>, ids: List<String>, }
+record Region { grid: Grid, source: List<u32>, keyed: Bool, target: u32, tolerance: u32, swatch: i32, }
 record Search { first: u32, last: u32, }
 record Indices { bits: u32, values: Buffer<u32>, }
 
@@ -163,17 +164,29 @@ fn color_matches(value: u32, seed: u32, tolerance: u32) -> Bool {
         difference(word_and(wrapping_shr(value, 8), 255), word_and(wrapping_shr(seed, 8), 255)) <= tolerance;
 }
 
-fn matches(region: Region, slot: u32) -> Bool {
-    return if region.keyed { color_matches(region.source.at_or(slot, 0), region.target, region.tolerance) }
-        else { selected(region.source, slot) };
+fn no_palette() -> PaletteRaster { return PaletteRaster { slots: [], alpha: [], clipping: [], ids: [] }; }
+
+fn palette_visible(palette: PaletteRaster, index: u32) -> Bool {
+    return palette.alpha.at_or(index, 255) > 0 && palette.clipping.at_or(index, 1) != 0;
 }
 
-fn enqueue(region: Region, old: Flood, slot: u32, valid: Bool) -> Flood {
-    if !valid || word_and(old.mask.at_or(word_slot(slot), 0), word_bit(slot)) != 0 || !matches(region, slot) { return old; }
+fn palette_match(palette: PaletteRaster, index: u32, target: i32) -> Bool {
+    return palette.slots.at_or(index, -1) == target && palette_visible(palette, index);
+}
+
+fn matches(region: Region, palette: PaletteRaster, slot: u32) -> Bool {
+    if region.keyed { return color_matches(region.source.at_or(slot, 0), region.target, region.tolerance); }
+    if region.swatch >= 0 { return palette_match(palette, slot, region.swatch); }
+    return selected(region.source, slot);
+}
+
+fn enqueue(region: Region, palette: PaletteRaster, old: Flood, slot: u32, valid: Bool) -> Flood {
+    if !valid || word_and(old.mask.at_or(word_slot(slot), 0), word_bit(slot)) != 0 ||
+        !matches(region, palette, slot) { return old; }
     return Flood { ..old, mask: mark(old.mask, slot), queue: old.queue.push(slot) };
 }
 
-fn flood_step(region: Region, diagonal: Bool, old: Flood) -> Flood {
+fn flood_step(region: Region, palette: PaletteRaster, diagonal: Bool, old: Flood) -> Flood {
     let p = old.queue.at_or(old.cursor, 0);
     let g = region.grid;
     let x = rem_or(p, g.width, 0);
@@ -182,24 +195,24 @@ fn flood_step(region: Region, diagonal: Bool, old: Flood) -> Flood {
     let right = x + 1 < g.width;
     let top = y > 0;
     let bottom = y + 1 < g.height;
-    let a = enqueue(region, old, p + 1, right);
-    let b = enqueue(region, a, p - 1, left);
-    let c = enqueue(region, b, p + g.width, bottom);
-    let d = enqueue(region, c, p - g.width, top);
+    let a = enqueue(region, palette, old, p + 1, right);
+    let b = enqueue(region, palette, a, p - 1, left);
+    let c = enqueue(region, palette, b, p + g.width, bottom);
+    let d = enqueue(region, palette, c, p - g.width, top);
     let advanced = Flood { ..d, cursor: d.cursor + 1 };
     if !diagonal { return advanced; }
-    let e = enqueue(region, advanced, p + g.width + 1, bottom && right);
-    let f = enqueue(region, e, p + g.width - 1, bottom && left);
-    let h = enqueue(region, f, p - g.width + 1, top && right);
-    return enqueue(region, h, p - g.width - 1, top && left);
+    let e = enqueue(region, palette, advanced, p + g.width + 1, bottom && right);
+    let f = enqueue(region, palette, e, p + g.width - 1, bottom && left);
+    let h = enqueue(region, palette, f, p - g.width + 1, top && right);
+    return enqueue(region, palette, h, p - g.width - 1, top && left);
 }
 
-fn flood(region: Region, seed: u32, diagonal: Bool) -> List<u32> {
+fn flood(region: Region, palette: PaletteRaster, seed: u32, diagonal: Bool) -> List<u32> {
     let mask = blank(region.grid);
-    if !matches(region, seed) { return mask.freeze(); }
+    if !matches(region, palette, seed) { return mask.freeze(); }
     let start = Flood { mask: mark(mask, seed), queue: buffer([seed]), cursor: 0 };
     return repeat_until(size(region.grid), start, fn(old) => old.cursor >= old.queue.len(),
-        fn(i) => fn(old) => flood_step(region, diagonal, old)).mask.freeze();
+        fn(i) => fn(old) => flood_step(region, palette, diagonal, old)).mask.freeze();
 }
 
 fn wand(g: Grid, source: List<u32>, p: Vec2<u32>, tolerance: u32, connected: Bool) -> List<u32> {
@@ -209,11 +222,20 @@ fn wand(g: Grid, source: List<u32>, p: Vec2<u32>, tolerance: u32, connected: Boo
         return repeat_until(size(g), blank(g), fn(old) => false, fn(i) => fn(old) =>
             if color_matches(source.at_or(i, 0), target, tolerance) { mark(old, i) } else { old }).freeze();
     }
-    return flood(Region { grid: g, source: source, keyed: true, target: target, tolerance: tolerance }, seed, false);
+    return flood(Region { grid: g, source: source, keyed: true, target: target, tolerance: tolerance, swatch: -1 },
+        no_palette(), seed, false);
 }
 
 fn cluster(g: Grid, source: List<u32>, p: Vec2<u32>, diagonal: Bool) -> List<u32> {
-    return flood(Region { grid: g, source: source, keyed: false, target: 0, tolerance: 0 }, index(g, p), diagonal);
+    return flood(Region { grid: g, source: source, keyed: false, target: 0, tolerance: 0, swatch: -1 },
+        no_palette(), index(g, p), diagonal);
+}
+
+fn palette_cluster(g: Grid, palette: PaletteRaster, seed: u32, diagonal: Bool) -> List<u32> {
+    let slot = palette.slots.at_or(seed, -1);
+    if slot < 0 { return blank(g).freeze(); }
+    return flood(Region { grid: g, source: [], keyed: false, target: 0, tolerance: 0, swatch: slot },
+        palette, seed, diagonal);
 }
 
 fn distances(g: Grid, mask: List<u32>, inward: Bool) -> List<u32> {

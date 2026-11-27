@@ -14,6 +14,17 @@ pub struct OpenedDocument {
     pub legacy_revision: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+pub struct IndexedSelectionRaster {
+    pub slots: Vec<i32>,
+    #[serde(default)]
+    pub alpha: Vec<u32>,
+    #[serde(default)]
+    pub clipping: Vec<u32>,
+    #[serde(default)]
+    pub ids: Vec<String>,
+}
+
 // Parse with ECMAScript's number rounding, last-value-wins object semantics,
 // and property order so both hosts calculate the same document revision.
 struct OrderedJson(Json);
@@ -247,6 +258,18 @@ pub fn select_pixel_mask(
     saved: &str,
     large: bool,
 ) -> Result<Vec<u32>, String> {
+    select_pixel_mask_with_raster(width, height, query, rgba, saved, large, None)
+}
+
+pub fn select_pixel_mask_with_raster(
+    width: u32,
+    height: u32,
+    query: &str,
+    rgba: Vec<u32>,
+    saved: &str,
+    large: bool,
+    indexed: Option<IndexedSelectionRaster>,
+) -> Result<Vec<u32>, String> {
     let limit = if large { 8192 } else { 512 };
     if width == 0 || height == 0 || width > limit || height > limit || width * height > 16_777_216 {
         return Err(if large {
@@ -289,7 +312,24 @@ pub fn select_pixel_mask(
         .map(|node| compiled_json(node, &build))
         .collect();
     let saved = compiled_json(Json::Object(packed_saved), &build);
-    program.function_l_select_pixel_words(nodes, width, height, rgba, saved, runs, large)
+    match indexed {
+        Some(indexed) => program.function_l_select_pixel_words_from_raster(
+            nodes,
+            width,
+            height,
+            rgba,
+            saved,
+            runs,
+            large,
+            indexed.slots,
+            indexed.alpha,
+            indexed.clipping,
+            indexed.ids,
+        ),
+        None => {
+            program.function_l_select_pixel_words(nodes, width, height, rgba, saved, runs, large)
+        }
+    }
 }
 
 pub fn open_pixel_document(source: &str) -> Result<OpenedDocument, String> {

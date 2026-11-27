@@ -1,4 +1,6 @@
-use ink_studio_pixel::{mask_pixels, open_pixel_document, select_pixel_mask};
+use ink_studio_pixel::{
+    IndexedSelectionRaster, mask_pixels, open_pixel_document, select_pixel_mask_with_raster,
+};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
@@ -13,19 +15,21 @@ struct SelectionRequest<'a> {
     saved: Option<&'a RawValue>,
     #[serde(default)]
     large: bool,
+    indexed: Option<IndexedSelectionRaster>,
 }
 
 fn select(path: std::ffi::OsString, packed: bool) -> Result<(), String> {
     let source = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     let request: SelectionRequest =
         serde_json::from_str(&source).map_err(|error| error.to_string())?;
-    let words = select_pixel_mask(
+    let words = select_pixel_mask_with_raster(
         request.width,
         request.height,
         request.query.get(),
         request.rgba,
         request.saved.map_or("{}", RawValue::get),
         request.large,
+        request.indexed,
     )?;
     let result = if packed {
         serde_json::to_string(&words)

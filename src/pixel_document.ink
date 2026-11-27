@@ -3,6 +3,7 @@ module StudioPixelDocument;
 import "std:json" as json;
 import "pixel_selection.ink" as selection;
 import "pixel_mask.ink" as mask;
+import "pixel_labels.ink" as labels;
 
 record Layer { id: String, kind: String, parent: String, }
 record Cel { id: String, hold: String, }
@@ -11,17 +12,23 @@ record Identifier { name: String, slot: u32, }
 record NameIndex { buckets: Map<u64, List<Identifier>>, duplicate: String, }
 record Visits { seen: Map<u32, u32>, issue: String, }
 record HoldWalk { visits: Visits, path: Buffer<u32>, current: u32, }
-record LabelScan { offset: u32, visible: Bool, }
 record Opened { document: json.Json, legacy: Bool, }
 
 pub fn select_pixel_indices(query: List<json.Json>, width: u32, height: u32, rgba: List<u32>, saved: json.Json) -> Result<List<u32>, String> {
-    let selected = selection.select(width, height, query, rgba, saved, [], false, false)?;
+    let selected = selection.select(width, height, query, rgba, saved, [], false, false, mask.no_palette())?;
     return Ok(mask.indices(selected));
 }
 
 pub fn select_pixel_words(query: List<json.Json>, width: u32, height: u32, rgba: List<u32>, saved: json.Json,
     literal_runs: List<List<u32>>, large: Bool) -> Result<List<u32>, String> {
-    return selection.select(width, height, query, rgba, saved, literal_runs, true, large);
+    return selection.select(width, height, query, rgba, saved, literal_runs, true, large, mask.no_palette());
+}
+
+pub fn select_pixel_words_from_raster(query: List<json.Json>, width: u32, height: u32, rgba: List<u32>,
+    saved: json.Json, literal_runs: List<List<u32>>, large: Bool, slots: List<i32>, alpha: List<u32>,
+    clipping: List<u32>, ids: List<String>) -> Result<List<u32>, String> {
+    let palette = mask.PaletteRaster { slots: slots, alpha: alpha, clipping: clipping, ids: ids };
+    return selection.select(width, height, query, rgba, saved, literal_runs, true, large, palette);
 }
 
 // Assemble the standard JSON value from already parsed native components.
@@ -101,30 +108,8 @@ fn cel_id(value: String) -> Bool {
         fn(unit) => stable_id(value));
 }
 
-fn spaces(value: String, i: u32) -> u32 {
-    let a = byte(value, i);
-    if a == 32 || (a >= 9 && a <= 13) { return 1; }
-    let b = byte(value, i + 1);
-    if a == 194 && b == 160 { return 2; }
-    let c = byte(value, i + 2);
-    if (a == 225 && b == 154 && c == 128) || (a == 227 && b == 128 && c == 128) ||
-        (a == 239 && b == 187 && c == 191) || (a == 226 &&
-            ((b == 128 && ((c >= 128 && c <= 138) || c == 168 || c == 169 || c == 175)) || (b == 129 && c == 159))) {
-        return 3;
-    }
-    return 0;
-}
-
-fn label_step(value: String, old: LabelScan) -> LabelScan {
-    let span = spaces(value, old.offset);
-    return LabelScan { offset: old.offset + span, visible: span == 0 };
-}
-
 fn label(value: json.Json) -> Bool {
-    let s = text(value);
-    let size = string_byte_len(s);
-    return repeat_until(size, LabelScan { offset: 0, visible: false },
-        fn(old) => old.visible || old.offset >= size, fn(i) => fn(old) => label_step(s, old)).visible;
+    return labels.present(text(value));
 }
 
 fn optional_label(items: List<json.Member>) -> Bool {

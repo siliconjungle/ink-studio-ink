@@ -34,7 +34,7 @@ function coordinateRuns(width, height, points, limit) {
   return result;
 }
 
-export function selectPixelMask(width, height, query, { rgba = [], saved = {}, large = false } = {}) {
+export function selectPixelMask(width, height, query, { rgba = [], saved = {}, large = false, indexed } = {}) {
   const limit = large ? 8192 : 512;
   if (![width, height].every(n => Number.isInteger(n) && n >= 1 && n <= limit) || width * height > 16777216) {
     throw new RangeError(large ? 'Selection exceeds the material canvas budget' :
@@ -79,17 +79,34 @@ export function selectPixelMask(width, height, query, { rgba = [], saved = {}, l
   const encoded = nodes.map(value => codec.fromJS(value));
   const colors = usesColor && rgba != null && rgba.length === width * height
     ? rgba instanceof Uint32Array ? rgba : checkedColors(rgba) : [];
-  const selected = call('select_pixel_words', [encoded, width, height, colors, codec.fromJS(Object.fromEntries(recalled)), runs, large]);
+  const args = [encoded, width, height, colors, codec.fromJS(Object.fromEntries(recalled)), runs, large];
+  if (indexed != null) {
+    const { slots, alpha = [], clipping = [], ids = [] } = indexed;
+    const signed = slots instanceof Int16Array || slots instanceof Int32Array
+      ? slots : checkedWords(slots, -0x80000000, 0x7fffffff);
+    const plane = values => values instanceof Uint8Array || values instanceof Uint32Array
+      ? values : checkedWords(values, 0, 0xffffffff);
+    if (signed == null || plane(alpha) == null || plane(clipping) == null ||
+        !Array.isArray(ids) || ids.some(id => typeof id !== 'string')) {
+      throw new TypeError('An indexed selection raster needs integer slots, alpha and clipping planes and string IDs');
+    }
+    args.push(signed, alpha, clipping, ids);
+  }
+  const selected = call(indexed == null ? 'select_pixel_words' : 'select_pixel_words_from_raster', args);
   if (Object.hasOwn(selected, 'Err')) throw new Error(selected.Err);
   return Uint32Array.from(selected.Ok);
 }
 
 function checkedColors(rgba) {
-  if (!Array.isArray(rgba)) return [];
-  for (const word of rgba) {
-    if (!Number.isInteger(word) || word < 0 || word > 0xffffffff) return [];
+  return checkedWords(rgba, 0, 0xffffffff) ?? [];
+}
+
+function checkedWords(values, min, max) {
+  if (!Array.isArray(values)) return null;
+  for (const word of values) {
+    if (!Number.isInteger(word) || word < min || word > max) return null;
   }
-  return rgba;
+  return values;
 }
 
 export function selectPixels(width, height, query, options) {
