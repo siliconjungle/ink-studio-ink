@@ -1,4 +1,4 @@
-use ink_studio_pixel::PixelEditor;
+use ink_studio_pixel::{PasteOptions, PasteTransform, PixelEditor};
 
 fn document(x: u32, width: u32) -> serde_json::Value {
     serde_json::json!({
@@ -249,5 +249,82 @@ fn named_masks_update_in_place_and_drive_exact_color_edits() {
     assert_eq!(
         pick(&mut PixelEditor::new(&saved).unwrap()),
         [[2, 1], [3, 1]]
+    );
+}
+
+#[test]
+fn selection_transform_carries_protection_and_paste_preserves_knockout_after_reload() {
+    let mut input = document(1, 7);
+    input["selections"][0]["pixels"] = serde_json::json!([[1, 1], [2, 1], [3, 1]]);
+    input["frames"][0]["cels"]["ink"]["marks"]
+        .as_array_mut()
+        .unwrap()
+        .extend([
+            serde_json::json!({"swatch": null, "at": [2, 1]}),
+            serde_json::json!({"alpha": 42, "runs": [[1, 1, 1]]}),
+        ]);
+    input["protectedDetails"] = serde_json::json!([
+        {"id": "paint", "kind": "accent", "frame": "front", "pixels": [[1, 1]]}
+    ]);
+    let mut editor = PixelEditor::new(&input.to_string()).unwrap();
+    let copy = r#"{"layer":"ink","selection":"landed"}"#;
+    let operation = r#"{"tool":"transform","layer":"ink","selection":"pin","carryProtection":true,
+        "transform":{"at":[3,1]},"resultSelection":"landed"}"#;
+    let report = editor.paint(operation, Some("front"), None).unwrap();
+    let placement = report.transform.unwrap();
+    assert_eq!(placement.bounds, [3, 1, 3, 1]);
+    assert_eq!(placement.selection_runs.unwrap(), [[1, 3, 3]]);
+    assert_eq!(placement.carried_protection[0].pixels, [[3, 1]]);
+
+    let copied = editor.copy_selection(copy).unwrap();
+    assert_eq!(copied.slots, [Some(0), Some(-2), Some(-1)]);
+    assert_eq!(copied.alpha, [42, 255, 255]);
+    let saved = editor.snapshot().unwrap();
+    let mut reloaded = PixelEditor::new(&saved).unwrap();
+    assert_eq!(
+        serde_json::to_value(&copied).unwrap(),
+        serde_json::to_value(reloaded.copy_selection(copy).unwrap()).unwrap()
+    );
+    let wrong = r#"{"tool":"rgba","layer":"ink","pixels":[{"at":[3,1],"rgba":null}]}"#;
+    assert_eq!(
+        editor.paint(wrong, None, None).unwrap_err(),
+        "RGBA edit cannot change this pixel"
+    );
+    assert_eq!(editor.snapshot().unwrap(), saved);
+
+    let paste = serde_json::json!({"tool": "paste", "layer": "ink", "clipboard": &copied,
+        "transform": {"at": [1, 0], "flipX": true}, "resultSelection": "pasted"})
+    .to_string();
+    let json_report = reloaded.paint(&paste, None, None).unwrap();
+    let report = editor
+        .paste_clipboard(
+            copied,
+            PasteOptions {
+                layer: Some("ink"),
+                result_selection: Some("pasted"),
+                transform: PasteTransform {
+                    at: Some([1, 0]),
+                    flip_x: Some(true),
+                    ..PasteTransform::default()
+                },
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(report, json_report);
+    assert_eq!(editor.snapshot().unwrap(), reloaded.snapshot().unwrap());
+    assert_eq!(report.runs, [[0, 2, 2]]);
+    assert_eq!(
+        editor
+            .copy_selection(r#"{"selection":"pasted","layer":"ink"}"#)
+            .unwrap()
+            .slots,
+        [Some(-1), Some(-2), Some(0)]
+    );
+    let saved: serde_json::Value = serde_json::from_str(&editor.snapshot().unwrap()).unwrap();
+    assert_eq!(
+        saved["protectedDetails"][0]["pixels"],
+        serde_json::json!([[3, 1]])
     );
 }

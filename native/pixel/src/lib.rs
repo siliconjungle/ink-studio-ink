@@ -212,6 +212,35 @@ fn pack_brush_slots(operation: &mut Json) -> Vec<i32> {
         .collect()
 }
 
+fn clipboard_slot(slot: i32) -> i32 {
+    if (-2..255).contains(&slot) { slot } else { -4 }
+}
+
+fn pack_clipboard(operation: &mut Json) -> (Vec<i32>, Vec<u32>) {
+    let Some(clipboard) = member_mut(operation, "clipboard") else {
+        return (Vec::new(), Vec::new());
+    };
+    let slots = take_array(clipboard, "slots")
+        .filter(|rows| rows.len() <= 512 * 512)
+        .map_or_else(Vec::new, |rows| {
+            rows.into_iter()
+                .map(|row| match row {
+                    Json::Null => -3,
+                    Json::Number(token) => token.parse::<i32>().map_or(-4, clipboard_slot),
+                    _ => -4,
+                })
+                .collect()
+        });
+    let alpha = take_array(clipboard, "alpha")
+        .filter(|rows| rows.len() <= 512 * 512)
+        .map_or_else(Vec::new, |rows| {
+            rows.iter()
+                .map(|value| coordinate(value, 256).unwrap_or(u32::MAX))
+                .collect()
+        });
+    (slots, alpha)
+}
+
 fn rgba_row(row: Json, canvas: [u32; 2], names: &mut IndexMap<String, u32>) -> [u32; 3] {
     let invalid = [u32::MAX, 0, u32::MAX];
     let Json::Object(fields) = row else {
@@ -351,11 +380,18 @@ fn snapshot_cel_marks<'a>(
     Some(marks)
 }
 
-fn snapshot_mark(swatch: Option<String>, alpha: Option<u32>, runs: Vec<[u32; 3]>) -> Json {
+fn snapshot_mark(
+    swatch: Option<String>,
+    knockout: bool,
+    alpha: Option<u32>,
+    runs: Vec<[u32; 3]>,
+) -> Json {
     let pigment = if let Some(alpha) = alpha {
         ("alpha", Json::Number(alpha.to_string()))
     } else if let Some(swatch) = swatch {
         ("swatch", Json::Text(swatch))
+    } else if knockout {
+        ("swatch", Json::Null)
     } else {
         ("clear", Json::Boolean(true))
     };
@@ -727,6 +763,31 @@ pub struct RasterPaintReport {
     pub selection: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drawing: Option<serde_json::Value>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<SelectionTransformReport>,
+}
+
+#[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionTransformReport {
+    pub bounds: [i32; 4],
+    pub clipped_pixels: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_selection: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection_runs: Option<Vec<[u32; 3]>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub carried_protection: Vec<CarriedProtection>,
+}
+
+#[derive(Debug, PartialEq, serde::Serialize)]
+pub struct CarriedProtection {
+    pub id: String,
+    pub kind: String,
+    pub frame: String,
+    pub pixels: Vec<[u32; 2]>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -762,6 +823,128 @@ pub struct CapturedBrushSwatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub color: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct CopiedSelection {
+    pub format: &'static str,
+    pub version: u32,
+    pub width: u32,
+    pub height: u32,
+    pub origin: [u32; 2],
+    pub palette: Vec<CapturedBrushSwatch>,
+    pub slots: Vec<Option<i32>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub alpha: Vec<u32>,
+}
+
+#[derive(Debug, Default)]
+pub struct PasteOptions<'a> {
+    pub layer: Option<&'a str>,
+    pub result_selection: Option<&'a str>,
+    pub transform: PasteTransform<'a>,
+}
+
+#[derive(Debug, Default)]
+pub struct PasteTransform<'a> {
+    pub at: Option<[i32; 2]>,
+    pub offset: Option<[i32; 2]>,
+    pub size: Option<[u32; 2]>,
+    pub angle: Option<f64>,
+    pub flip_x: Option<bool>,
+    pub flip_y: Option<bool>,
+    pub rotation: Option<&'a str>,
+}
+
+impl PasteTransform<'_> {
+    fn into_metadata(self) -> Json {
+        let mut fields = Vec::new();
+        let signed_pair = |pair: [i32; 2]| {
+            Json::Array(
+                pair.into_iter()
+                    .map(|n| Json::Number(n.to_string()))
+                    .collect(),
+            )
+        };
+        if let Some(at) = self.at {
+            fields.push(("at".into(), signed_pair(at)));
+        }
+        if let Some(offset) = self.offset {
+            fields.push(("offset".into(), signed_pair(offset)));
+        }
+        if let Some(size) = self.size {
+            fields.push((
+                "size".into(),
+                Json::Array(
+                    size.into_iter()
+                        .map(|n| Json::Number(n.to_string()))
+                        .collect(),
+                ),
+            ));
+        }
+        if let Some(angle) = self.angle {
+            let angle = if angle.is_finite() {
+                Json::Number(ryu_js::Buffer::new().format_finite(angle).into())
+            } else {
+                Json::Null
+            };
+            fields.push(("angle".into(), angle));
+        }
+        if let Some(flip_x) = self.flip_x {
+            fields.push(("flipX".into(), Json::Boolean(flip_x)));
+        }
+        if let Some(flip_y) = self.flip_y {
+            fields.push(("flipY".into(), Json::Boolean(flip_y)));
+        }
+        if let Some(rotation) = self.rotation {
+            fields.push(("rotation".into(), Json::Text(rotation.into())));
+        }
+        Json::Object(fields)
+    }
+}
+
+#[derive(Default)]
+struct PaintInputs {
+    slots: Vec<i32>,
+    alpha: Vec<u32>,
+    pixels: Vec<u32>,
+    names: Vec<String>,
+}
+
+fn clipboard_metadata(clipboard: &CopiedSelection) -> Json {
+    let palette = clipboard.palette.iter().map(|swatch| {
+        let mut fields = Vec::with_capacity(2);
+        if let Some(id) = &swatch.id {
+            fields.push(("id".into(), Json::Text(id.clone())));
+        }
+        fields.push(("color".into(), Json::Text(swatch.color.clone())));
+        Json::Object(fields)
+    });
+    let mut fields = vec![
+        ("format".into(), Json::Text(clipboard.format.into())),
+        (
+            "version".into(),
+            Json::Number(clipboard.version.to_string()),
+        ),
+        ("width".into(), Json::Number(clipboard.width.to_string())),
+        ("height".into(), Json::Number(clipboard.height.to_string())),
+        (
+            "origin".into(),
+            Json::Array(
+                clipboard
+                    .origin
+                    .iter()
+                    .map(|n| Json::Number(n.to_string()))
+                    .collect(),
+            ),
+        ),
+        ("palette".into(), Json::Array(palette.collect())),
+        ("slots".into(), Json::Array(Vec::new())),
+    ];
+    if !clipboard.alpha.is_empty() {
+        fields.push(("alpha".into(), Json::Array(Vec::new())));
+    }
+    Json::Object(fields)
 }
 
 pub struct PixelEditor {
@@ -804,32 +987,82 @@ impl PixelEditor {
     ) -> Result<RasterPaintReport, String> {
         let OrderedJson(mut operation) =
             serde_json::from_str(operation).map_err(|error| error.to_string())?;
-        let drawing = match &operation {
-            Json::Object(items) => items
-                .iter()
-                .find(|(key, _)| key == "drawing")
-                .map(|(_, value)| value),
-            _ => None,
+        let (slots, alpha) = if matches!(member_mut(&mut operation, "tool"), Some(Json::Text(tool)) if tool == "paste")
+        {
+            pack_clipboard(&mut operation)
+        } else {
+            (pack_brush_slots(&mut operation), Vec::new())
+        };
+        let (pixels, names) = pack_rgba(&mut operation, self.grid);
+        self.paint_inputs(
+            operation,
+            PaintInputs {
+                slots,
+                alpha,
+                pixels,
+                names,
+            },
+            frame,
+            cel,
+        )
+    }
+
+    /// Paste a typed clipboard, including its index and opacity planes.
+    pub fn paste_clipboard(
+        &mut self,
+        clipboard: CopiedSelection,
+        options: PasteOptions<'_>,
+        frame: Option<&str>,
+        cel: Option<&str>,
+    ) -> Result<RasterPaintReport, String> {
+        let mut fields = vec![
+            ("tool".into(), Json::Text("paste".into())),
+            ("clipboard".into(), clipboard_metadata(&clipboard)),
+            ("transform".into(), options.transform.into_metadata()),
+        ];
+        if let Some(layer) = options.layer {
+            fields.push(("layer".into(), Json::Text(layer.into())));
         }
-        .map(|value| {
-            serde_json::from_str(&value.stringify(Limits::default())?)
-                .map_err(|err| err.to_string())
-        })
-        .transpose()?;
-        let build = |kind, scalar, flag, values, keys| {
+        if let Some(selection) = options.result_selection {
+            fields.push(("resultSelection".into(), Json::Text(selection.into())));
+        }
+        let inputs = PaintInputs {
+            slots: clipboard
+                .slots
+                .into_iter()
+                .map(|slot| slot.map_or(-3, clipboard_slot))
+                .collect(),
+            alpha: clipboard.alpha,
+            ..PaintInputs::default()
+        };
+        self.paint_inputs(Json::Object(fields), inputs, frame, cel)
+    }
+
+    fn paint_inputs(
+        &mut self,
+        mut operation: Json,
+        input: PaintInputs,
+        frame: Option<&str>,
+        cel: Option<&str>,
+    ) -> Result<RasterPaintReport, String> {
+        let drawing = member_mut(&mut operation, "drawing")
+            .map(|value| {
+                serde_json::from_str(&value.stringify(Limits::default())?)
+                    .map_err(|err| err.to_string())
+            })
+            .transpose()?;
+        let operation = compiled_json(operation, &|kind, scalar, flag, values, keys| {
             self.program
                 .function_l_pixel_json_value(kind, scalar, flag, values, keys)
-        };
-        let slots = pack_brush_slots(&mut operation);
-        let (pixels, names) = pack_rgba(&mut operation, self.grid);
-        let operation = compiled_json(operation, &build);
+        });
         let report = self
             .program
             .invoke_view_l_paint_pixel_editor(
                 operation,
-                slots,
-                pixels,
-                names,
+                input.slots,
+                input.alpha,
+                input.pixels,
+                input.names,
                 frame.map(str::to_owned),
                 cel.map(str::to_owned),
             )?
@@ -852,6 +1085,26 @@ impl PixelEditor {
             to: report.l_to,
             selection: report.l_selection,
             drawing,
+            transform: report.l_transform.map(|value| SelectionTransformReport {
+                bounds: value.l_bounds,
+                clipped_pixels: value.l_clippedPixels,
+                mode: value.l_mode,
+                selection_runs: value
+                    .l_resultSelection
+                    .as_ref()
+                    .map(|_| value.l_selectionRuns),
+                result_selection: value.l_resultSelection,
+                carried_protection: value
+                    .l_carriedProtection
+                    .into_iter()
+                    .map(|row| CarriedProtection {
+                        id: row.l_id,
+                        kind: row.l_kind,
+                        frame: row.l_frame,
+                        pixels: row.l_pixels,
+                    })
+                    .collect(),
+            }),
         })
     }
 
@@ -936,6 +1189,40 @@ impl PixelEditor {
         })
     }
 
+    pub fn copy_selection(&mut self, options: &str) -> Result<CopiedSelection, String> {
+        let OrderedJson(input) =
+            serde_json::from_str(options).map_err(|error| error.to_string())?;
+        let encoded = compiled_json(input, &|kind, scalar, flag, values, keys| {
+            self.program
+                .function_l_pixel_json_value(kind, scalar, flag, values, keys)
+        });
+        let result = self
+            .program
+            .invoke_view_l_copy_pixel_editor_selection(encoded)?
+            .result?;
+        Ok(CopiedSelection {
+            format: "ink-studio/pixel-clipboard",
+            version: 2,
+            width: result.l_width,
+            height: result.l_height,
+            origin: result.l_origin,
+            palette: result
+                .l_palette
+                .into_iter()
+                .map(|row| CapturedBrushSwatch {
+                    id: (!row.l_id.is_empty()).then_some(row.l_id),
+                    color: row.l_color,
+                })
+                .collect(),
+            slots: result
+                .l_slots
+                .into_iter()
+                .map(|slot| (slot != -3).then_some(slot))
+                .collect(),
+            alpha: result.l_alpha,
+        })
+    }
+
     pub fn snapshot(&mut self) -> Result<String, String> {
         let snapshot = self.program.invoke_view_l_snapshot_pixel_editor()?.result;
         let limits = Limits::default();
@@ -943,11 +1230,9 @@ impl PixelEditor {
         for edit in snapshot.l_edits {
             let marks = snapshot_cel_marks(&mut document, &edit.l_frame, &edit.l_layer)
                 .ok_or("Missing retained raster cel in the snapshot")?;
-            marks.extend(
-                edit.l_marks
-                    .into_iter()
-                    .map(|mark| snapshot_mark(mark.l_swatch, mark.l_alpha, mark.l_runs)),
-            );
+            marks.extend(edit.l_marks.into_iter().map(|mark| {
+                snapshot_mark(mark.l_swatch, mark.l_knockout, mark.l_alpha, mark.l_runs)
+            }));
         }
         snapshot_json(&document, self.grid[0], &snapshot.l_positions, limits)
     }

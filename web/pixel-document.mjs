@@ -41,6 +41,7 @@ export function createPixelEditor(source) {
   const draw = state.bind('paint_pixel_editor', { resultOnly: true });
   const read = state.bind('snapshot_pixel_editor', { resultOnly: true });
   const capture = state.bind('capture_pixel_editor_brush', { resultOnly: true });
+  const copy = state.bind('copy_pixel_editor_selection', { resultOnly: true });
   const save = state.bind('save_pixel_editor_selection', { resultOnly: true });
   let grid;
   function replaceDocument(source) {
@@ -55,10 +56,11 @@ export function createPixelEditor(source) {
       pixels: maskPixels(chosen.grid.width, chosen.words) };
   }
   function paint(operation, { frame, cel } = {}) {
-    const brush = packBrushSlots(operation);
-    const { metadata, rows, names } = packRgba(brush.metadata, grid);
-    const result = unwrap(draw(codec.fromJS(metadata), brush.slots, rows, names, option(frame), option(cel)));
-    const { pixelPerfect, selection, shape, shading, ramp, addedSwatches, from, to, ...target } = result;
+    const packed = ownData(operation, 'tool') === 'paste' ? packClipboard(operation) : packBrushSlots(operation);
+    const { metadata, rows, names } = packRgba(packed.metadata, grid);
+    const result = unwrap(draw(codec.fromJS(metadata), packed.slots, packed.alpha ?? [], rows, names, option(frame), option(cel)));
+    const { pixelPerfect, selection, shape, shading, ramp, addedSwatches, from, to, transform, ...target } = result;
+    const placement = transform.Some;
     const drawing = ownData(operation, 'drawing');
     return { destination: 'raster', kind: 'raster', ...target,
       ...(pixelPerfect && { pixelPerfect }), ...(Object.hasOwn(shape, 'Some') && { shape: shape.Some }),
@@ -68,7 +70,15 @@ export function createPixelEditor(source) {
       ...(Object.hasOwn(from, 'Some') && { from: from.Some }),
       ...(Object.hasOwn(to, 'Some') && { to: to.Some }),
       ...(Object.hasOwn(selection, 'Some') && { selection: selection.Some }),
-      ...(drawing !== undefined && { drawing: structuredClone(drawing) }) };
+      ...(drawing !== undefined && { drawing: structuredClone(drawing) }),
+      ...(placement && {
+        bounds: placement.bounds, clippedPixels: placement.clippedPixels,
+        ...(Object.hasOwn(placement.mode, 'Some') && { mode: placement.mode.Some }),
+        ...(Object.hasOwn(placement.resultSelection, 'Some') && {
+          resultSelection: placement.resultSelection.Some, selectionRuns: placement.selectionRuns,
+        }),
+        ...(placement.carriedProtection.length && { carriedProtection: placement.carriedProtection }),
+      }) };
   }
   function saveSelection(operation, { frame } = {}) {
     const query = ownData(operation, 'query');
@@ -92,6 +102,12 @@ export function createPixelEditor(source) {
       palette: palette.map(({ id, color }) => ({ ...(id && { id }), color })),
       slots: slots.map(slot => slot < 0 ? null : slot), settings: codec.toJS(settings) };
   }
+  function copySelection(options = {}) {
+    const { width, height, origin, palette, slots, alpha } = unwrap(copy(codec.fromJS(options)));
+    return { format: 'ink-studio/pixel-clipboard', version: 2, width, height, origin,
+      palette: palette.map(({ id, color }) => ({ ...(id && { id }), color })),
+      slots: slots.map(slot => slot === -3 ? null : slot), ...(alpha.length && { alpha }) };
+  }
   function snapshot() {
     const saved = read();
     const document = codec.toJS(saved.document);
@@ -103,8 +119,9 @@ export function createPixelEditor(source) {
       const frames = new Map(document.frames.map(frame => [frame.id, frame]));
       for (const edit of saved.edits) {
         const cel = frames.get(edit.frame).cels[edit.layer];
-        for (const { swatch, alpha, runs } of edit.marks) {
+        for (const { swatch, knockout, alpha, runs } of edit.marks) {
           cel.marks.push(Object.hasOwn(alpha, 'Some') ? { alpha: alpha.Some, runs }
+            : knockout ? { swatch: null, runs }
             : Object.hasOwn(swatch, 'Some') ? { swatch: swatch.Some, runs } : { clear: true, runs });
         }
       }
@@ -112,7 +129,7 @@ export function createPixelEditor(source) {
     return document;
   }
   replaceDocument(source);
-  return Object.freeze({ replaceDocument, select, saveSelection, paint, captureBrush, snapshot });
+  return Object.freeze({ replaceDocument, select, saveSelection, paint, captureBrush, copySelection, snapshot });
 }
 
 function ownData(value, key) {
@@ -168,6 +185,33 @@ function packBrushSlots(operation) {
   }) : [];
   const metadata = replacingDataField(operation, 'brush', replacingDataField(brush, 'slots', []));
   return { metadata, slots };
+}
+
+function packClipboard(operation) {
+  const source = ownData(operation, 'clipboard');
+  const slotValues = ownData(source, 'slots'), alphaValues = ownData(source, 'alpha');
+  let clipboard = source, slots = [], alpha = [];
+  if (Array.isArray(slotValues)) {
+    clipboard = replacingDataField(clipboard, 'slots', []);
+    if (slotValues.length <= 512 * 512) {
+      slots = Int32Array.from({ length: slotValues.length }, (_, i) => {
+        const slot = ownData(slotValues, i);
+        if (slot === null) return -3;
+        return Number.isInteger(slot) && slot >= -2 && slot < 255 ? slot : -4;
+      });
+    }
+  }
+  if (Array.isArray(alphaValues)) {
+    clipboard = replacingDataField(clipboard, 'alpha', []);
+    if (alphaValues.length <= 512 * 512) {
+      alpha = Uint32Array.from({ length: alphaValues.length }, (_, i) => {
+        const byte = ownData(alphaValues, i);
+        return Number.isInteger(byte) && byte >= 0 && byte <= 255 ? byte : 0xffffffff;
+      });
+    }
+  }
+  const metadata = clipboard === source ? operation : replacingDataField(operation, 'clipboard', clipboard);
+  return { metadata, slots, alpha };
 }
 
 // Each row crosses as position, packed RGBA, and a swatch-name index.

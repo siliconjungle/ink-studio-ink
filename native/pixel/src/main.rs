@@ -93,20 +93,25 @@ fn paint(path: std::ffi::OsString, selection: bool) -> Result<(), String> {
 }
 
 #[derive(Deserialize)]
-struct BrushCaptureRequest<'a> {
+struct CaptureRequest<'a> {
     #[serde(borrow)]
     document: &'a RawValue,
     #[serde(borrow)]
     options: Option<&'a RawValue>,
 }
 
-fn capture_brush(path: std::ffi::OsString) -> Result<(), String> {
+fn capture(path: std::ffi::OsString, selection: bool) -> Result<(), String> {
     let source = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let request: BrushCaptureRequest =
+    let request: CaptureRequest =
         serde_json::from_str(&source).map_err(|error| error.to_string())?;
     let mut editor = PixelEditor::new(request.document.get())?;
-    let brush = editor.capture_brush(request.options.map_or("{}", RawValue::get))?;
-    let output = serde_json::to_string(&brush).map_err(|error| error.to_string())?;
+    let options = request.options.map_or("{}", RawValue::get);
+    let output = if selection {
+        serde_json::to_string(&editor.copy_selection(options)?)
+    } else {
+        serde_json::to_string(&editor.capture_brush(options)?)
+    }
+    .map_err(|error| error.to_string())?;
     println!("{output}");
     Ok(())
 }
@@ -135,7 +140,7 @@ fn select(path: std::ffi::OsString, packed: bool) -> Result<(), String> {
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel select|select-mask|raster|select-document|paint-document|save-selection-document|capture-brush-document REQUEST";
+    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel select|select-mask|raster|select-document|paint-document|save-selection-document|capture-brush-document|copy-selection-document REQUEST";
     let path = args.next().ok_or(usage)?;
     if let Some(request) = args.next() {
         if args.next().is_some() {
@@ -150,8 +155,8 @@ fn run() -> Result<(), String> {
         if path == "paint-document" || path == "save-selection-document" {
             return paint(request, path == "save-selection-document");
         }
-        if path == "capture-brush-document" {
-            return capture_brush(request);
+        if path == "capture-brush-document" || path == "copy-selection-document" {
+            return capture(request, path == "copy-selection-document");
         }
         return Err(usage.into());
     }

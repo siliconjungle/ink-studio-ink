@@ -7,6 +7,7 @@ import "pixel_labels.ink" as labels;
 import "pixel_frame.ink" as frame_raster;
 import "pixel_paint.ink" as paint;
 import "pixel_brush_capture.ink" as brushes;
+import "pixel_transform.ink" as transforms;
 
 record Layer { id: String, kind: String, parent: String, }
 record Cel { id: String, hold: String, }
@@ -577,16 +578,28 @@ query snapshot_pixel_editor() -> EditorSnapshot reads(EditorSource, EditorArtwor
     return EditorSnapshot { document: snapshot.source, positions: EditorPositions, edits: snapshot.edits };
 }
 
-change paint_pixel_editor(operation: json.Json, slots: List<i32>, pixels: List<u32>, names: List<String>, frame: Option<String>, cel: Option<String>) -> Result<paint.Report, String>
-    reads(EditorSource, EditorArtwork, EditorNamed, EditorScope)
-    writes(EditorSource, EditorArtwork, EditorScope, EditorImage) {
+change paint_pixel_editor(operation: json.Json, slots: List<i32>, alpha: List<u32>, pixels: List<u32>, names: List<String>, frame: Option<String>, cel: Option<String>) -> Result<paint.Report, String>
+    reads(EditorSource, EditorArtwork, EditorNamed, EditorScope, EditorPositions)
+    writes(EditorSource, EditorArtwork, EditorScope, EditorImage, EditorNamed, EditorPositions) {
     let rgba = paint.RgbaInput { pixels: pixels, names: names };
-    let edit = paint.paint(EditorSource, EditorArtwork, EditorNamed, operation, slots, rgba, frame, cel, EditorScope)?;
+    let clipboard = transforms.PackedClip { slots: slots, alpha: alpha };
+    let edit = paint.paint(EditorSource, EditorArtwork, EditorNamed, operation, clipboard, rgba, frame, cel, EditorScope)?;
+    let grid = frame_raster.artwork_grid(EditorArtwork);
     if edit.report.pixelCount != 0 {
-        if edit.document != json.null() { EditorSource = edit.document; }
         EditorArtwork = edit.artwork;
         EditorScope = edit.scope;
         EditorImage = edit.image;
+    }
+    let mask_id = edit.result_mask.fold(fn(row) => row.id, fn(unit) => "");
+    if edit.document != json.null() { EditorSource = edit.document; }
+    if mask_id != "" {
+        let words: List<u32> = edit.result_mask.fold(fn(row) => row.words, fn(unit) => []);
+        let scope = frame_raster.Scope { frame: edit.report.frame, layer: edit.report.layer };
+        let saved = persist_selection(EditorSource, EditorNamed, EditorPositions, grid, scope,
+            EditorSelection { frame: scope.frame, grid: grid, words: words }, mask_id, edit.report.tool);
+        EditorSource = saved.source;
+        EditorNamed = saved.named;
+        EditorPositions = saved.positions;
     }
     return Ok(edit.report);
 }
@@ -605,6 +618,10 @@ change select_pixel_editor(query: List<json.Json>, saved: json.Json, runs: List<
 
 query capture_pixel_editor_brush(options: json.Json, pixels: List<u32>) -> Result<brushes.Capture, String> reads(EditorArtwork, EditorNamed) {
     return brushes.capture(EditorArtwork, EditorNamed, options, pixels);
+}
+
+query copy_pixel_editor_selection(options: json.Json) -> Result<transforms.Copy, String> reads(EditorArtwork, EditorNamed, EditorSource) {
+    return transforms.copy(EditorArtwork, EditorNamed, EditorSource, options);
 }
 
 record SavedSelectionReport { frame: String, selection: String, tool: String, pixelCount: u32, runs: List<Vec3<u32>>, }
