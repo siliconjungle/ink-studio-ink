@@ -1095,6 +1095,32 @@ pub struct RasterPaintReport {
     pub drawing: Option<serde_json::Value>,
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub transform: Option<SelectionTransformReport>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<RasterCleanupReport>,
+}
+
+#[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RasterCleanupReport {
+    pub cleanup: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    pub max_changes: u32,
+    pub changes: Vec<RasterCleanupChange>,
+}
+
+#[derive(Debug, PartialEq, serde::Serialize)]
+pub struct RasterCleanupChange {
+    pub at: [u32; 2],
+    pub before: RasterCleanupPixel,
+    pub after: RasterCleanupPixel,
+}
+
+#[derive(Debug, PartialEq, serde::Serialize)]
+pub struct RasterCleanupPixel {
+    pub state: String,
+    pub swatch: Option<String>,
+    pub rgba: Option<[u32; 4]>,
 }
 
 #[derive(Debug, PartialEq, serde::Serialize)]
@@ -1245,6 +1271,8 @@ struct RasterFailure {
     frame: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     at: Option<[u32; 2]>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    extra: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl From<String> for RasterFailure {
@@ -1256,6 +1284,7 @@ impl From<String> for RasterFailure {
             detail: String::new(),
             frame: String::new(),
             at: None,
+            extra: None,
         }
     }
 }
@@ -1471,15 +1500,24 @@ impl PixelEditor {
                 frame.map(str::to_owned),
                 cel.map(str::to_owned),
             )?
-            .result
-            .map_err(|issue| RasterFailure {
-                code: issue.l_code,
-                message: issue.l_message,
-                layer: issue.l_layer,
-                detail: issue.l_detail,
-                frame: issue.l_frame_id,
-                at: issue.l_at,
-            })?;
+            .result;
+        let report = match report {
+            Ok(report) => report,
+            Err(issue) => {
+                let extra = Json::from_ink(&issue.l_extra.to_json(), Limits::default())?;
+                let extra = serde_json::from_str(&extra.stringify(Limits::default())?)
+                    .map_err(|error| error.to_string())?;
+                return Err(RasterFailure {
+                    code: issue.l_code,
+                    message: issue.l_message,
+                    layer: issue.l_layer,
+                    detail: issue.l_detail,
+                    frame: issue.l_frame_id,
+                    at: issue.l_at,
+                    extra,
+                });
+            }
+        };
         Ok(RasterPaintReport {
             destination: "raster",
             kind: "raster",
@@ -1498,6 +1536,16 @@ impl PixelEditor {
             to: report.l_to,
             selection: report.l_selection,
             drawing,
+            cleanup: report.l_cleanup.map(|repair| RasterCleanupReport {
+                cleanup: repair.l_kind,
+                mode: repair.l_mode,
+                max_changes: repair.l_maximum,
+                changes: repair.l_changes.into_iter().map(|row| RasterCleanupChange {
+                    at: row.l_at,
+                    before: RasterCleanupPixel { state: row.l_before.l_state, swatch: row.l_before.l_swatch, rgba: row.l_before.l_rgba },
+                    after: RasterCleanupPixel { state: row.l_after.l_state, swatch: row.l_after.l_swatch, rgba: row.l_after.l_rgba },
+                }).collect(),
+            }),
             transform: report.l_transform.map(|value| SelectionTransformReport {
                 bounds: value.l_bounds,
                 clipped_pixels: value.l_clippedPixels,

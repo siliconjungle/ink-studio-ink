@@ -110,6 +110,14 @@ function restorePixelSession(source, storage) {
   return openPixelJournal({ ...core, codec, revision, revisionText }, input, checkpoint.journal.historyLimit, checkpoint, storage);
 }
 
+function cleanupTarget({ kind, mode, maximum, changes }) {
+  const decode = ({ state, swatch, rgba }) => ({ state, swatch: swatch.Some ?? null, rgba: rgba.Some ?? null });
+  return {
+    cleanup: kind, ...(mode.Some !== undefined && { mode: mode.Some }), maxChanges: maximum,
+    changes: changes.map(({ at, before, after }) => ({ at, before: decode(before), after: decode(after) })),
+  };
+}
+
 function createPixelEditorCore(source, fromText = false) {
   const state = createState();
   const load = state.bind('load_pixel_editor', { resultOnly: true, inputLimits: documentInputLimits });
@@ -142,13 +150,13 @@ function createPixelEditorCore(source, fromText = false) {
     const { metadata, rows, names } = packRgba(packed.metadata, grid);
     const drawn = draw(codec.fromJS(metadata), packed.slots, packed.alpha ?? [], rows, names, option(frame), option(cel));
     if (Object.hasOwn(drawn, 'Err')) {
-      const { code, message, layer, detail, at, frame_id } = drawn.Err;
+      const { code, message, layer, detail, at, frame_id, extra } = drawn.Err;
       const conflict = { code, message, ...(layer && { layer }), ...(detail && { detail }), ...(frame_id && { frame: frame_id }),
-        ...(Object.hasOwn(at, 'Some') && { at: at.Some }) };
+        ...(Object.hasOwn(at, 'Some') && { at: at.Some }), ...codec.toJS(extra) };
       throw Object.assign(new Error(message), { conflict });
     }
     const result = drawn.Ok;
-    const { pixelPerfect, selection, shape, shading, ramp, addedSwatches, from, to, transform, ...target } = result;
+    const { pixelPerfect, selection, shape, shading, ramp, addedSwatches, from, to, transform, cleanup, ...target } = result;
     const placement = transform.Some;
     const drawing = ownData(operation, 'drawing');
     return { destination: 'raster', kind: 'raster', ...target,
@@ -160,6 +168,7 @@ function createPixelEditorCore(source, fromText = false) {
       ...(Object.hasOwn(to, 'Some') && { to: to.Some }),
       ...(Object.hasOwn(selection, 'Some') && { selection: selection.Some }),
       ...(drawing !== undefined && { drawing: structuredClone(drawing) }),
+      ...(cleanup.Some && cleanupTarget(cleanup.Some)),
       ...(placement && {
         bounds: placement.bounds, clippedPixels: placement.clippedPixels,
         ...(Object.hasOwn(placement.mode, 'Some') && { mode: placement.mode.Some }),

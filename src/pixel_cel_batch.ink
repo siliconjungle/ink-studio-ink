@@ -426,16 +426,6 @@ fn report_changes(art: frame.Artwork, before: frame.Captured, writes: List<rgba.
     return groups.map(fn(group) => report_sites(art, group, next, writes));
 }
 
-fn bad_run(g: mask.Grid, offset: frame.Placement, row: raster.RunMark) -> u32 {
-    return fold_until(row.spans, mask.size(g), fn(span) => fn(p) => p < mask.size(g),
-        fn(span) => fn(p) => invalid_run(g, offset, span, p));
-}
-
-fn invalid_run(g: mask.Grid, offset: frame.Placement, span: Vec3<u32>, p: u32) -> u32 {
-    if p < mask.size(g) { return p; }
-    return paint.local_run(g, offset, span).fold(fn(good) => p, fn(issue) => span.x * g.width + span.y);
-}
-
 fn append(art: frame.Artwork, cel: frame.Cel, marks: List<raster.RunMark>) -> Result<frame.Cel, json.Json> {
     let scope = frame.Scope { frame: cel.frame, layer: cel.layer };
     let applied = paint.append_marks(art, scope, marks, cel.id).map_err(fn(issue) => shifted(art, cel, marks, issue))?;
@@ -448,11 +438,10 @@ fn with_drawing(cel: frame.Cel, drawing: paint.Appended) -> frame.Cel {
 }
 
 fn shifted(art: frame.Artwork, cel: frame.Cel, marks: List<raster.RunMark>, message: String) -> json.Json {
-    let ordinal = frame.clip_index(art.layers, cel.layer, length(art.layers));
-    let placement = frame.placement(art.inputs.at_or(ordinal, json.null()), cel);
-    let p = fold_until(marks, mask.size(art.grid), fn(row) => fn(p) => p < mask.size(art.grid),
-        fn(row) => fn(p) => if p < mask.size(art.grid) { p } else { bad_run(art.grid, placement, row) });
-    return problem("outside-cel", message, [member("at", at(art.grid, p))]);
+    let scope = frame.Scope { frame: cel.frame, layer: cel.layer };
+    let issue = paint.shifted_fault(art, scope, marks, message);
+    let fields = issue.at.fold(fn(point) => [member("at", json.array([num(point.x), num(point.y)]))], fn(unit) => []);
+    return problem(issue.code, issue.message, fields);
 }
 
 fn protected_write(g: mask.Grid, drawn: frame.PaintView, locked: List<u32>, rows: List<rgba.Write>) -> Result<Unit, json.Json> {

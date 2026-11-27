@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pixel Workshop · Ink Studio</title>
+  <link rel="stylesheet" href="./pixel-workshop.css">
+  <script type="module" src="./pixel-workshop.mjs"></script>
+</head>
+<body>
+  <header class="toolbar">
+    <h1>Pixel Workshop</h1>
+    <div class="actions">
+      <button id="open" type="button">Open artwork</button>
+      <input id="artwork-file" type="file" accept=".json,.png,application/json,image/png" hidden>
+      <button id="export" type="button" disabled>Export artwork</button>
+      <button id="undo" type="button" disabled>Undo</button>
+      <button id="redo" type="button" disabled>Redo</button>
+    </div>
+  </header>
+  <main>
+    <section class="workspace" aria-label="Artwork">
+      <div class="scope">
+        <label>Frame <select id="frame"></select></label>
+        <label>Layer <select id="layer"></select></label>
+        <label>View <select id="view"><option value="composite">Composite</option><option value="layer">Active layer</option></select></label>
+        <div class="dimensions"><output id="size"></output><output id="coordinate"></output></div>
+      </div>
+      <div class="stage">
+        <div class="grid" id="grid">
+          <canvas id="artwork" aria-label="Artwork preview"></canvas>
+          <canvas id="selection-outline" tabindex="0" aria-describedby="grid-help" aria-label="Native pixel grid"></canvas>
+        </div>
+      </div>
+      <p id="grid-help">Drag to select a rectangle. Use the arrow keys and Space to select a pixel with the keyboard.</p>
+    </section>
+    <aside aria-label="Selection and cleanup">
+      <section>
+        <h2>Selection</h2>
+        <label>Saved selection <select id="saved-selection"></select></label>
+        <div class="actions">
+          <button id="select-all" type="button">Select all</button>
+          <button id="clear-selection" type="button">Clear selection</button>
+        </div>
+        <output id="selection-info"></output>
+      </section>
+      <section id="cleanup">
+        <h2>Clean up selected pixels</h2>
+        <fieldset id="cleanup-settings">
+          <label>Operation
+            <select id="cleanup-kind">
+              <option value="stair">Even out a staircase</option>
+              <option value="fragment">Merge one pixel</option>
+              <option value="outline">Thin doubled outline</option>
+              <option value="cluster">Reshape a cluster</option>
+            </select>
+          </label>
+          <label id="cleanup-mode-label" hidden>Cluster edge
+            <select id="cleanup-mode"><option value="grow">Grow one pixel</option><option value="shrink">Shrink one pixel</option></select>
+          </label>
+          <label id="cleanup-swatch-label" hidden>Merge into <select id="cleanup-swatch"></select></label>
+          <label class="budget">Pixel budget <input id="cleanup-budget" type="number" min="1" max="256" step="1" value="64"></label>
+        </fieldset>
+        <div class="actions">
+          <button id="cleanup-preview" type="button" disabled>Preview cleanup</button>
+          <button class="primary" id="cleanup-apply" type="button" disabled>Apply cleanup</button>
+          <button id="cleanup-cancel" type="button" disabled>Cancel</button>
+        </div>
+        <output id="cleanup-info" aria-live="polite"></output>
+        <div class="diff" id="cleanup-diff" hidden>
+          <table aria-label="Cleanup pixel changes">
+            <thead><tr><th scope="col">Pixel</th><th scope="col">Before</th><th scope="col">After</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </aside>
+  </main>
+  <p class="status" id="status" role="status"></p>
+</body>
+</html>

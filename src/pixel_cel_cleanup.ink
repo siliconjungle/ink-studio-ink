@@ -304,10 +304,13 @@ fn seed_site(g: mask.Grid, raw: json.Json) -> u32 {
     return y * g.width + x;
 }
 
+fn budget(spec: List<json.Member>) -> u32 {
+    return json.lookup(spec, "maxChanges").fold(fn(raw) => value.word(raw, 256), fn(unit) => 64);
+}
+
 fn plan(art: frame.Artwork, captured: frame.PaintView, selected: List<u32>, locked: List<u32>,
     spec: List<json.Member>) -> Result<List<rgba.Write>, json.Json> {
-    let budget = json.lookup(spec, "maxChanges").fold(fn(raw) => value.word(raw, 256), fn(unit) => 64);
-    let input = Input { grid: art.grid, art: captured, colors: art.colors, selected: selected, locked: locked, budget: budget };
+    let input = Input { grid: art.grid, art: captured, colors: art.colors, selected: selected, locked: locked, budget: budget(spec) };
     let planned = options(input, art.ids, spec)?;
     if planned.issue != json.null() { return Err(planned.issue); }
     let positions = planned.rows.map(fn(row) => row.pixel).sort();

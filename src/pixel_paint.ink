@@ -2,6 +2,8 @@ module StudioPixelPaint;
 
 import "std:json" as json;
 import "pixel_brush.ink" as brush;
+import "pixel_brush_capture.ink" as labels;
+import "pixel_cel_cleanup.ink" as cleanup;
 import "pixel_brush_motion.ink" as motion;
 import "pixel_brush_paint.ink" as brush_paint;
 import "pixel_drawing_grid.ink" as drawing;
@@ -28,9 +30,12 @@ record Segment { pen: drawing.Pen, stroke: Stroke, }
 record Runs { spans: Buffer<Vec3<u32>>, y: u32, x: u32, length: u32, }
 record Report { frame: String, layer: String, cel: String, tool: String, pixelCount: u32,
     runs: List<Vec3<u32>>, pixelPerfect: Bool, selection: Option<String>, shape: Option<String>, shading: Option<String>,
-    ramp: Option<String>, addedSwatches: List<String>, from: Option<String>, to: Option<String>, transform: Option<TransformReport>, }
+    ramp: Option<String>, addedSwatches: List<String>, from: Option<String>, to: Option<String>, transform: Option<TransformReport>, cleanup: Option<CleanupReport>, }
 record TransformReport { mode: Option<String>, bounds: Vec4<i32>, clippedPixels: u32,
     resultSelection: Option<String>, selectionRuns: List<Vec3<u32>>, carriedProtection: List<CarriedReport>, }
+record CleanupPixel { state: String, swatch: Option<String>, rgba: Option<Vec4<u32>>, }
+record CleanupChange { at: Vec2<u32>, before: CleanupPixel, after: CleanupPixel, }
+record CleanupReport { kind: String, mode: Option<String>, maximum: u32, changes: List<CleanupChange>, }
 record CarriedReport { id: String, kind: String, frame: String, pixels: List<Vec2<u32>>, }
 record ResultMask { id: String, words: List<u32>, }
 record Detail { id: String, kind: String, frame_id: String, first: u32, last: u32, sites: List<u32>, }
@@ -507,6 +512,23 @@ fn local_mark(g: mask.Grid, offset: frame.Placement, row: raster.RunMark) -> Res
     return Ok(raster.RunMark { ..row, spans: spans });
 }
 
+fn shifted_fault(art: frame.Artwork, scope: frame.Scope, marks: List<raster.RunMark>, issue: String) -> fault.Fault {
+    let ordinal = frame.clip_index(art.layers, scope.layer, length(art.layers));
+    let target = frame.active_cel(art.cels, scope.frame, scope.layer);
+    let offset = frame.placement(art.inputs.at_or(ordinal, json.null()), target);
+    let size = mask.size(art.grid);
+    let site = fold_until(marks, size, fn(row) => fn(p) => p < size, fn(row) => fn(p) =>
+        if p < size { p } else { first_untranslated(art.grid, offset, row.spans) });
+    return fault.Fault { ..fault.invalid(issue), code: "outside-cel", layer: scope.layer,
+        at: if site < size { Some(fault.position(art.grid, site)) } else { None } };
+}
+
+fn first_untranslated(g: mask.Grid, offset: frame.Placement, spans: List<Vec3<u32>>) -> u32 {
+    let size = mask.size(g);
+    return fold_until(spans, size, fn(span) => fn(p) => p < size, fn(span) => fn(p) =>
+        if p < size { p } else { local_run(g, offset, span).fold(fn(good) => p, fn(issue) => span.x * g.width + span.y) });
+}
+
 fn append_marks(art: frame.Artwork, scope: frame.Scope, marks: List<raster.RunMark>, cel: String) -> Result<Appended, String> {
     let target = frame.active_cel(art.cels, scope.frame, scope.layer);
     let ordinal = frame.clip_index(art.layers, scope.layer, length(art.layers));
@@ -676,7 +698,49 @@ fn color_report(art: frame.Artwork, scope: frame.Scope, tool: String, changes: C
     return Report { frame: scope.frame, layer: scope.layer, cel: choose_cel(art, scope), tool: tool,
         runs: runs(art.grid, changes.sites), pixelCount: length(changes.sites), pixelPerfect: false, shape: None,
         selection: None, shading: None, ramp: None, addedSwatches: changes.added.map(fn(row) => row.id),
-        from: None, to: None, transform: None };
+        from: None, to: None, transform: None, cleanup: None };
+}
+
+fn apply_cleanup(source: json.Json, art: frame.Artwork, named: selection.Named, spec: List<json.Member>,
+    frame_id: Option<String>, cel: Option<String>, cache: CachedView) -> Result<Edit, fault.Fault> {
+    let selection_raw = json.lookup(spec, "selection");
+    let explicit = value.has(spec, "pixels");
+    let saved = value.has(spec, "selection");
+    if !value.only(spec, ["tool", "layer", "selection", "pixels", "kind", "mode", "at", "swatch", "maxChanges"]) || explicit == saved {
+        return Err(fault.invalid("Cleanup needs a saved selection or an explicit list of native pixels"));
+    }
+    let scope = target(art, spec, frame_id, cel)?;
+    let name: Option<String> = selection_raw.map(fn(raw) => value.text(raw));
+    if name.fold(fn(id) => id == "", fn(unit) => false) {
+        let id = labels.label(value.get(spec, "selection"));
+        return Err(fault.invalid(string_concat("Unknown pixel selection ", id)));
+    }
+    let ctx = begin_edit(source, art, named, scope, name, cache).map_err(fn(issue) => fault.invalid(issue))?;
+    let selected = if explicit { selection.native_literal(art.grid, value.get(spec, "pixels")) }
+        else { selection.chosen(ctx.guard.selected.words) };
+    if selected.issue != "" { return Err(fault.invalid(selected.issue)); }
+    let writes = cleanup.plan(art, ctx.guard.drawn, selected.mask, ctx.guard.protected, spec)
+        .map_err(fn(issue) => fault.from_problem(issue))?;
+    let before = ctx.guard.drawn.captured;
+    let changed = write_changes(art.grid, before, writes, [], true);
+    let result = color_report(art, scope, "cleanup", changed);
+    let details = CleanupReport { kind: value.text(value.get(spec, "kind")), mode: optional_text(value.text(value.get(spec, "mode"))),
+        maximum: cleanup.budget(spec), changes: writes.map(fn(row) => cleanup_change(art, before, row)) };
+    return finish_edit(source, art, scope, changed, Report { ..result, selection: name, cleanup: Some(details) }, ctx);
+}
+
+fn cleanup_pixel(art: frame.Artwork, slot: i32, alpha: u32) -> CleanupPixel {
+    if slot < 0 { return CleanupPixel { state: if slot == -2 { "knockout" } else { "clear" }, swatch: None, rgba: None }; }
+    let index = drawing.unsigned(slot);
+    let color = art.colors.at_or(index, 0);
+    return CleanupPixel { state: "paint", swatch: Some(art.ids.at_or(index, "")),
+        rgba: Some(vec4(frame.byte(color, 16), frame.byte(color, 8), frame.byte(color, 0), alpha)) };
+}
+
+fn cleanup_change(art: frame.Artwork, before: frame.Captured, row: rgba.Write) -> CleanupChange {
+    return CleanupChange { at: fault.position(art.grid, row.pixel),
+        before: cleanup_pixel(art, before.slots.at_or(row.pixel, -1), before.alpha.at_or(row.pixel, 255)),
+        after: cleanup_pixel(art, row.slot, row.alpha) };
 }
 
 record TransformSpec { paste: Bool, mode: String, carrying: Bool, selection: Option<String>,
@@ -912,6 +976,9 @@ fn paint(source: json.Json, art: frame.Artwork, named: selection.Named, operatio
     if kind == "transform" || kind == "paste" {
         return apply_transform(source, art, named, spec, packed, frame_id, cel, kind == "paste", cache);
     }
+    if kind == "cleanup" {
+        return apply_cleanup(source, art, named, spec, frame_id, cel, cache);
+    }
     if kind == "rgba" || kind == "replace-swatch" {
         return apply_color(source, art, named, spec, input, frame_id, cel, kind, authored, cache);
     }
@@ -931,7 +998,7 @@ fn paint_target(source: json.Json, art: frame.Artwork, named: selection.Named, s
         pixelCount: length(changes.sites), runs: runs(art.grid, changes.sites), pixelPerfect: tool.perfect, selection: tool.selection,
         shape: if tool.kind == "shape" { Some(shape.kind(tool.geometry)) } else { None },
         shading: optional_text(changes.shading.mode), ramp: optional_text(changes.shading.named),
-        addedSwatches: changes.added.map(fn(row) => row.id), from: None, to: None, transform: None };
+        addedSwatches: changes.added.map(fn(row) => row.id), from: None, to: None, transform: None, cleanup: None };
     return finish_edit(source, art, scope, changes, report, ctx);
 }
 
@@ -948,7 +1015,8 @@ fn optional_text(text: String) -> Option<String> { return if text == "" { None }
 
 fn commit_paint(source: json.Json, art: frame.Artwork, scope: frame.Scope, changes: Changes, report: Report,
     details: List<Detail>, active: List<Detail>) -> Result<Edit, fault.Fault> {
-    let next = stage_artwork(art, scope, changes, report.cel).map_err(fn(issue) => fault.invalid(issue))?;
+    let next = stage_artwork(art, scope, changes, report.cel).map_err(fn(issue) =>
+        if report.tool == "cleanup" { shifted_fault(art, scope, changes.marks, issue) } else { fault.invalid(issue) })?;
     let checked: Unit = check_dependent_frames(art, next, details, "")?;
     let rendered = render_after_edit(next, scope)?;
     let issue = gap_issue(art.grid, active, rendered.view.pixels);

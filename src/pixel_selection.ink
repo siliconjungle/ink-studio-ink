@@ -162,7 +162,10 @@ fn packed_literal(input: Inputs, pointer: json.Json) -> Choice {
 
 fn literal(input: Inputs, raw: json.Json) -> Choice {
     if input.packed { return packed_literal(input, raw); }
-    let g = input.grid;
+    return native_literal(input.grid, raw);
+}
+
+fn native_literal(g: mask.Grid, raw: json.Json) -> Choice {
     let has_pixels = json.elements(raw).fold(fn(values) => length(values) <= mask.size(g), fn(reason) => false);
     if !has_pixels { return bad(literal_error()); }
     let coords = points(items(raw), g);
