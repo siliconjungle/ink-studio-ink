@@ -64,13 +64,19 @@ Lathe profiles can ripple as they taper, including the phase-shifted power profi
 
 ## Pixel documents
 
-`src/pixel_document.ink` opens version 1 and version 2 pixel documents. It checks the grid, palette, layer stack, frame timing, cel IDs and hold links. Version 1 drawings migrate to a single square-pixel `artwork` frame with their original drawing data and metadata. Both hosts return the normalized document and SHA-256 revisions for the document and its legacy source when present. Raster validation, editing, and the rest of the authoring workflows remain in the parity checklist.
+`src/pixel_document.ink` opens version 1 and version 2 pixel documents. It checks the grid, palette, layer stack, frame timing, cel IDs and hold links. Version 1 drawings migrate to a single square-pixel `artwork` frame with their original drawing data and metadata. Both hosts return the normalized document and SHA-256 revisions for the document and its legacy source when present.
 
 Call `openPixelDocument(source)` from `web/pixel-document.mjs` in a secure browser context after building. The native loader is also available as a command.
 
 ```sh
 cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- artwork.json
 ```
+
+`rasterizePixelFrame(source, { frame, layer, cel })` compiles artwork into indexed slots, alpha, clipping and packed RGBA. Omit `layer` and `cel` for the frame composite. The same Ink code runs on both targets and handles held cels, content offsets, layer groups, blend modes, clipping masks, and authored point, run, stair, rectangle, path and polygon marks. The compiler needs `f64_from_decimal` to read authored numbers.
+
+`selectPixelFrame(source, query, scope)` runs selection on the resolved raster and returns the frame, grid and selected coordinates. A caller doing multiple selections on an unchanged frame can retain the raster and pass it to `selectPixels` as the `indexed` option with `rgba: raster.rgba`.
+
+`raster` and `select-document` are the native equivalents. Their JSON request contains `document` and optional `frame`, `layer` or `cel`. Add `query` for `select-document`.
 
 `selectPixels(width, height, query, { rgba, saved, indexed })` in the same browser module returns selected `[x, y]` coordinates in native row order. The shared Ink implementation covers rectangular and elliptical marquees, lassos and polygons, literal and saved masks, mask combinations and modifiers, wand fills, swatches, and clusters. Wand fills take one packed `0xRRGGBBAA` word per pixel. Saved masks map selection IDs to coordinate lists.
 

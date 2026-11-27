@@ -20,6 +20,21 @@ export async function openPixelDocument(source) {
   return { document, revision: current, legacyRevision: legacy };
 }
 
+export function rasterizePixelFrame(source, { frame = '', layer = '', cel = '' } = {}) {
+  const input = typeof source === 'string' ? JSON.parse(source) : source;
+  const raster = call('rasterize_pixel_frame', [codec.fromJS(input), frame, layer, cel]);
+  if (Object.hasOwn(raster, 'Err')) throw new Error(raster.Err);
+  const { width, height, frame: active, slots, alpha, clipping, ids, rgba } = raster.Ok;
+  return { width, height, frame: active || null, slots: Int32Array.from(slots),
+    alpha: Uint32Array.from(alpha), clipping: Uint32Array.from(clipping), ids, rgba: Uint32Array.from(rgba) };
+}
+
+export function selectPixelFrame(source, query, { saved, ...scope } = {}) {
+  const raster = rasterizePixelFrame(source, scope);
+  return { frame: raster.frame, grid: [raster.width, raster.height],
+    pixels: selectPixels(raster.width, raster.height, query, { rgba: raster.rgba, indexed: raster, saved }) };
+}
+
 function coordinateRuns(width, height, points, limit) {
   if (!Array.isArray(points) || points.length > limit) return [];
   const result = [points.length];

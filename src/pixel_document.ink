@@ -4,6 +4,7 @@ import "std:json" as json;
 import "pixel_selection.ink" as selection;
 import "pixel_mask.ink" as mask;
 import "pixel_labels.ink" as labels;
+import "pixel_frame.ink" as frame_raster;
 
 record Layer { id: String, kind: String, parent: String, }
 record Cel { id: String, hold: String, }
@@ -29,6 +30,11 @@ pub fn select_pixel_words_from_raster(query: List<json.Json>, width: u32, height
     clipping: List<u32>, ids: List<String>) -> Result<List<u32>, String> {
     let palette = mask.PaletteRaster { slots: slots, alpha: alpha, clipping: clipping, ids: ids };
     return selection.select(width, height, query, rgba, saved, literal_runs, true, large, palette);
+}
+
+pub fn rasterize_pixel_frame(document: json.Json, frame: String, layer: String, cel: String) -> Result<frame_raster.Raster, String> {
+    let opened = open_pixel_document(document)?;
+    return frame_raster.compile(opened.document, frame, layer, cel);
 }
 
 // Assemble the standard JSON value from already parsed native components.

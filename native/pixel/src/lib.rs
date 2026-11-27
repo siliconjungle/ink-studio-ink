@@ -14,7 +14,7 @@ pub struct OpenedDocument {
     pub legacy_revision: Option<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 pub struct IndexedSelectionRaster {
     pub slots: Vec<i32>,
     #[serde(default)]
@@ -23,6 +23,47 @@ pub struct IndexedSelectionRaster {
     pub clipping: Vec<u32>,
     #[serde(default)]
     pub ids: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct PixelFrameRaster {
+    pub width: u32,
+    pub height: u32,
+    pub frame: Option<String>,
+    #[serde(flatten)]
+    pub indexed: IndexedSelectionRaster,
+    pub rgba: Vec<u32>,
+}
+
+pub fn rasterize_pixel_frame(
+    source: &str,
+    frame: Option<&str>,
+    layer: Option<&str>,
+    cel: Option<&str>,
+) -> Result<PixelFrameRaster, String> {
+    let OrderedJson(input) = serde_json::from_str(source).map_err(|error| error.to_string())?;
+    let program = State::new();
+    let build = |kind, scalar, flag, values, keys| {
+        program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
+    };
+    let raster = program.function_l_rasterize_pixel_frame(
+        compiled_json(input, &build),
+        frame.unwrap_or_default().into(),
+        layer.unwrap_or_default().into(),
+        cel.unwrap_or_default().into(),
+    )?;
+    Ok(PixelFrameRaster {
+        width: raster.l_width,
+        height: raster.l_height,
+        frame: (!raster.l_frame.is_empty()).then_some(raster.l_frame),
+        indexed: IndexedSelectionRaster {
+            slots: raster.l_slots,
+            alpha: raster.l_alpha,
+            clipping: raster.l_clipping,
+            ids: raster.l_ids,
+        },
+        rgba: raster.l_rgba,
+    })
 }
 
 // Parse with ECMAScript's number rounding, last-value-wins object semantics,
