@@ -58,6 +58,31 @@ fn frame(path: std::ffi::OsString, select: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Deserialize)]
+struct PaintRequest<'a> {
+    #[serde(borrow)]
+    document: &'a RawValue,
+    #[serde(borrow)]
+    operation: &'a RawValue,
+    frame: Option<String>,
+    cel: Option<String>,
+}
+
+fn paint(path: std::ffi::OsString) -> Result<(), String> {
+    let source = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let request: PaintRequest = serde_json::from_str(&source).map_err(|error| error.to_string())?;
+    let mut editor = PixelEditor::new(request.document.get())?;
+    let target = editor.paint(
+        request.operation.get(),
+        request.frame.as_deref(),
+        request.cel.as_deref(),
+    )?;
+    let target = serde_json::to_string(&target).map_err(|error| error.to_string())?;
+    let document = editor.snapshot()?;
+    println!(r#"{{"target":{target},"document":{document}}}"#);
+    Ok(())
+}
+
 fn select(path: std::ffi::OsString, packed: bool) -> Result<(), String> {
     let source = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     let request: SelectionRequest =
@@ -82,7 +107,7 @@ fn select(path: std::ffi::OsString, packed: bool) -> Result<(), String> {
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel select|select-mask|raster|select-document REQUEST";
+    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel select|select-mask|raster|select-document|paint-document REQUEST";
     let path = args.next().ok_or(usage)?;
     if let Some(request) = args.next() {
         if args.next().is_some() {
@@ -93,6 +118,9 @@ fn run() -> Result<(), String> {
         }
         if path == "raster" || path == "select-document" {
             return frame(request, path == "select-document");
+        }
+        if path == "paint-document" {
+            return paint(request);
         }
         return Err(usage.into());
     }

@@ -5,6 +5,7 @@ import "pixel_selection.ink" as selection;
 import "pixel_mask.ink" as mask;
 import "pixel_labels.ink" as labels;
 import "pixel_frame.ink" as frame_raster;
+import "pixel_paint.ink" as paint;
 
 record Layer { id: String, kind: String, parent: String, }
 record Cel { id: String, hold: String, }
@@ -420,8 +421,9 @@ pub fn open_pixel_document(document: json.Json) -> Result<Opened, String> {
     return Ok(Opened { document: if legacy { upgrade_legacy(items, layers) } else { document }, legacy: legacy });
 }
 
-record EditorDocument { artwork: frame_raster.Artwork, named: selection.Named, }
+record EditorDocument { source: json.Json, artwork: frame_raster.Artwork, named: selection.Named, }
 record EditorSelection { frame: String, grid: mask.Grid, words: List<u32>, }
+record EditorSnapshot { document: json.Json, positions: List<List<u32>>, }
 record NamedBuild { ids: Buffer<String>, frames: Buffer<String>, packed: Buffer<Bool>, pixels: Buffer<List<u32>>,
     seen: Map<u64, List<String>>, issue: String, }
 record NamedPixels { seen: Buffer<u32>, indices: Buffer<u32>, packed: Bool, issue: String, }
@@ -430,6 +432,8 @@ state EditorArtwork: frame_raster.Artwork = frame_raster.empty_artwork();
 state EditorNamed: selection.Named = selection.no_named();
 state EditorScope: frame_raster.Scope = frame_raster.Scope { frame: "", layer: "" };
 state EditorImage: selection.Image = empty_editor_image();
+state EditorSource: json.Json = json.null();
+state EditorPositions: List<List<u32>> = [];
 
 fn empty_editor_image() -> selection.Image {
     return selection.Image { rgba: [], palette: mask.no_palette() };
@@ -441,7 +445,7 @@ fn prepare_editor(source: json.Json, positions: List<List<u32>>) -> Result<Edito
     let items = object(opened.document, "Expected a normalized pixel-art document")?;
     let named = json.lookup(items, "selections").fold(fn(rows) =>
         read_named(rows, art.grid, art.frames, positions), fn(unit) => Ok(selection.no_named()))?;
-    return Ok(EditorDocument { artwork: art, named: named });
+    return Ok(EditorDocument { source: opened.document, artwork: art, named: named });
 }
 
 fn read_named(raw: json.Json, g: mask.Grid, frames: List<String>, positions: List<List<u32>>) -> Result<selection.Named, String> {
@@ -555,14 +559,33 @@ fn editor_selection(g: mask.Grid, scope: frame_raster.Scope, image: selection.Im
 fn first_query(query: List<json.Json>) -> json.Json { return query.at_or(0, json.null()); }
 
 change load_pixel_editor(document: json.Json, positions: List<List<u32>>) -> Result<mask.Grid, String>
-    writes(EditorArtwork, EditorNamed, EditorScope, EditorImage) {
+    writes(EditorArtwork, EditorNamed, EditorScope, EditorImage, EditorSource, EditorPositions) {
     let prepared = prepare_editor(document, positions)?;
     let grid = prepared.artwork.grid;
     EditorArtwork = prepared.artwork;
     EditorNamed = prepared.named;
     EditorScope = frame_raster.Scope { frame: "", layer: "" };
     EditorImage = empty_editor_image();
+    EditorSource = prepared.source;
+    EditorPositions = positions;
     return Ok(grid);
+}
+
+query snapshot_pixel_editor() -> EditorSnapshot reads(EditorSource, EditorPositions) {
+    return EditorSnapshot { document: EditorSource, positions: EditorPositions };
+}
+
+change paint_pixel_editor(operation: json.Json, frame: Option<String>, cel: Option<String>) -> Result<paint.Report, String>
+    reads(EditorSource, EditorArtwork, EditorNamed, EditorScope)
+    writes(EditorSource, EditorArtwork, EditorScope, EditorImage) {
+    let edit = paint.paint(EditorSource, EditorArtwork, EditorNamed, operation, frame, cel, EditorScope)?;
+    if edit.report.pixelCount != 0 {
+        EditorSource = edit.document;
+        EditorArtwork = edit.artwork;
+        EditorScope = edit.scope;
+        EditorImage = edit.image;
+    }
+    return Ok(edit.report);
 }
 
 change select_pixel_editor(query: List<json.Json>, saved: json.Json, runs: List<List<u32>>,

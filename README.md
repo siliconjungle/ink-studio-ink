@@ -78,6 +78,8 @@ cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- artwork.
 
 Use `{ type: 'recall', id }` to resolve a document's saved selection. An unscoped top-level recall selects its saved frame. Recalls within a composed query use the active frame.
 
+`editor.paint(operation, { frame, cel })` applies pencil, eraser and fill operations to the open document and returns the changed runs. Pass the layer in the operation or select a cel in the scope. Operations support the original named selection constraints, pixel-perfect pencil paths, mirror axes and wrapping. `editor.snapshot()` returns the edited pixel document and preserves author order in saved masks. The native library supports `PixelEditor::paint` and `snapshot`. Its `paint-document` command takes `document`, `operation`, and optional `frame` and `cel`, and returns the target report and updated document.
+
 `raster` and `select-document` are the native equivalents. Their JSON request contains `document` and optional `frame`, `layer` or `cel`. Add `query` for `select-document`.
 
 `selectPixels(width, height, query, { rgba, saved, indexed })` in the same browser module returns selected `[x, y]` coordinates in native row order. The shared Ink implementation covers rectangular and elliptical marquees, lassos and polygons, literal and saved masks, mask combinations and modifiers, wand fills, swatches, and clusters. Wand fills take one packed `0xRRGGBBAA` word per pixel. Saved masks map selection IDs to coordinate lists.

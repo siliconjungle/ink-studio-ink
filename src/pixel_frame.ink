@@ -10,7 +10,7 @@ record Location { id: String, frame: String, layer: String, }
 record Cel { id: String, layer: String, frame: String, fields: List<json.Member>, }
 record Placement { x: i32, y: i32, opacity: f64, }
 record Layer { id: String, kind: String, parent: String, clip: String, blend: String, protect: Bool,
-    visible: Bool, opacity: f64, }
+    locked: Bool, visible: Bool, opacity: f64, }
 record Artwork { grid: mask.Grid, layers: List<Layer>, ids: List<String>, colors: List<u32>,
     cels: List<Cel>, locations: List<Location>, frames: List<String>, inputs: List<json.Json>, }
 record Scope { frame: String, layer: String, }
@@ -25,6 +25,7 @@ record Scene { canvas: Canvas, ancestors: Buffer<Parked>, todo: Buffer<Job>,
 record Overlay { pixels: Buffer<Pixel>, coverage: Buffer<u32>, issue: String, }
 record Style { opacity: f64, blend: String, kind: String, protect: Bool, }
 record Raster { width: u32, height: u32, frame: String, image: selection.Image, }
+record PaintView { captured: Captured, pixels: List<Pixel>, }
 
 fn palette_color(raw: json.Json) -> u32 {
     let s = json.as_text(raw).fold(fn(color) => color, fn(issue) => value.text(value.get(value.fields(raw), "color")));
@@ -86,7 +87,8 @@ fn layer_spec(raw: json.Json) -> Layer {
     return Layer { id: value.text(value.get(fields, "id")), kind: value.text(value.get(fields, "kind")),
         parent: value.text(value.get(fields, "parent")), clip: value.text(value.get(fields, "clip")),
         blend: json.lookup(fields, "blend").fold(fn(v) => value.text(v), fn(unit) => "normal"),
-        protect: value.flag(fields, "protect", false), visible: value.flag(fields, "visible", true),
+        protect: value.flag(fields, "protect", false), locked: value.flag(fields, "locked", false),
+        visible: value.flag(fields, "visible", true),
         opacity: opacity };
 }
 
@@ -221,7 +223,8 @@ fn clip_index(layers: List<Layer>, id: String, limit: u32) -> u32 {
 }
 
 fn empty_layer() -> Layer {
-    return Layer { id: "", kind: "", parent: "", clip: "", blend: "normal", protect: false, visible: false, opacity: 0.0f64 };
+    return Layer { id: "", kind: "", parent: "", clip: "", blend: "normal", protect: false,
+        locked: false, visible: false, opacity: 0.0f64 };
 }
 
 fn empty_canvas(art: Artwork, shown: Bool) -> Canvas {
@@ -324,8 +327,12 @@ fn raw_rgba(capture: Captured, colors: List<u32>, i: u32, slot: i32) -> u32 {
 
 fn finish(art: Artwork, scene: Scene, scope: Scope) -> Result<Raster, String> {
     if scene.issue != "" { return Err(scene.issue); }
-    let capture = scene.capture;
-    let pixels = scene.canvas.pixels.freeze();
+    return finish_view(art, PaintView { captured: scene.capture, pixels: scene.canvas.pixels.freeze() }, scope);
+}
+
+fn finish_view(art: Artwork, view: PaintView, scope: Scope) -> Result<Raster, String> {
+    let capture = view.captured;
+    let pixels = view.pixels;
     if scope.layer != "" && !capture.found { return Err(string_concat("Unknown pixel layer ", scope.layer)); }
     let slots = if capture.found { capture.slots } else { pixels.map(fn(cell) => cell.slot) };
     let alpha = if capture.found { capture.alpha } else { pixels.map(fn(cell) => cell.alpha) };
@@ -399,6 +406,12 @@ fn cel_scope(locations: List<Location>, frame: String, cel: String) -> Result<Sc
 fn raster(art: Artwork, scope: Scope) -> Result<Raster, String> {
     let result = composite(art, scope);
     return finish(art, result, scope);
+}
+
+fn paint_view(art: Artwork, scope: Scope) -> Result<PaintView, String> {
+    let scene = composite(art, scope);
+    if scene.issue != "" { return Err(scene.issue); }
+    return Ok(PaintView { captured: scene.capture, pixels: scene.canvas.pixels.freeze() });
 }
 
 fn compile(document: json.Json, frame: String, layer: String, cel: String) -> Result<Raster, String> {

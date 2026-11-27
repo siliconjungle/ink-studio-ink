@@ -238,6 +238,35 @@ fn palette_cluster(g: Grid, palette: PaletteRaster, seed: u32, diagonal: Bool) -
         palette, seed, diagonal);
 }
 
+record Wrap { x: Bool, y: Bool, }
+
+fn wrapped_step(region: Region, wrap: Wrap, old: Flood) -> Flood {
+    let p = old.queue.at_or(old.cursor, 0);
+    let g = region.grid;
+    let x = rem_or(p, g.width, 0);
+    let y = quot_or(p, g.width, 0);
+    let left = x > 0;
+    let right = x + 1 < g.width;
+    let top = y > 0;
+    let bottom = y + 1 < g.height;
+    let palette = no_palette();
+    let a = enqueue(region, palette, old, if right { p + 1 } else { p - x }, right || wrap.x);
+    let b = enqueue(region, palette, a, if left { p - 1 } else { p + g.width - 1 }, left || wrap.x);
+    let c = enqueue(region, palette, b, if bottom { p + g.width } else { x }, bottom || wrap.y);
+    let d = enqueue(region, palette, c, if top { p - g.width } else { p + (g.height - 1) * g.width }, top || wrap.y);
+    return Flood { ..d, cursor: d.cursor + 1 };
+}
+
+fn cluster_on_grid(g: Grid, source: List<u32>, seed: u32, wrap: Wrap) -> List<u32> {
+    let region = Region { grid: g, source: source, keyed: false, target: 0, tolerance: 0, swatch: -1 };
+    if !wrap.x && !wrap.y { return flood(region, no_palette(), seed, false); }
+    let words = blank(g);
+    if !selected(source, seed) { return words.freeze(); }
+    let start = Flood { mask: mark(words, seed), queue: buffer([seed]), cursor: 0 };
+    return repeat_until(size(g), start, fn(old) => old.cursor >= old.queue.len(),
+        fn(i) => fn(old) => wrapped_step(region, wrap, old)).mask.freeze();
+}
+
 fn distances(g: Grid, mask: List<u32>, inward: Bool) -> List<u32> {
     let initial: Buffer<u32> = buffer_fill(size(g), 0);
     let d = repeat_until(size(g), initial, fn(old) => false,

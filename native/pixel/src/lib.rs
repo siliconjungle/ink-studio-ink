@@ -1,4 +1,4 @@
-use compiled_state::{State, ValueWireLimits};
+use compiled_state::{State, ValueWireLimits, Wire};
 use indexmap::IndexMap;
 use ink_abi::{
     json_value::{Json, JsonCodec},
@@ -226,6 +226,40 @@ fn pack_named_pixels(input: &mut Json) -> Vec<Vec<u32>> {
                 .collect()
         })
         .collect()
+}
+
+fn restore_named_pixels(input: &mut Json, width: u32, positions: Vec<Vec<u32>>) {
+    let Json::Object(fields) = input else {
+        return;
+    };
+    let Some(Json::Array(rows)) = fields
+        .iter_mut()
+        .find(|(key, _)| key == "selections")
+        .map(|(_, v)| v)
+    else {
+        return;
+    };
+    for (row, positions) in rows.iter_mut().zip(positions) {
+        if positions.is_empty() {
+            continue;
+        }
+        let Json::Object(fields) = row else {
+            continue;
+        };
+        if let Some((_, pixels)) = fields.iter_mut().find(|(key, _)| key == "pixels") {
+            *pixels = Json::Array(
+                positions
+                    .into_iter()
+                    .map(|p| {
+                        Json::Array(vec![
+                            Json::Number((p % width).to_string()),
+                            Json::Number((p / width).to_string()),
+                        ])
+                    })
+                    .collect(),
+            );
+        }
+    }
 }
 
 fn coordinate_runs(canvas: [u32; 2], pixels: Json, limit: u32) -> Vec<u32> {
@@ -463,6 +497,29 @@ pub struct PixelSelection {
     pub pixels: Vec<[u32; 2]>,
 }
 
+#[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RasterPaintReport {
+    pub destination: &'static str,
+    pub kind: &'static str,
+    pub frame: String,
+    pub layer: String,
+    pub cel: String,
+    pub tool: String,
+    pub pixel_count: u32,
+    pub runs: Vec<[u32; 3]>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub pixel_perfect: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drawing: Option<serde_json::Value>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 pub struct PixelEditor {
     program: State,
     grid: [u32; 2],
@@ -493,6 +550,62 @@ impl PixelEditor {
             .result?;
         self.grid = [grid.l_width, grid.l_height];
         Ok(())
+    }
+
+    pub fn paint(
+        &mut self,
+        operation: &str,
+        frame: Option<&str>,
+        cel: Option<&str>,
+    ) -> Result<RasterPaintReport, String> {
+        let OrderedJson(operation) =
+            serde_json::from_str(operation).map_err(|error| error.to_string())?;
+        let drawing = match &operation {
+            Json::Object(items) => items
+                .iter()
+                .find(|(key, _)| key == "drawing")
+                .map(|(_, value)| value),
+            _ => None,
+        }
+        .map(|value| {
+            serde_json::from_str(&value.stringify(Limits::default())?)
+                .map_err(|err| err.to_string())
+        })
+        .transpose()?;
+        let build = |kind, scalar, flag, values, keys| {
+            self.program
+                .function_l_pixel_json_value(kind, scalar, flag, values, keys)
+        };
+        let operation = compiled_json(operation, &build);
+        let report = self
+            .program
+            .invoke_view_l_paint_pixel_editor(
+                operation,
+                frame.map(str::to_owned),
+                cel.map(str::to_owned),
+            )?
+            .result?;
+        Ok(RasterPaintReport {
+            destination: "raster",
+            kind: "raster",
+            frame: report.l_frame,
+            layer: report.l_layer,
+            cel: report.l_cel,
+            tool: report.l_tool,
+            pixel_count: report.l_pixelCount,
+            runs: report.l_runs,
+            pixel_perfect: report.l_pixelPerfect,
+            selection: report.l_selection,
+            drawing,
+        })
+    }
+
+    pub fn snapshot(&mut self) -> Result<String, String> {
+        let snapshot = self.program.invoke_view_l_snapshot_pixel_editor()?.result;
+        let limits = Limits::default();
+        let mut document = Json::from_ink(&snapshot.l_document.to_json(), limits)?;
+        restore_named_pixels(&mut document, self.grid[0], snapshot.l_positions);
+        document.stringify(limits)
     }
 
     pub fn select(

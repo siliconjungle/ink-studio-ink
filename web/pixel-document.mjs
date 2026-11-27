@@ -38,6 +38,8 @@ export function createPixelEditor(source) {
   // JSON's typed representation has multiple schema levels per authored level.
   const load = state.bind('load_pixel_editor', { resultOnly: true, inputLimits: { depth: 512, nodes: 8000000 } });
   const pick = state.bind('select_pixel_editor', { resultOnly: true });
+  const draw = state.bind('paint_pixel_editor', { resultOnly: true });
+  const read = state.bind('snapshot_pixel_editor', { resultOnly: true });
   let grid;
   function replaceDocument(source) {
     const input = typeof source === 'string' ? JSON.parse(source) : source;
@@ -50,8 +52,25 @@ export function createPixelEditor(source) {
     return { frame: chosen.frame, grid: [chosen.grid.width, chosen.grid.height],
       pixels: maskPixels(chosen.grid.width, chosen.words) };
   }
+  function paint(operation, { frame, cel } = {}) {
+    const result = unwrap(draw(codec.fromJS(operation), option(frame), option(cel)));
+    const { pixelPerfect, selection, ...target } = result;
+    const drawing = ownData(operation, 'drawing');
+    return { destination: 'raster', kind: 'raster', ...target,
+      ...(pixelPerfect && { pixelPerfect }), ...(Object.hasOwn(selection, 'Some') && { selection: selection.Some }),
+      ...(drawing !== undefined && { drawing: structuredClone(drawing) }) };
+  }
+  function snapshot() {
+    const saved = read();
+    const document = codec.toJS(saved.document);
+    for (const [i, positions] of saved.positions.entries()) {
+      if (!positions.length) continue;
+      document.selections[i].pixels = positions.map(p => [p % document.width, Math.floor(p / document.width)]);
+    }
+    return document;
+  }
   replaceDocument(source);
-  return Object.freeze({ replaceDocument, select });
+  return Object.freeze({ replaceDocument, select, paint, snapshot });
 }
 
 function ownData(value, key) {
