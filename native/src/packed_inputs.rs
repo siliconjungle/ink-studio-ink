@@ -92,6 +92,14 @@ gpu_record!(ContourWindow { center: [f32; 2], radius: f32 });
 gpu_record!(ContourReveal { center: [f32; 2], radius: f32, edge_width: f32, floor_height: f32 });
 gpu_record!(ContourClock { time: f32, latest: f32, block_rows: u32 });
 gpu_record!(ContourFrame { clock: ContourClock, clip_motion: bool, terrain_rows: u32 });
+gpu_record!(ContourCut { actor_base: [f32; 3], radius: f32, min_height: f32, slice_distance: f32, index_base: u32 });
+gpu_record!(ContourView { frame: ContourFrame, cut: ContourCut });
+
+impl ContourCut {
+    pub(super) const OFF: Self = Self {
+        actor_base: [0.0; 3], radius: 0.0, min_height: 0.0, slice_distance: 0.0, index_base: 0,
+    };
+}
 
 pub(super) fn list<T: GpuWords>() -> Value {
     json!({"kind": "list", "element": T::layout()})
@@ -115,6 +123,6 @@ pub(super) struct PackedInputs {
     pub(super) rig_light: Option<PackedInput>,
     pub(super) contour_light: Option<PackedInput>,
     pub(super) contour_reveal: Option<PackedInput>,
-    pub(super) contour_frame: Option<PackedInput>,
+    pub(super) contour_view: Option<PackedInput>,
     pub(super) terrain_arrivals: Option<PackedInput>,
 }

@@ -185,6 +185,31 @@ const motionCases = [
     expected: call('project_lit_contour_scene', [motionWorld.slice(1), motionActors, camera, lamp]) },
 ];
 for (const { pure, args, expected } of motionCases) assert.deepEqual(call(pure, args), expected);
+const cutWorld = [
+  { ...disc, position: [0, 0.9, -4], rgb: 21 },
+  { ...disc, position: [0, 0.9, -6], rgb: 22 },
+  { ...disc, position: [0, 0.2, -4], rgb: 23 },
+  { ...disc, position: [4, 0.9, -4], rgb: 24 },
+  { ...disc, position: [4, 0.9, -0.75], rgb: 25 },
+  { ...disc, position: [0, 0.9, -4], rgb: 26 },
+];
+const cutActors = [{ ...cutWorld[0], rgb: 27 }];
+const cut = { actor_base: [0, 0, -5], radius: 1.6, min_height: 0.3, slice_distance: 0, index_base: 788480 };
+const cutFrame = { ...motionFrame, terrain_rows: 5 };
+const cutView = { frame: cutFrame, cut };
+const cutArgs = [cutWorld, cutActors, camera, lamp, { ...reveal, radius: 0 }, [], cutView];
+const preparedCut = [call('prepare_contour_terrain', [cutWorld]), ...cutArgs.slice(1)];
+const expectedCut = call('project_lit_contour_scene', [cutWorld.slice(1), cutActors, camera, lamp]);
+const expectedSlice = call('project_lit_contour_scene',
+  [[cutWorld[1], cutWorld[2], cutWorld[3], cutWorld[5]], cutActors, camera, lamp]);
+const sliced = { frame: cutFrame, cut: { ...cut, radius: 2.4, min_height: 0.5, slice_distance: 3.2 } };
+const cutCases = [
+  { pure: 'project_cut_lit_contours', args: cutArgs, expected: expectedCut },
+  { pure: 'project_cut_prepared_contours', args: preparedCut, expected: expectedCut },
+  { pure: 'project_cut_lit_contours', args: [...cutArgs.slice(0, 6), sliced], expected: expectedSlice },
+  { pure: 'project_cut_prepared_contours', args: [...preparedCut.slice(0, 6), sliced], expected: expectedSlice },
+];
+for (const { pure, args, expected } of cutCases) assert.deepEqual(call(pure, args), expected);
 const sourceRow = [1, 2, 3, 0.5, 4, 5, 6, 0xf08010, 7, 8, 9, 128, 11, 12, 13, 14];
 const imported = [{ position: [1, 2, 3], covariance0: [4, 5, 6], covariance1: [7, 8, 9],
   reach: 3, rgb: 0xf08010, alpha: 0.5 }];
@@ -235,6 +260,7 @@ try {
     { pure: 'project_revealed_lit_contours', args: roundedDot, expected: expectedDot },
     ...arrivalCases,
     ...motionCases,
+    ...cutCases,
     { pure: 'import_builder_splats', args: [sourceRow], expected: imported, cpuOnly: true },
   ];
   writeFileSync(requestsPath, JSON.stringify(tests.map(({ pure, args }) => ({ pure, args }))));

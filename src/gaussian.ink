@@ -453,6 +453,14 @@ record ContourWindow { center: Vec2<f32>, radius: f32, }
 record ContourReveal { center: Vec2<f32>, radius: f32, edge_width: f32, floor_height: f32, }
 record ContourClock { time: f32, latest: f32, block_rows: u32, }
 record ContourFrame { clock: ContourClock, clip_motion: Bool, terrain_rows: u32, }
+record ContourCut {
+    actor_base: Vec3<f32>,
+    radius: f32,
+    min_height: f32,
+    slice_distance: f32,
+    index_base: u32,
+}
+record ContourView { frame: ContourFrame, cut: ContourCut, }
 
 fn hard_reveal(window: ContourWindow) -> ContourReveal {
     return ContourReveal { center: window.center, radius: window.radius, edge_width: 0.0, floor_height: 0.0 };
@@ -483,13 +491,17 @@ fn reveal_cell_mul_add(cell: f32, high: f32, low: f32, add: f32) -> f32 {
     return sum + (cell * low + error);
 }
 
-fn reveal_cell_threshold(position: Vec3<f32>) -> f32 {
+fn reveal_cell_noise(position: Vec3<f32>) -> f32 {
     // Match the two multiply-adds used by the original WebGL dot product on Metal.
     let x = floor(position.x * 2.0) * 12.9898;
     let xy = reveal_cell_mul_add(floor(position.y * 2.0), 78.21875, 0.014251708984375, x);
     let angle = reveal_cell_mul_add(floor(position.z * 2.0), 37.71875, 0.00025177001953125, xy);
     let noise = reveal_sine(angle) * 43758.5453;
-    return (noise - floor(noise)) * 0.86 + 0.04;
+    return noise - floor(noise);
+}
+
+fn reveal_cell_threshold(position: Vec3<f32>) -> f32 {
+    return reveal_cell_noise(position) * 0.86 + 0.04;
 }
 
 fn terrain_age(index: u32, starts: List<f32>, clock: ContourClock) -> f32 {
@@ -533,6 +545,40 @@ fn outside_world_row(position: Vec3<f32>, index: u32, reveal: ContourReveal, sta
     frame: ContourFrame) -> Bool {
     if frame.clip_motion && index >= frame.terrain_rows { return outside_motion_reveal(position, reveal); }
     return outside_reveal(position, reveal, terrain_age(index, starts, frame.clock));
+}
+
+fn no_contour_cut() -> ContourCut {
+    return ContourCut { actor_base: vec3(0.0, 0.0, 0.0), radius: 0.0, min_height: 0.0,
+        slice_distance: 0.0, index_base: 0 };
+}
+
+fn horizontal_back(back: Vec3<f32>) -> Vec2<f32> {
+    let z = back.z + 0.00001;
+    if back.x == 0.0 { return vec2(0.0, if z < 0.0 { -1.0 } else { if z > 0.0 { 1.0 } else { 0.0 } }); }
+    return unit_direction(vec2(back.x, z));
+}
+
+// Clear the corridor from the player toward the eye. The far side of the
+// player and the moving rigs still contribute to the scene.
+fn cuts_foreground(position: Vec3<f32>, index: u32, back: Vec3<f32>, view: ContourView) -> Bool {
+    let cut = view.cut;
+    if !(cut.radius > 0.0 || cut.slice_distance > 0.0) || (view.frame.clip_motion && index >= view.frame.terrain_rows) { return false; }
+    if !(position.y > cut.actor_base.y + cut.min_height) { return false; }
+    let rel = vec3(position.x - cut.actor_base.x, position.y - (cut.actor_base.y + 0.9), position.z - cut.actor_base.z);
+    let horizontal = horizontal_back(back);
+    let front = rel.x * horizontal.x + rel.z * horizontal.y;
+    if !(front > 0.0) { return false; }
+    let along = dot3(rel, back);
+    if along > 0.4 && cut.radius > 0.0 {
+        let phase = f32_from_u32(index + cut.index_base) * 0.6180339;
+        let jitter = phase - floor(phase);
+        if front > 0.2 + 0.25 * jitter {
+            let perpendicular = vec3(rel.x - along * back.x, rel.y - along * back.y, rel.z - along * back.z);
+            if sqrt(dot3(perpendicular, perpendicular)) < cut.radius - 0.4 * jitter { return true; }
+        }
+    }
+    return cut.slice_distance > 0.0 && front > cut.slice_distance &&
+        front > cut.slice_distance + 0.8 * reveal_cell_noise(position);
 }
 
 fn near_unit(vector: Vec3<f32>, floor: f32, default: Vec3<f32>) -> Vec3<f32> {
@@ -616,10 +662,16 @@ fn project_field_actors(actors: List<WorldGaussian>, camera: Camera, light: Cont
 
 pub fn project_field_lit_contours(terrain: List<WorldGaussian>, actors: List<WorldGaussian>,
     camera: Camera, light: ContourLight, reveal: ContourReveal, starts: List<f32>, frame: ContourFrame) -> List<ContourEllipse> {
+    return project_cut_lit_contours(terrain, actors, camera, light, reveal, starts, ContourView { frame: frame, cut: no_contour_cut() });
+}
+
+pub fn project_cut_lit_contours(terrain: List<WorldGaussian>, actors: List<WorldGaussian>,
+    camera: Camera, light: ContourLight, reveal: ContourReveal, starts: List<f32>, view: ContourView) -> List<ContourEllipse> {
     let ground = terrain.map_indexed(fn(i) => fn(splat) =>
-        if !contributes(splat) || outside_world_row(splat.position, i, reveal, starts, frame) { hidden_contour() }
+        if !contributes(splat) || outside_world_row(splat.position, i, reveal, starts, view.frame)
+            || cuts_foreground(splat.position, i, camera.back, view) { hidden_contour() }
         else { directional_contour(splat, camera, light, false) }).filter(fn(row) => row.alpha > 0.0);
-    let posing = project_field_actors(actors, camera, light, reveal, frame.clip_motion);
+    let posing = project_field_actors(actors, camera, light, reveal, view.frame.clip_motion);
     return sort_contours(ground.concat(posing));
 }
 
@@ -667,9 +719,15 @@ pub fn project_streamed_prepared_contours(terrain: List<PreparedContourTerrain>,
 
 pub fn project_field_prepared_contours(terrain: List<PreparedContourTerrain>, actors: List<WorldGaussian>,
     camera: Camera, light: ContourLight, reveal: ContourReveal, starts: List<f32>, frame: ContourFrame) -> List<ContourEllipse> {
+    return project_cut_prepared_contours(terrain, actors, camera, light, reveal, starts, ContourView { frame: frame, cut: no_contour_cut() });
+}
+
+pub fn project_cut_prepared_contours(terrain: List<PreparedContourTerrain>, actors: List<WorldGaussian>,
+    camera: Camera, light: ContourLight, reveal: ContourReveal, starts: List<f32>, view: ContourView) -> List<ContourEllipse> {
     let ground = terrain.map_indexed(fn(i) => fn(dab) =>
-        if !contributes(dab.splat) || outside_world_row(dab.splat.position, i, reveal, starts, frame) { hidden_contour() }
+        if !contributes(dab.splat) || outside_world_row(dab.splat.position, i, reveal, starts, view.frame)
+            || cuts_foreground(dab.splat.position, i, camera.back, view) { hidden_contour() }
         else { project_prepared_dab(dab, camera, light) }).filter(fn(row) => row.alpha > 0.0);
-    let posing = project_field_actors(actors, camera, light, reveal, frame.clip_motion);
+    let posing = project_field_actors(actors, camera, light, reveal, view.frame.clip_motion);
     return sort_contours(ground.concat(posing));
 }

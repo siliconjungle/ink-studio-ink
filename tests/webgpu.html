@@ -162,6 +162,14 @@
     await directional.stageContourWindow([0, -5], 2.5, 2.2, 0);
     const outsideMotion = await directionalPixels(null);
     if (outsideMotion[center] !== outsideMotion[red]) throw new Error('A moving object remained visible outside the reveal');
+    await directional.stageContourWindow([0, 0], 0);
+    const cut = { actor_base: [0, -0.65, -3], radius: 1.6, min_height: 0.3, slice_distance: 0, index_base: 788480 };
+    await directional.stageContourClock(5, 5, 1, 1, cut);
+    const foreground = await directionalPixels(null);
+    if (foreground[center] !== foreground[red]) throw new Error('Foreground terrain still covered the actor');
+    await directional.stageContourClock(5, 5, 1, 1, { ...cut, actor_base: [0, -0.65, -1] });
+    const background = await directionalPixels(null);
+    if (background.some((channel, i) => channel !== disabled[i])) throw new Error('The cut removed terrain behind the actor');
     await directional.close();
     readback.destroy();
     const bone = { axis_x: [1, 0, 0], axis_y: [0, 1, 0], axis_z: [0, 0, 1], offset: [0, 0, 0] };

@@ -1,5 +1,5 @@
 use ink_gpu_program::{Backend, Engine};
-use ink_studio_wgpu::{Bone, Camera, ContourClock, ContourReveal, ContourSettings, ContourWindow, GaussianRenderer, RigLight, WorldOrder};
+use ink_studio_wgpu::{Bone, Camera, ContourClock, ContourCut, ContourReveal, ContourSettings, ContourWindow, GaussianRenderer, RigLight, WorldOrder};
 use serde_json::json;
 
 #[test]
@@ -161,6 +161,17 @@ fn computes_and_draws_from_the_same_device_buffer() {
     directional.project(&device).unwrap();
     let outside_motion = draw_fixture(&device, &queue, &texture, &readback, &directional);
     assert_eq!(outside_motion[center], outside_motion[0]);
+    directional.stage_contour_window(ContourWindow { center: [0.0; 2], radius: 0.0 }).unwrap();
+    let cut = ContourCut { actor_base: [0.0, -0.65, -3.0], radius: 1.6, min_height: 0.3,
+        slice_distance: 0.0, index_base: 788480 };
+    directional.stage_contour_view(clock, Some(1), Some(cut)).unwrap();
+    directional.project(&device).unwrap();
+    let foreground = draw_fixture(&device, &queue, &texture, &readback, &directional);
+    assert_eq!(foreground[center], foreground[0]);
+    directional.stage_contour_view(clock, Some(1),
+        Some(ContourCut { actor_base: [0.0, -0.65, -1.0], ..cut })).unwrap();
+    directional.project(&device).unwrap();
+    assert_eq!(draw_fixture(&device, &queue, &texture, &readback, &directional), data);
 }
 
 fn draw_fixture(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture,

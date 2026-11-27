@@ -9,8 +9,8 @@ mod present;
 mod render;
 pub use contours::ContourSettings;
 use contours::ContourRaster;
-pub use packed_inputs::{Bone, Camera, ContourClock, ContourLight, ContourReveal, ContourWindow, RigLight, WorldSplat};
-use packed_inputs::{ContourFrame, GpuWords, PackedInputs, binding};
+pub use packed_inputs::{Bone, Camera, ContourClock, ContourCut, ContourLight, ContourReveal, ContourWindow, RigLight, WorldSplat};
+use packed_inputs::{ContourFrame, ContourView, GpuWords, PackedInputs, binding};
 pub use present::PixelPresenter;
 
 pub struct GaussianRenderer {
@@ -290,16 +290,18 @@ impl GaussianRenderer {
             args.push(json!({ "input": "contourLight" }));
             inputs["contourReveal"] = json!({"center": [0, 0], "radius": 0, "edge_width": 0, "floor_height": 0});
             inputs["terrainArrivals"] = json!(vec![-100.0; terrain.arrival_blocks.max(1)]);
-            inputs["contourFrame"] = json!({"clock": {"time": 0, "latest": 0, "block_rows": 0},
-                "clip_motion": false, "terrain_rows": 0});
-            args.extend(["contourReveal", "terrainArrivals", "contourFrame"].map(|input| json!({ "input": input })));
-            function = "project_field_lit_contours";
+            inputs["contourView"] = json!({
+                "frame": {"clock": {"time": 0, "latest": 0, "block_rows": 0}, "clip_motion": false, "terrain_rows": 0},
+                "cut": {"actor_base": [0, 0, 0], "radius": 0, "min_height": 0, "slice_distance": 0, "index_base": 0},
+            });
+            args.extend(["contourReveal", "terrainArrivals", "contourView"].map(|input| json!({ "input": input })));
+            function = "project_cut_lit_contours";
         }
         let retained_steps = if directional && terrain.retain_normals {
             steps.push(json!({"id": "terrain-normals", "call": "prepare_contour_terrain",
                 "args": [{"input": "splats"}]}));
             args[0] = json!({"step": "terrain-normals"});
-            function = "project_field_prepared_contours";
+            function = "project_cut_prepared_contours";
             &["terrain-normals"][..]
         } else {
             &[]
@@ -500,13 +502,23 @@ impl GaussianRenderer {
     /// Apply moving-object reveal to the skinned rows and the world rows
     /// after the terrain range when `terrain_rows` is supplied.
     pub fn stage_contour_frame(&mut self, clock: ContourClock, terrain_rows: Option<u32>) -> Result<(), String> {
+        self.stage_contour_view(clock, terrain_rows, None)
+    }
+
+    /// Stage the foreground cut and interior slice together with the scene clock.
+    pub fn stage_contour_view(&mut self, clock: ContourClock, terrain_rows: Option<u32>, cut: Option<ContourCut>) -> Result<(), String> {
         if !self.directional || !clock.time.is_finite() || !clock.latest.is_finite() {
             return Err("Invalid contour clock".into());
         }
         let frame = ContourFrame { clock, clip_motion: terrain_rows.is_some(), terrain_rows: terrain_rows.unwrap_or(0) };
-        let input = binding(&mut self.packed_inputs.contour_frame, &self.engine, self.session,
-            "contourFrame", ContourFrame::layout)?;
-        self.engine.write_packed(input, frame.words())?;
+        let cut = cut.unwrap_or(ContourCut::OFF);
+        if !cut.radius.is_finite() || cut.radius < 0.0 || !cut.min_height.is_finite() ||
+            !cut.slice_distance.is_finite() || cut.slice_distance < 0.0 || cut.actor_base.iter().any(|x| !x.is_finite()) {
+            return Err("Invalid contour cut".into());
+        }
+        let input = binding(&mut self.packed_inputs.contour_view, &self.engine, self.session,
+            "contourView", ContourView::layout)?;
+        self.engine.write_packed(input, ContourView { frame, cut }.words())?;
         Ok(())
     }
 
