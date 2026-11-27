@@ -5,6 +5,7 @@ const shaderURL = new URL('../shaders/gaussian.wgsl', import.meta.url);
 const bundleURL = new URL('../build/gpu/', import.meta.url);
 const contourLightOff = { enabled: false, direction: [0, 1, 0], actor_center: [0, 0, 0], actor_rows: 0,
   ambient: [1, 1, 1], key: [0, 0, 0] };
+const contourRevealOff = { center: [0, 0], radius: 0, edge_width: 0, floor_height: 0 };
 
 function assertEllipseLayout(view, contours) {
   const fields = view.type?.element?.fields;
@@ -58,9 +59,9 @@ export async function createGaussianRenderer(device, format, { width, height, sp
   const directional = contours?.directional === true;
   if (directional) {
     projection.input.contourLight = contourLightOff;
-    projection.input.contourWindow = { center: [0, 0], radius: 0 };
-    steps.at(-1).call = 'project_windowed_lit_contours';
-    steps.at(-1).args.push({ input: 'contourLight' }, { input: 'contourWindow' });
+    projection.input.contourReveal = contourRevealOff;
+    steps.at(-1).call = 'project_revealed_lit_contours';
+    steps.at(-1).args.push({ input: 'contourLight' }, { input: 'contourReveal' });
   }
   const compactedWorld = projection.call === 'project_visible_sorted_world' && !contours && !hasSkin;
   const ink = await loadInk(bundleURL, { device, parallelU64Merge: compactedWorld });
@@ -153,11 +154,12 @@ export async function createGaussianRenderer(device, format, { width, height, sp
         await session.write('contourLight', frame);
         contourRaster.setLighting(frame);
       },
-      stageContourWindow(center, radius) {
-        if (!directional || center.length !== 2 || !center.every(Number.isFinite) || !Number.isFinite(radius) || radius < 0) {
-          throw new Error('Invalid directional contour window');
+      stageContourWindow(center, radius, edgeWidth = 0, floorHeight = 0) {
+        if (!directional || center?.length !== 2 || !center.every(Number.isFinite) || !Number.isFinite(radius) || radius < 0
+            || !Number.isFinite(edgeWidth) || edgeWidth < 0 || !Number.isFinite(floorHeight)) {
+          throw new Error('Invalid directional contour reveal');
         }
-        return session.write('contourWindow', { center, radius });
+        return session.write('contourReveal', { center, radius, edge_width: edgeWidth, floor_height: floorHeight });
       },
       async updateSkinCamera(value, { bones, light }) {
         if (!hasSkin) throw new Error('Skin updates require a skinned world view');

@@ -450,12 +450,59 @@ record ContourLight {
 }
 
 record ContourWindow { center: Vec2<f32>, radius: f32, }
+record ContourReveal { center: Vec2<f32>, radius: f32, edge_width: f32, floor_height: f32, }
 
-fn outside_window(position: Vec3<f32>, window: ContourWindow) -> Bool {
-    if !(window.radius > 0.0) { return false; }
-    let x = position.x - window.center.x;
-    let z = position.z - window.center.y;
-    return x * x + z * z > window.radius * window.radius;
+fn hard_reveal(window: ContourWindow) -> ContourReveal {
+    return ContourReveal { center: window.center, radius: window.radius, edge_width: 0.0, floor_height: 0.0 };
+}
+
+fn reveal_sine(angle: f32) -> f32 {
+    let turn = floor(angle * 0.15915494309189535 + 0.5);
+    // The first two terms are exactly representable when multiplied by
+    // the turn counts found in the field. Keep the small residual separate.
+    let phase = ((angle - turn * 6.28125) - turn * 0.00193500518798828125)
+        - turn * 0.00000030199159795074593;
+    let x = if phase > 1.5707963267948966 { 3.141592653589793 - phase }
+        else { if phase < -1.5707963267948966 { -3.141592653589793 - phase } else { phase } };
+    let q = x * x;
+    return x * (1.0 + q * (-0.16666666666666667 + q * (0.008333333333333333
+        + q * (-0.0001984126984126984 + q * (0.0000027557319223985893
+        + q * (-0.00000002505210838544172 + q * 0.00000000016059043836821615))))));
+}
+
+// Each split product is exact for the half-unit cell coordinates in the
+// field. Restore the part rounded off by the addition before rounding again.
+fn reveal_cell_mul_add(cell: f32, high: f32, low: f32, add: f32) -> f32 {
+    let product = cell * high;
+    let sum = product + add;
+    let product_abs = absolute(product);
+    let add_abs = absolute(add);
+    let error = if product_abs >= add_abs { (product - sum) + add } else { (add - sum) + product };
+    return sum + (cell * low + error);
+}
+
+fn reveal_cell_threshold(position: Vec3<f32>) -> f32 {
+    // Match the two multiply-adds used by the original WebGL dot product on Metal.
+    let x = floor(position.x * 2.0) * 12.9898;
+    let xy = reveal_cell_mul_add(floor(position.y * 2.0), 78.21875, 0.014251708984375, x);
+    let angle = reveal_cell_mul_add(floor(position.z * 2.0), 37.71875, 0.00025177001953125, xy);
+    let noise = reveal_sine(angle) * 43758.5453;
+    return (noise - floor(noise)) * 0.86 + 0.04;
+}
+
+fn outside_reveal(position: Vec3<f32>, reveal: ContourReveal) -> Bool {
+    if !(reveal.radius > 0.0) { return false; }
+    let x = position.x - reveal.center.x;
+    let z = position.z - reveal.center.y;
+    let dist2 = x * x + z * z;
+    if !(reveal.edge_width > 0.0) { return dist2 > reveal.radius * reveal.radius; }
+    let height = position.y - reveal.floor_height;
+    let bounded_height = if height < 0.0 { 0.0 } else { if height > 9.0 { 9.0 } else { height } };
+    let outer = reveal.radius - bounded_height * 0.1;
+    if outer <= 0.0 || dist2 >= outer * outer { return true; }
+    let inner = outer - reveal.edge_width;
+    if inner > 0.0 && dist2 <= inner * inner { return false; }
+    return (outer - sqrt(dist2)) / reveal.edge_width <= reveal_cell_threshold(position);
 }
 
 fn near_unit(vector: Vec3<f32>, floor: f32, default: Vec3<f32>) -> Vec3<f32> {
@@ -515,8 +562,13 @@ pub fn project_lit_contour_scene(terrain: List<WorldGaussian>, actors: List<Worl
 
 pub fn project_windowed_lit_contours(terrain: List<WorldGaussian>, actors: List<WorldGaussian>,
     camera: Camera, light: ContourLight, window: ContourWindow) -> List<ContourEllipse> {
+    return project_revealed_lit_contours(terrain, actors, camera, light, hard_reveal(window));
+}
+
+pub fn project_revealed_lit_contours(terrain: List<WorldGaussian>, actors: List<WorldGaussian>,
+    camera: Camera, light: ContourLight, reveal: ContourReveal) -> List<ContourEllipse> {
     let ground = terrain.map(fn(splat) =>
-        if outside_window(splat.position, window) { hidden_contour() }
+        if outside_reveal(splat.position, reveal) { hidden_contour() }
         else { directional_contour(splat, camera, light, false) }).filter(fn(row) => row.alpha > 0.0);
     let posing = actors.map_indexed(fn(i) => fn(splat) =>
         directional_contour(splat, camera, light, i < light.actor_rows)).filter(fn(row) => row.alpha > 0.0);
@@ -550,8 +602,13 @@ pub fn project_prepared_lit_contour_scene(terrain: List<PreparedContourTerrain>,
 
 pub fn project_windowed_prepared_contours(terrain: List<PreparedContourTerrain>, actors: List<WorldGaussian>,
     camera: Camera, light: ContourLight, window: ContourWindow) -> List<ContourEllipse> {
+    return project_revealed_prepared_contours(terrain, actors, camera, light, hard_reveal(window));
+}
+
+pub fn project_revealed_prepared_contours(terrain: List<PreparedContourTerrain>, actors: List<WorldGaussian>,
+    camera: Camera, light: ContourLight, reveal: ContourReveal) -> List<ContourEllipse> {
     let ground = terrain.map(fn(dab) =>
-        if outside_window(dab.splat.position, window) { hidden_contour() }
+        if outside_reveal(dab.splat.position, reveal) { hidden_contour() }
         else { project_prepared_dab(dab, camera, light) }).filter(fn(row) => row.alpha > 0.0);
     let posing = actors.map_indexed(fn(i) => fn(splat) =>
         directional_contour(splat, camera, light, i < light.actor_rows)).filter(fn(row) => row.alpha > 0.0);

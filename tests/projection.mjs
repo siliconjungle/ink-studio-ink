@@ -110,6 +110,36 @@ const disabledWindowArgs = [...windowArgs.slice(0, 4), disabledWindow];
 const disabledPreparedArgs = [...preparedWindowArgs.slice(0, 4), disabledWindow];
 assert.deepEqual(call('project_windowed_lit_contours', disabledWindowArgs), unwindowed);
 assert.deepEqual(call('project_windowed_prepared_contours', disabledPreparedArgs), unwindowed);
+const revealTerrain = [
+  { ...disc, position: [0, 0.15, -5.15], rgb: 1 },
+  { ...disc, position: [0, 0.25, -5.25], rgb: 2 },
+  { ...disc, position: [0, 0.15, -6.65], rgb: 3 },
+  { ...disc, position: [0, 4.15, -5.15], rgb: 4 },
+  { ...disc, position: [0, 0, -6], rgb: 5 },
+  { ...disc, position: [0, 0, -8.5], rgb: 6 },
+];
+const revealActors = [{ ...disc, position: [0, 0, -8.75], rgb: 7 }];
+const reveal = { center: [0, -6], radius: 2.27, edge_width: 2.2, floor_height: 0 };
+const revealed = [revealTerrain, revealActors, camera, lamp, reveal];
+const preparedReveal = [call('prepare_contour_terrain', [revealTerrain]), ...revealed.slice(1)];
+const raisedReveal = { ...reveal, floor_height: 4 };
+const raised = [...revealed.slice(0, 4), raisedReveal];
+const raisedPrepared = [...preparedReveal.slice(0, 4), raisedReveal];
+// The original WebGL edge keeps pigment 3 in the fringe and rejects 1 and 2
+// together. Raising the floor advances the reveal for the high row (4).
+const expectedReveal = call('project_lit_contour_scene', [[revealTerrain[2], revealTerrain[4]], ...revealed.slice(1, 4)]);
+const expectedRaised = call('project_lit_contour_scene', [[revealTerrain[2], revealTerrain[3], revealTerrain[4]], ...revealed.slice(1, 4)]);
+assert.deepEqual(call('project_revealed_lit_contours', revealed), expectedReveal);
+assert.deepEqual(call('project_revealed_prepared_contours', preparedReveal), expectedReveal);
+assert.deepEqual(call('project_revealed_lit_contours', raised), expectedRaised);
+assert.deepEqual(call('project_revealed_prepared_contours', raisedPrepared), expectedRaised);
+const roundedDotRows = [
+  { ...disc, position: [-8.981194, 3.878267, -2.341330], rgb: 8 },
+  { ...disc, position: [-8.636525, 3.855191, -5.088100], rgb: 9 },
+];
+const roundedDot = [roundedDotRows, [], camera, lamp, { ...reveal, radius: 10.5 }];
+const expectedDot = call('project_lit_contour_scene', [[roundedDotRows[1]], [], camera, lamp]);
+assert.deepEqual(call('project_revealed_lit_contours', roundedDot), expectedDot);
 const sourceRow = [1, 2, 3, 0.5, 4, 5, 6, 0xf08010, 7, 8, 9, 128, 11, 12, 13, 14];
 const imported = [{ position: [1, 2, 3], covariance0: [4, 5, 6], covariance1: [7, 8, 9],
   reach: 3, rgb: 0xf08010, alpha: 0.5 }];
@@ -153,6 +183,11 @@ try {
     { pure: 'project_windowed_prepared_contours', args: preparedWindowArgs, expected: windowed },
     { pure: 'project_windowed_lit_contours', args: disabledWindowArgs, expected: unwindowed },
     { pure: 'project_windowed_prepared_contours', args: disabledPreparedArgs, expected: unwindowed },
+    { pure: 'project_revealed_lit_contours', args: revealed, expected: expectedReveal },
+    { pure: 'project_revealed_prepared_contours', args: preparedReveal, expected: expectedReveal },
+    { pure: 'project_revealed_lit_contours', args: raised, expected: expectedRaised },
+    { pure: 'project_revealed_prepared_contours', args: raisedPrepared, expected: expectedRaised },
+    { pure: 'project_revealed_lit_contours', args: roundedDot, expected: expectedDot },
     { pure: 'import_builder_splats', args: [sourceRow], expected: imported, cpuOnly: true },
   ];
   writeFileSync(requestsPath, JSON.stringify(tests.map(({ pure, args }) => ({ pure, args }))));

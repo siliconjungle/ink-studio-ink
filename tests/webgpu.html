@@ -138,6 +138,12 @@
     await directional.stageContourWindow([0, -5], 0);
     const reopened = await directionalPixels(null);
     if (reopened.some((channel, i) => channel !== disabled[i])) throw new Error('Disabling the terrain window did not restore the splat');
+    await directional.stageContourWindow([0, -2], 0.35, 2.2, 0);
+    const feathered = await directionalPixels(null);
+    if (feathered[center] !== feathered[red]) throw new Error('Dithered edge kept a splat with insufficient exposure');
+    await directional.stageContourWindow([0, -2], 2.5, 2.2, 0);
+    const fullyVisible = await directionalPixels(null);
+    if (fullyVisible.some((channel, i) => channel !== disabled[i])) throw new Error('Dithered edge changed the interior');
     await directional.close();
     readback.destroy();
     const bone = { axis_x: [1, 0, 0], axis_y: [0, 1, 0], axis_z: [0, 0, 1], offset: [0, 0, 0] };

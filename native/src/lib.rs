@@ -9,7 +9,7 @@ mod present;
 mod render;
 pub use contours::ContourSettings;
 use contours::ContourRaster;
-pub use packed_inputs::{Bone, Camera, ContourLight, ContourWindow, RigLight, WorldSplat};
+pub use packed_inputs::{Bone, Camera, ContourLight, ContourReveal, ContourWindow, RigLight, WorldSplat};
 use packed_inputs::{GpuWords, PackedInputs, binding};
 pub use present::PixelPresenter;
 
@@ -281,15 +281,15 @@ impl GaussianRenderer {
         if directional {
             inputs["contourLight"] = contour_light_off();
             args.push(json!({ "input": "contourLight" }));
-            inputs["contourWindow"] = json!({"center": [0, 0], "radius": 0});
-            args.push(json!({ "input": "contourWindow" }));
-            function = "project_windowed_lit_contours";
+            inputs["contourReveal"] = json!({"center": [0, 0], "radius": 0, "edge_width": 0, "floor_height": 0});
+            args.push(json!({ "input": "contourReveal" }));
+            function = "project_revealed_lit_contours";
         }
         let retained_steps = if directional && retain_terrain {
             steps.push(json!({"id": "terrain-normals", "call": "prepare_contour_terrain",
                 "args": [{"input": "splats"}]}));
             args[0] = json!({"step": "terrain-normals"});
-            function = "project_windowed_prepared_contours";
+            function = "project_revealed_prepared_contours";
             &["terrain-normals"][..]
         } else {
             &[]
@@ -453,14 +453,22 @@ impl GaussianRenderer {
     /// Stage the horizontal terrain visibility window for directional contours.
     /// A zero radius disables clipping.
     pub fn stage_contour_window(&mut self, window: ContourWindow) -> Result<(), String> {
-        if !self.directional || !window.radius.is_finite() || window.radius < 0.0
-            || window.center.iter().any(|v| !v.is_finite())
+        self.stage_contour_reveal(ContourReveal {
+            center: window.center, radius: window.radius, edge_width: 0.0, floor_height: 0.0,
+        })
+    }
+
+    /// Stage a visibility window with a dithered, height-dependent terrain edge.
+    pub fn stage_contour_reveal(&mut self, reveal: ContourReveal) -> Result<(), String> {
+        if !self.directional || !reveal.radius.is_finite() || reveal.radius < 0.0
+            || !reveal.edge_width.is_finite() || reveal.edge_width < 0.0 || !reveal.floor_height.is_finite()
+            || reveal.center.iter().any(|v| !v.is_finite())
         {
-            return Err("Invalid directional contour window".into());
+            return Err("Invalid directional contour reveal".into());
         }
-        let input = binding(&mut self.packed_inputs.contour_window, &self.engine, self.session,
-            "contourWindow", ContourWindow::layout)?;
-        self.engine.write_packed(input, window.words())?;
+        let input = binding(&mut self.packed_inputs.contour_reveal, &self.engine, self.session,
+            "contourReveal", ContourReveal::layout)?;
+        self.engine.write_packed(input, reveal.words())?;
         Ok(())
     }
 
