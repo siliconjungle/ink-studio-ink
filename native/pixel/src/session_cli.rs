@@ -4,7 +4,6 @@ use super::{
     session_commands::{self as commands, EDITS},
 };
 use ink_studio_pixel::PixelCommandEditor;
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
@@ -130,6 +129,7 @@ pub fn run(mut args: impl Iterator<Item = OsString>) -> Result<(), String> {
                 | "validate"
                 | "inspect"
                 | "copy"
+                | "brush"
                 | "sample"
                 | "snap"
                 | "timeline"
@@ -161,6 +161,10 @@ pub fn run(mut args: impl Iterator<Item = OsString>) -> Result<(), String> {
     };
     let travel = matches!(action.as_str(), "commit" | "cancel" | "undo" | "redo");
     let mut changed = None;
+    if action == "brush" {
+        println!("{}", commands::brush(directory, &mut editor, &options)?);
+        return Ok(());
+    }
     if !matches!(action.as_str(), "init" | "status") {
         let out = if matches!(action.as_str(), "run" | "export") {
             commands::target(directory, input, &options)?

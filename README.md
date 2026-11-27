@@ -150,6 +150,10 @@ Use `session sample DIRECTORY --at x,y` to sample the composite, or pass
 Use `session snap DIRECTORY --at x,y [--frame ID] [--radius N]` to snap a
 possibly fractional point to active guides. Use `session timeline DIRECTORY`
 to report frame timings, cel holds, and playback tags.
+Use `session brush DIRECTORY --selection ID --out brush.json` to capture the
+draft's selected shape, or pass `--rect x,y,width,height`. Options include
+`--anchor x,y`, `--angle`, `--size width,height`, `--tint SWATCH`,
+`--stabilization`, `--pressure low,high`, and `--velocity speed,slow,fast`.
 Use the `draw`, `mask`, `recolor`, and `transform` aliases with patch files.
 `session run DIRECTORY COMMAND --out result.json` saves a command's reply.
 A rejected edit still saves the rollback of its open draft. Session output

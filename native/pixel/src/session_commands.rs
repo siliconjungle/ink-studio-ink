@@ -3,8 +3,12 @@ use super::{
     file_output::{absolute_normalized, output, output_bytes, resolved},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use ink_studio_pixel::{PixelCommandEditor, PixelEditError, PixelPreviewOptions};
-use serde::{Deserialize, Serialize};
+use ink_abi::{json_value::{Json, parse as parse_authored_json}, value_wire::Limits};
+use ink_studio_pixel::{CapturedBrush, PixelCommandEditor, PixelEditError, PixelPreviewOptions};
+use serde::{
+    Deserialize, Serialize, Serializer,
+    ser::{Error as _, SerializeMap, SerializeSeq, SerializeStruct},
+};
 use serde_json::{Map, Value, json, value::RawValue};
 use std::{
     fs,
@@ -105,11 +109,223 @@ fn inspect_destinations(options: &Map<String, Value>) -> Result<Option<Value>, S
 }
 
 fn decimal_pair(raw: &Value, message: &str) -> Result<Value, String> {
-    let parts: Vec<_> = raw.as_str().ok_or(message)?.split(',').map(str::trim).collect();
-    if parts.len() != 2 || parts.contains(&"") {
+    decimal_tuple(raw, 2, message)
+}
+
+fn decimal_tuple(raw: &Value, size: usize, message: &str) -> Result<Value, String> {
+    let parts: Vec<_> = raw
+        .as_str()
+        .ok_or(message)?
+        .split(',')
+        .map(str::trim)
+        .collect();
+    if parts.len() != size || parts.contains(&"") {
         return Err(message.into());
     }
-    Ok(Value::Array(parts.into_iter().map(|part| json!(cli_number(part))).collect()))
+    Ok(Value::Array(
+        parts
+            .into_iter()
+            .map(|part| json!(cli_number(part)))
+            .collect(),
+    ))
+}
+
+#[derive(Serialize)]
+struct BrushDynamics {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stabilization: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pressure: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    velocity: Option<BrushVelocity>,
+}
+
+#[derive(Serialize)]
+struct BrushVelocity {
+    speed: Value,
+    size: [Value; 2],
+}
+
+#[derive(Serialize)]
+struct BrushTint {
+    mode: &'static str,
+    id: String,
+    color: String,
+}
+
+#[derive(Serialize)]
+struct BrushOptions {
+    #[serde(flatten)]
+    scope: Map<String, Value>,
+    settings: BrushSettings,
+}
+
+#[derive(Serialize)]
+struct BrushSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    angle: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    swatch: Option<BrushTint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dynamics: Option<BrushDynamics>,
+}
+
+fn brush_options(
+    editor: &mut PixelCommandEditor,
+    input: &Map<String, Value>,
+) -> Result<BrushOptions, String> {
+    let tuple = |flag, size| {
+        input
+            .get(flag)
+            .map(|raw| decimal_tuple(raw, size, &format!("Use --{flag} with {size} numbers")))
+            .transpose()
+    };
+    let number = |flag| {
+        input
+            .get(flag)
+            .map(|raw| json!(reference(raw).and_then(cli_number)))
+    };
+    let angle = number("angle");
+    let size = tuple("size", 2)?;
+    let stabilization = number("stabilization");
+    let velocity = tuple("velocity", 3)?.map(|values| BrushVelocity {
+        speed: values[0].clone(),
+        size: [values[1].clone(), values[2].clone()],
+    });
+    let pressure = tuple("pressure", 2)?;
+    let dynamics = (stabilization.is_some() || pressure.is_some() || velocity.is_some()).then_some(
+        BrushDynamics {
+            stabilization,
+            pressure,
+            velocity,
+        },
+    );
+    let swatch = input
+        .get("tint")
+        .map(|raw| {
+            let message = "Choose a known swatch for --tint";
+            let id = reference(raw).ok_or(message)?;
+            let palette: Value =
+                serde_json::from_str(&editor.palette()?).map_err(|error| error.to_string())?;
+            let color = palette["swatches"]
+                .as_array()
+                .and_then(|swatches| swatches.iter().find(|row| row["id"] == id))
+                .and_then(|row| row["color"].as_str())
+                .ok_or(message)?;
+            Ok::<_, String>(BrushTint {
+                mode: "tint",
+                id: id.into(),
+                color: color.into(),
+            })
+        })
+        .transpose()?;
+    let mut scope = selected(
+        input,
+        &[
+            ("selection", "selection"),
+            ("frame", "frame"),
+            ("layer", "layer"),
+            ("cel", "cel"),
+        ],
+    );
+    for (flag, size) in [("rect", 4), ("anchor", 2)] {
+        if let Some(value) = tuple(flag, size)? {
+            scope.insert(flag.into(), value);
+        }
+    }
+    Ok(BrushOptions {
+        scope,
+        settings: BrushSettings {
+            angle,
+            size,
+            swatch,
+            dynamics,
+        },
+    })
+}
+
+// The brush settings travel as authored JSON to preserve their order and
+// numeric spelling. Expand that JSON when writing the indented asset.
+struct Authored<'a>(&'a Json);
+
+impl Serialize for Authored<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            Json::Null => serializer.serialize_unit(),
+            Json::Boolean(value) => serializer.serialize_bool(*value),
+            Json::Number(token) => RawValue::from_string(token.clone())
+                .map_err(S::Error::custom)?
+                .serialize(serializer),
+            Json::Text(text) => serializer.serialize_str(text),
+            Json::Array(items) => {
+                let mut values = serializer.serialize_seq(Some(items.len()))?;
+                for value in items {
+                    values.serialize_element(&Authored(value))?;
+                }
+                values.end()
+            }
+            Json::Object(fields) => {
+                let mut object = serializer.serialize_map(Some(fields.len()))?;
+                for (key, value) in fields {
+                    object.serialize_entry(key, &Authored(value))?;
+                }
+                object.end()
+            }
+        }
+    }
+}
+
+struct BrushFile<'a>(&'a CapturedBrush, Authored<'a>);
+
+impl Serialize for BrushFile<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let brush = self.0;
+        let mut fields = serializer.serialize_struct("BrushFile", 8)?;
+        fields.serialize_field("format", brush.format)?;
+        fields.serialize_field("version", &brush.version)?;
+        fields.serialize_field("width", &brush.width)?;
+        fields.serialize_field("height", &brush.height)?;
+        fields.serialize_field("anchor", &brush.anchor)?;
+        fields.serialize_field("palette", &brush.palette)?;
+        fields.serialize_field("slots", &brush.slots)?;
+        fields.serialize_field("settings", &self.1)?;
+        fields.end()
+    }
+}
+
+pub(crate) fn brush(
+    directory: &Path,
+    editor: &mut PixelCommandEditor,
+    input: &Map<String, Value>,
+) -> Result<String, String> {
+    require_local("brush", input)?;
+    const MISSING: &str = "Use --out to save the brush JSON";
+    const SEPARATE: &str = "Write the brush to a separate output";
+    if input.get("out").and_then(reference).is_none() {
+        return Err(MISSING.into());
+    }
+    let file = target(directory, None, input)
+        .map_err(|error| {
+            if error == "Choose an output outside the session checkpoints" {
+                SEPARATE.into()
+            } else {
+                error
+            }
+        })?
+        .ok_or(MISSING)?;
+    if resolved(&file)? == resolved(directory)? {
+        return Err(SEPARATE.into());
+    }
+    let options =
+        serde_json::to_string(&brush_options(editor, input)?).map_err(|error| error.to_string())?;
+    let brush = editor.capture_brush(&options)?;
+    let settings = parse_authored_json(brush.settings.get(), Limits::default())?;
+    let asset = serde_json::to_string_pretty(&BrushFile(&brush, Authored(&settings)))
+        .map_err(|error| error.to_string())?;
+    output(&file, &asset)?;
+    Ok(json!({ "file": file, "format": brush.format, "size": [brush.width, brush.height], "anchor": brush.anchor }).to_string())
 }
 
 fn require_local(action: &str, options: &Map<String, Value>) -> Result<(), String> {

@@ -504,6 +504,10 @@ impl PixelCommandEditor {
         self.editor.copy_selection(options)
     }
 
+    pub fn capture_brush(&mut self, options: &str) -> Result<super::CapturedBrush, String> {
+        self.editor.capture_brush(options)
+    }
+
     pub fn select(
         &mut self,
         query: &str,

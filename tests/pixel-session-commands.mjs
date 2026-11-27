@@ -37,7 +37,7 @@ function comparison(response) {
   if (!reply) return response;
   const result = { ...reply };
   if (result.directory) result.directory = '<session>';
-  if (result.file && result.artifact) result.file = '<artifact>';
+  if (result.file && (result.artifact || result.format === 'ink-studio/pixel-brush')) result.file = '<artifact>';
   return { reply: result, ...status };
 }
 function both(action, args = [], status = 0) {
@@ -89,6 +89,26 @@ try {
   assert.equal(both('validate').revision, revision);
   const before = both('status').revision;
 
+  const captured = output('brush', ['--rect', '4,3,2,2', '--layer', 'ink'], 'brush-rectangle', true);
+  assert.equal(JSON.parse(readFileSync(captured)).format, 'ink-studio/pixel-brush');
+  const tinted = output('brush', ['--selection', 'mark', '--cel', 'front/ink', '--anchor', '1,1',
+    '--angle', '-37.5', '--size', '8,3', '--tint', 'ochre', '--stabilization', '42.5',
+    '--pressure', '0.2,1.5', '--velocity', '160,1.5,0.4'], 'brush-shaped', true);
+  assert.deepEqual(JSON.parse(readFileSync(tinted)).settings.swatch, { mode: 'tint', id: 'ochre', color: '#bc8133' });
+  const unused = join(directory, 'rejected-brush.json');
+  both('brush', ['--rect', '4,3,2,2'], 1);
+  both('brush', ['--rect', '4,3,2', '--out', unused], 1);
+  both('brush', ['--rect', '4,3,2,2', '--tint', 'missing', '--out', unused], 1);
+  both('brush', ['--rect', '4,3,2,2', '--pressure', '0,9', '--out', unused], 1);
+  assert.equal(existsSync(unused), false);
+  for (const engine of ['original', 'native']) {
+    const next = join(folders[engine], 'checkpoint-999.json');
+    assert.deepEqual(call(engine, 'brush', ['--selection', 'mark', '--out', next]),
+      { reply: null, status: 1, error: 'Write the brush to a separate output' });
+    assert.equal(existsSync(next), false);
+  }
+  paired++;
+
   const artifact = output('export', [], 'document');
   const exportDoc = JSON.parse(readFileSync(artifact));
   assert.deepEqual([exportDoc.width, exportDoc.height], [6, 5]);
@@ -105,6 +125,7 @@ try {
   symlinkSync(folders.native, alias);
   const disguised = join(alias, 'checkpoint-999.json');
   assert.match(call('native', 'export', ['--out', disguised]).error, /outside the session checkpoints/);
+  assert.match(call('native', 'brush', ['--selection', 'mark', '--out', disguised]).error, /separate output/);
   assert.equal(existsSync(disguised), false);
   assert.match(call('native', 'run', [select, '--out', select]).error, /separately from its inputs/);
   assert.equal(both('status').revision, before);
@@ -139,7 +160,7 @@ try {
   const reloaded = call('native', 'status', [], folders.original);
   assert.equal(reloaded.status, 0);
   assert.deepEqual(reloaded.reply.history, both('status').history);
-  console.log(JSON.stringify({ pairedSessionCalls: paired, binaryExport: true, staleDraftRolledBack: true }));
+  console.log(JSON.stringify({ pairedSessionCalls: paired, binaryExport: true, brushFilesByteIdentical: 2, staleDraftRolledBack: true }));
 } finally {
   rmSync(directory, { recursive: true, force: true });
 }
