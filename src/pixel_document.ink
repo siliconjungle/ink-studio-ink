@@ -1,6 +1,7 @@
 module StudioPixelDocument;
 
 import "std:json" as json;
+import "pixel_selection.ink" as selection;
 
 record Layer { id: String, kind: String, parent: String, }
 record Cel { id: String, hold: String, }
@@ -11,6 +12,20 @@ record Visits { seen: Map<u32, u32>, issue: String, }
 record HoldWalk { visits: Visits, path: Buffer<u32>, current: u32, }
 record LabelScan { offset: u32, visible: Bool, }
 record Opened { document: json.Json, legacy: Bool, }
+
+pub fn select_pixel_indices(query: List<json.Json>, width: u32, height: u32, rgba: List<u32>, saved: json.Json) -> Result<List<u32>, String> {
+    return selection.select(width, height, query, rgba, saved);
+}
+
+// Assemble the standard JSON value from already parsed native components.
+pub fn pixel_json_value(kind: u32, scalar: String, flag: Bool, values: List<json.Json>, keys: List<String>) -> json.Json {
+    if kind == 0 { return json.null(); }
+    if kind == 1 { return json.boolean(flag); }
+    if kind == 2 { return json.number(scalar); }
+    if kind == 3 { return json.text(scalar); }
+    if kind == 4 { return json.array(values); }
+    return json.object(values.map_indexed(fn(i) => fn(value) => member(keys.at_or(i, ""), value)));
+}
 
 fn field(items: List<json.Member>, key: String) -> json.Json {
     return json.lookup(items, key).fold(fn(value) => value, fn(unit) => json.null());

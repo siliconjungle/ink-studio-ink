@@ -19,3 +19,33 @@ export async function openPixelDocument(source) {
   ]);
   return { document, revision: current, legacyRevision: legacy };
 }
+
+export function selectPixels(width, height, query, { rgba = [], saved = {} } = {}) {
+  if (![width, height].every(n => Number.isInteger(n) && n >= 1 && n <= 512)) {
+    throw new RangeError('Pixel selections need a canvas from 1 to 512 pixels on each axis');
+  }
+  const nodes = [];
+  // Put query references in a flat table so the original operation budget
+  // governs long chains of modifiers before wire nesting limits are reached.
+  function append(value) {
+    if (nodes.length === 33) return 0;
+    const index = nodes.length;
+    nodes.push(value);
+    if (value && Object.getPrototypeOf(value) === Object.prototype) {
+      const descriptors = Object.getOwnPropertyDescriptors(value);
+      for (const key of ['base', 'with', 'source']) {
+        if (Object.hasOwn(descriptors, key) && Object.hasOwn(descriptors[key], 'value')) {
+          descriptors[key].value = append(descriptors[key].value);
+        }
+      }
+      nodes[index] = Object.defineProperties({}, descriptors);
+    }
+    return index + 1;
+  }
+  append(query);
+  const encoded = nodes.map(value => codec.fromJS(value));
+  const colors = nodes.some(node => node?.type === 'wand') ? rgba : [];
+  const selected = callOwned('select_pixel_indices', [encoded, width, height, colors, codec.fromJS(saved)]);
+  if (Object.hasOwn(selected, 'Err')) throw new Error(selected.Err);
+  return Array.from(selected.Ok, slot => [slot % width, Math.floor(slot / width)]);
+}

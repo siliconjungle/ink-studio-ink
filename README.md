@@ -72,6 +72,16 @@ Call `openPixelDocument(source)` from `web/pixel-document.mjs` in a secure brows
 cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- artwork.json
 ```
 
+`selectPixels(width, height, query, { rgba, saved })` in the same browser module returns selected `[x, y]` coordinates in native row order. The shared Ink implementation covers rectangular and elliptical marquees, lassos and polygons, literal and saved masks, mask combinations and modifiers, wand fills, and clusters with a supplied source mask. Wand fills take one packed `0xRRGGBBAA` word per pixel. Saved masks map selection IDs to coordinate lists.
+
+Chrome's value transport can hit its node limit when a literal mask lists every coordinate on a 512 × 512 grid. A rectangle or wand fill can cover that entire grid.
+
+The native `select` command reads a JSON request with `width`, `height`, and `query`, plus optional `rgba` and `saved`.
+
+```sh
+cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- select selection.json
+```
+
 ## Build and check
 
 Use [Ink Lang commit `7ff037b`](https://github.com/siliconjungle/ink-lang/commit/7ff037b76731a54c62b3d2f23388295073011432) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for immutable geometry and pixel document inputs. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.

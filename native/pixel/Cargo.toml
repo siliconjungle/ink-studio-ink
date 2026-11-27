@@ -9,6 +9,6 @@ compiled-state = { path = "../../build/pixel_document-rust" }
 ink-abi = { git = "https://github.com/siliconjungle/ink-abi", rev = "6356464654b39341d1e442d61c64be1e3a720489" }
 ryu-js = "=1.0.2"
 indexmap = "2"
-serde = "1"
-serde_json = { version = "1", features = ["float_roundtrip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 sha2 = "0.10"

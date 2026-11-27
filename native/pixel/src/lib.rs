@@ -106,6 +106,78 @@ fn revision(document: &str) -> String {
     format!("{:x}", Sha256::digest(document.as_bytes()))
 }
 
+// Flatten the recursive query references before crossing the compiled boundary.
+fn append_selection_node(mut node: Json, nodes: &mut Vec<Json>) -> u32 {
+    if nodes.len() == 33 {
+        return 0;
+    }
+    let index = nodes.len();
+    nodes.push(Json::Null);
+    if let Json::Object(fields) = &mut node {
+        for key in ["base", "with", "source"] {
+            if let Some((_, value)) = fields.iter_mut().find(|(name, _)| name == key) {
+                let child = append_selection_node(std::mem::replace(value, Json::Null), nodes);
+                *value = Json::Number(child.to_string());
+            }
+        }
+    }
+    nodes[index] = node;
+    index as u32 + 1
+}
+
+fn compiled_json<T>(value: Json, make: &impl Fn(u32, String, bool, Vec<T>, Vec<String>) -> T) -> T {
+    match value {
+        Json::Null => make(0, String::new(), false, Vec::new(), Vec::new()),
+        Json::Boolean(flag) => make(1, String::new(), flag, Vec::new(), Vec::new()),
+        Json::Number(token) => make(2, token, false, Vec::new(), Vec::new()),
+        Json::Text(text) => make(3, text, false, Vec::new(), Vec::new()),
+        Json::Array(items) => make(
+            4,
+            String::new(),
+            false,
+            items
+                .into_iter()
+                .map(|item| compiled_json(item, make))
+                .collect(),
+            Vec::new(),
+        ),
+        Json::Object(items) => {
+            let (keys, values) = items
+                .into_iter()
+                .map(|(key, value)| (key, compiled_json(value, make)))
+                .unzip();
+            make(5, String::new(), false, values, keys)
+        }
+    }
+}
+
+pub fn select_pixels(
+    width: u32,
+    height: u32,
+    query: &str,
+    rgba: Vec<u32>,
+    saved: &str,
+) -> Result<Vec<[u32; 2]>, String> {
+    let OrderedJson(query) = serde_json::from_str(query).map_err(|error| error.to_string())?;
+    let OrderedJson(saved) = serde_json::from_str(saved).map_err(|error| error.to_string())?;
+    let mut nodes = Vec::new();
+    append_selection_node(query, &mut nodes);
+    let program = State::new();
+    let build = |kind, scalar, flag, values, keys| {
+        program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
+    };
+    let nodes = nodes
+        .into_iter()
+        .map(|node| compiled_json(node, &build))
+        .collect();
+    let saved = compiled_json(saved, &build);
+    let selected = program.function_l_select_pixel_indices(nodes, width, height, rgba, saved)?;
+    Ok(selected
+        .into_iter()
+        .map(|slot| [slot % width, slot / width])
+        .collect())
+}
+
 pub fn open_pixel_document(source: &str) -> Result<OpenedDocument, String> {
     let OrderedJson(input) = serde_json::from_str(source).map_err(|error| error.to_string())?;
     let limits = Limits::default();
