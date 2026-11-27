@@ -8,6 +8,7 @@
   import { createGaussianRenderer } from '../web/gaussian.mjs';
   import { loadInk } from '../build/frost-gpu/ink-gpu.mjs';
   import { loadInk as loadGaussian } from '../build/gpu/ink-gpu.mjs';
+  import { shorelineFixture } from './shoreline-fixture.mjs';
 
   const status = document.getElementById('status');
   async function check() {
@@ -222,6 +223,18 @@
     if (result.center.join() !== '0,0' || result.rgb !== 255) throw new Error('Restored splat did not reach projection');
     await target.close();
     await session.close();
+    const shore = shorelineFixture();
+    const shoreProjection = await runtime.pipeline({
+      inputs: { rows: shore.rows, actors: [], camera: shore.camera, light: shore.light,
+        reveal: shore.reveal, starts: [], water: shore.water, dry: shore.dry },
+      steps: [{ id: 'ellipses', call: 'project_shore_lit_contours',
+        args: ['rows', 'actors', 'camera', 'light', 'reveal', 'starts', 'water', 'dry'].map(input => ({ input })) }],
+      outputs: ['ellipses'],
+    }, { backend: 'gpu-required' });
+    const pigments = shoreProjection.values.ellipses.map(row => row.rgb).sort((a, b) => a - b);
+    if (shoreProjection.backend !== 'gpu' || pigments.join() !== shore.visible.join()) {
+      throw new Error(`Unexpected shoreline projection pigments ${pigments.join()}`);
+    }
     await runtime.close();
     const frost = await loadInk(new URL('../build/frost-gpu/', import.meta.url), { device });
     const ice = await frost.pipeline({
@@ -236,7 +249,7 @@
     const error = await device.popErrorScope();
     if (error) throw error;
     status.dataset.result = 'passed';
-    status.textContent = 'Browser GPU projection, Colored Contours, resident rig uploads, and frost packing passed.';
+    status.textContent = 'Browser GPU projection, Colored Contours, shoreline, resident rig uploads, and frost packing passed.';
   }
   check().catch((error) => {
     status.dataset.result = 'failed';

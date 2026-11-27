@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { call } from '../build/gaussian.mjs';
+import { shorelineFixture } from './shoreline-fixture.mjs';
 
 const row = { center: [0, 0], xx: 4, xy: 0, yy: 1, variance: 0, reach: 3,
   rgb: 0x0000ff, alpha: 0.5 };
@@ -256,6 +257,16 @@ const reflectionCases = [
   },
 ];
 for (const { pure, args, expected } of reflectionCases) assert.deepEqual(call(pure, args), expected);
+const shore = shorelineFixture();
+const shoreArgs = [[], shore.camera, shore.light, shore.reveal, [], shore.water, shore.dry];
+const shoreVisible = shore.rows.filter((_, i) => shore.visible.includes(i + 1));
+const expectedShore = call('project_lit_contour_scene', [shoreVisible, [], shore.camera, shore.light]);
+const shoreCases = [
+  { pure: 'project_shore_lit_contours', args: [shore.rows, ...shoreArgs], expected: expectedShore },
+  { pure: 'project_shore_prepared_contours',
+    args: [call('prepare_contour_terrain', [shore.rows]), ...shoreArgs], expected: expectedShore },
+];
+for (const { pure, args, expected } of shoreCases) assert.deepEqual(call(pure, args), expected);
 const sourceRow = [1, 2, 3, 0.5, 4, 5, 6, 0xf08010, 7, 8, 9, 128, 11, 12, 13, 14];
 const imported = [{ position: [1, 2, 3], covariance0: [4, 5, 6], covariance1: [7, 8, 9],
   reach: 3, rgb: 0xf08010, alpha: 0.5 }];
@@ -309,6 +320,7 @@ try {
     ...cutCases,
     ...roofCases,
     ...reflectionCases,
+    ...shoreCases,
     { pure: 'import_builder_splats', args: [sourceRow], expected: imported, cpuOnly: true },
   ];
   writeFileSync(requestsPath, JSON.stringify(tests.map(({ pure, args }) => ({ pure, args }))));

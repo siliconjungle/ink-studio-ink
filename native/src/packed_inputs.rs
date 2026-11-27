@@ -96,6 +96,14 @@ gpu_record!(ContourCut { actor_base: [f32; 3], radius: f32, min_height: f32, sli
 gpu_record!(ContourView { frame: ContourFrame, cut: ContourCut });
 gpu_record!(ContourRoof { height: f32, amount: f32 });
 gpu_record!(ContourOcclusion { view: ContourView, roof: ContourRoof });
+gpu_record!(ContourShore { level: f32, pit: [f32; 4], origin: [f32; 2], width: u32, depth: u32, word_offset: u32 });
+gpu_record!(ContourWaterOcclusion { occlusion: ContourOcclusion, shore: ContourShore });
+
+impl ContourShore {
+    pub(super) const OFF: Self = Self {
+        level: 0.0, pit: [0.0; 4], origin: [0.0; 2], width: 0, depth: 0, word_offset: 0,
+    };
+}
 
 impl ContourCut {
     pub(super) const OFF: Self = Self {

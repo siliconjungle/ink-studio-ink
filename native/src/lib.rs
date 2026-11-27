@@ -9,8 +9,8 @@ mod present;
 mod render;
 pub use contours::ContourSettings;
 use contours::ContourRaster;
-pub use packed_inputs::{Bone, Camera, ContourClock, ContourCut, ContourLight, ContourReveal, ContourRoof, ContourWindow, RigLight, WorldSplat};
-use packed_inputs::{ContourFrame, ContourOcclusion, ContourView, GpuWords, PackedInputs, binding};
+pub use packed_inputs::{Bone, Camera, ContourClock, ContourCut, ContourLight, ContourReveal, ContourRoof, ContourShore, ContourWindow, RigLight, WorldSplat};
+use packed_inputs::{ContourFrame, ContourOcclusion, ContourView, ContourWaterOcclusion, GpuWords, PackedInputs, binding};
 pub use present::PixelPresenter;
 
 pub struct GaussianRenderer {
@@ -24,6 +24,7 @@ pub struct GaussianRenderer {
     count: u32,
     skin_rows: u32,
     directional: bool,
+    shore_words: usize,
     compacted_world: bool,
     packed_inputs: PackedInputs,
 }
@@ -84,7 +85,7 @@ impl GaussianRenderer {
         size: [u32; 2],
         splats: &Value,
     ) -> Result<Self, String> {
-        Self::create(device, queue, format, size, splats, None, None, ContourOptions::default(), ContourTerrain::default())
+        Self::create(device, queue, format, size, splats, None, None, ContourOptions::default(), ContourTerrain::default(), &[])
     }
 
     pub fn with_camera(
@@ -106,6 +107,7 @@ impl GaussianRenderer {
             None,
             ContourOptions::default(),
             ContourTerrain::default(),
+            &[],
         )
     }
 
@@ -178,10 +180,30 @@ impl GaussianRenderer {
         options: ContourOptions,
         terrain: ContourTerrain,
     ) -> Result<Self, String> {
+        Self::with_contour_shoreline(device, queue, format, size, splats, camera, ordering, settings, options, terrain, &[])
+    }
+
+    /// Keep the packed dry-cell maps resident with the directional terrain.
+    pub fn with_contour_shoreline(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        size: [u32; 2],
+        splats: &Value,
+        camera: &Value,
+        ordering: WorldOrder,
+        settings: ContourSettings<'_>,
+        options: ContourOptions,
+        terrain: ContourTerrain,
+        dry_cells: &[u32],
+    ) -> Result<Self, String> {
         if matches!(ordering, WorldOrder::Preordered | WorldOrder::Actor(_)) {
             return Err("Colored Contours requires sorted world or skinned splats".into());
         }
-        Self::create(device, queue, format, size, splats, Some((camera, ordering)), Some(settings), options, terrain)
+        if !dry_cells.is_empty() && !options.directional {
+            return Err("Shoreline clipping requires directional contours".into());
+        }
+        Self::create(device, queue, format, size, splats, Some((camera, ordering)), Some(settings), options, terrain, dry_cells)
     }
 
     fn create(
@@ -194,6 +216,7 @@ impl GaussianRenderer {
         contours: Option<ContourSettings<'_>>,
         options: ContourOptions,
         terrain: ContourTerrain,
+        dry_cells: &[u32],
     ) -> Result<Self, String> {
         if size.contains(&0) {
             return Err("Gaussian render target must have positive dimensions".into());
@@ -290,7 +313,7 @@ impl GaussianRenderer {
             args.push(json!({ "input": "contourLight" }));
             inputs["contourReveal"] = json!({"center": [0, 0], "radius": 0, "edge_width": 0, "floor_height": 0});
             inputs["terrainArrivals"] = json!(vec![-100.0; terrain.arrival_blocks.max(1)]);
-            inputs["contourOcclusion"] = json!({
+            let occlusion = json!({
                 "view": {
                     "frame": {"clock": {"time": 0, "latest": 0, "block_rows": 0}, "clip_motion": false, "terrain_rows": 0},
                     "cut": {"actor_base": [0, 0, 0], "radius": 0, "min_height": 0, "slice_distance": 0, "index_base": 0},
@@ -298,13 +321,22 @@ impl GaussianRenderer {
                 "roof": {"height": 0, "amount": 0},
             });
             args.extend(["contourReveal", "terrainArrivals", "contourOcclusion"].map(|input| json!({ "input": input })));
-            function = "project_occluded_lit_contours";
+            if dry_cells.is_empty() {
+                inputs["contourOcclusion"] = occlusion;
+                function = "project_occluded_lit_contours";
+            } else {
+                inputs["contourOcclusion"] = json!({ "occlusion": occlusion,
+                    "shore": {"level": 0, "pit": [0, 0, 0, 0], "origin": [0, 0], "width": 0, "depth": 0, "word_offset": 0} });
+                inputs["dryCells"] = json!(dry_cells);
+                args.push(json!({ "input": "dryCells" }));
+                function = "project_shore_lit_contours";
+            }
         }
         let retained_steps = if directional && terrain.retain_normals {
             steps.push(json!({"id": "terrain-normals", "call": "prepare_contour_terrain",
                 "args": [{"input": "splats"}]}));
             args[0] = json!({"step": "terrain-normals"});
-            function = "project_occluded_prepared_contours";
+            function = if dry_cells.is_empty() { "project_occluded_prepared_contours" } else { "project_shore_prepared_contours" };
             &["terrain-normals"][..]
         } else {
             &[]
@@ -337,6 +369,7 @@ impl GaussianRenderer {
             count,
             skin_rows,
             directional,
+            shore_words: dry_cells.len(),
             compacted_world,
             packed_inputs: PackedInputs::default(),
         };
@@ -517,6 +550,12 @@ impl GaussianRenderer {
     pub fn stage_contour_occlusion(&mut self, clock: ContourClock, terrain_rows: Option<u32>, cut: Option<ContourCut>,
         roof: ContourRoof,
     ) -> Result<(), String> {
+        self.stage_contour_shoreline(clock, terrain_rows, cut, roof, ContourShore::OFF)
+    }
+
+    pub fn stage_contour_shoreline(&mut self, clock: ContourClock, terrain_rows: Option<u32>, cut: Option<ContourCut>,
+        roof: ContourRoof, shore: ContourShore,
+    ) -> Result<(), String> {
         if !self.directional || !clock.time.is_finite() || !clock.latest.is_finite() {
             return Err("Invalid contour clock".into());
         }
@@ -529,10 +568,22 @@ impl GaussianRenderer {
         if !roof.height.is_finite() || !(0.0..=1.0).contains(&roof.amount) {
             return Err("Invalid contour roof".into());
         }
+        let occlusion = ContourOcclusion { view: ContourView { frame, cut }, roof };
+        if self.shore_words == 0 && shore.width == 0 {
+            let input = binding(&mut self.packed_inputs.contour_occlusion, &self.engine, self.session,
+                "contourOcclusion", ContourOcclusion::layout)?;
+            return self.engine.write_packed(input, occlusion.words()).map(|_| ());
+        }
+        let cells = u64::from(shore.width) * u64::from(shore.depth);
+        if shore.width != 0 && (shore.depth == 0 || shore.width > 1 << 23 || shore.depth > 1 << 23
+            || cells > u64::from(u32::MAX) || u64::from(shore.word_offset) + cells.div_ceil(32) > self.shore_words as u64
+            || !shore.level.is_finite() || shore.pit.iter().any(|x| !x.is_finite())
+            || shore.origin.iter().any(|x| !x.is_finite() || x.fract() != 0.0)) {
+            return Err("Invalid contour shoreline".into());
+        }
         let input = binding(&mut self.packed_inputs.contour_occlusion, &self.engine, self.session,
-            "contourOcclusion", ContourOcclusion::layout)?;
-        self.engine.write_packed(input, ContourOcclusion { view: ContourView { frame, cut }, roof }.words())?;
-        Ok(())
+            "contourOcclusion", ContourWaterOcclusion::layout)?;
+        self.engine.write_packed(input, ContourWaterOcclusion { occlusion, shore }.words()).map(|_| ())
     }
 
     /// Update a native skinned frame without building a JSON rig or camera.

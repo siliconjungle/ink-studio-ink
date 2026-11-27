@@ -474,6 +474,15 @@ record ContourCut {
 record ContourView { frame: ContourFrame, cut: ContourCut, }
 record ContourRoof { height: f32, amount: f32, }
 record ContourOcclusion { view: ContourView, roof: ContourRoof, }
+record ContourShore {
+    level: f32,
+    pit: Vec4<f32>,
+    origin: Vec2<f32>,
+    width: u32,
+    depth: u32,
+    word_offset: u32,
+}
+record ContourWaterOcclusion { occlusion: ContourOcclusion, shore: ContourShore, }
 
 fn no_contour_roof() -> ContourRoof {
     return ContourRoof { height: 0.0, amount: 0.0 };
@@ -607,6 +616,60 @@ fn cuts_foreground(position: Vec3<f32>, index: u32, back: Vec3<f32>, view: Conto
         front > cut.slice_distance + 0.8 * reveal_cell_noise(position);
 }
 
+fn shore_coordinate(position: f32, origin: f32, size: u32) -> u32 {
+    let cell = floor(position) - origin;
+    if cell <= 0.0 { return 0; }
+    if cell >= f32_from_u32(size - 1) { return size - 1; }
+    // A nonnegative integer below 2^23 fits exactly in the mantissa.
+    return f32_bits(8388608.0 + cell) - 1258291200;
+}
+
+fn cuts_submerged(splat: WorldGaussian, camera: Camera, cut: ContourCut, reveal: ContourReveal,
+    shore: ContourShore, dry_cells: List<u32>) -> Bool {
+    let position = splat.position;
+    let eye = camera.eye;
+    if shore.width == 0 || shore.depth == 0 || reveal.radius <= 0.0
+        || position.y >= shore.level - 0.02 || eye.y <= shore.level + 0.1 { return false; }
+    let pit = shore.pit;
+    if position.x > pit.x && position.x < pit.y && position.z > pit.z && position.z < pit.w { return false; }
+
+    let t = (shore.level - eye.y) / (position.y - eye.y);
+    let x = eye.x + (position.x - eye.x) * t;
+    let z = eye.z + (position.z - eye.z) * t;
+    let dx = x - reveal.center.x;
+    let dz = z - reveal.center.y;
+    let radius = reveal.radius - 0.3;
+    if sqrt(dx * dx + dz * dz) > radius { return true; }
+
+    let cell = shore_coordinate(z, shore.origin.y, shore.depth) * shore.width
+        + shore_coordinate(x, shore.origin.x, shore.width);
+    let word = dry_cells.at_or(shore.word_offset + wrapping_shr(cell, 5), 0);
+    if word_and(wrapping_shr(word, word_and(cell, 31)), 1) != 0 { return true; }
+    if !is_reflection(splat) { return false; }
+
+    let base = cut.actor_base;
+    let source = vec3(position.x - base.x, (2.0 * shore.level - position.y) - (base.y + 0.9), position.z - base.z);
+    if source.y + 0.9 <= cut.min_height { return false; }
+    let back = camera.back;
+    let along = dot3(source, back);
+    if along > 0.4 && cut.radius > 0.0 {
+        let perpendicular = vec3(source.x - along * back.x, source.y - along * back.y, source.z - along * back.z);
+        if sqrt(dot3(perpendicular, perpendicular)) < cut.radius { return true; }
+    }
+    let horizontal = horizontal_back(back);
+    return cut.slice_distance > 0.0 && source.x * horizontal.x + source.z * horizontal.y > cut.slice_distance;
+}
+
+fn outside_shore_row(splat: WorldGaussian, index: u32, camera: Camera, reveal: ContourReveal,
+    starts: List<f32>, water: ContourWaterOcclusion, dry_cells: List<u32>) -> Bool {
+    let view = water.occlusion.view;
+    let moving = view.frame.clip_motion && index >= view.frame.terrain_rows;
+    return !contributes(splat) || outside_world_row(splat.position, index, reveal, starts, view.frame)
+        || cuts_foreground(splat.position, index, camera.back, view)
+        || cuts_roof(splat.position, moving, water.occlusion.roof)
+        || (!moving && cuts_submerged(splat, camera, view.cut, reveal, water.shore, dry_cells));
+}
+
 fn near_unit(vector: Vec3<f32>, floor: f32, default: Vec3<f32>) -> Vec3<f32> {
     let length = sqrt(dot3(vector, vector));
     if length <= floor { return default; }
@@ -710,6 +773,17 @@ pub fn project_occluded_lit_contours(terrain: List<WorldGaussian>, actors: List<
     return sort_contours(ground.concat(posing));
 }
 
+pub fn project_shore_lit_contours(terrain: List<WorldGaussian>, actors: List<WorldGaussian>,
+    camera: Camera, light: ContourLight, reveal: ContourReveal, starts: List<f32>, water: ContourWaterOcclusion,
+    dry_cells: List<u32>) -> List<ContourEllipse> {
+    let occlusion = water.occlusion;
+    let ground = terrain.map_indexed(fn(i) => fn(splat) =>
+        if outside_shore_row(splat, i, camera, reveal, starts, water, dry_cells) { hidden_contour() }
+        else { directional_contour(splat, camera, light, false) }).filter(fn(row) => row.alpha > 0.0);
+    let posing = project_field_actors(actors, camera, light, reveal, occlusion.view.frame.clip_motion, occlusion.roof);
+    return sort_contours(ground.concat(posing));
+}
+
 record PreparedContourTerrain { splat: WorldGaussian, normal: Vec3<f32>, }
 
 fn prepare_contour_dab(splat: WorldGaussian) -> PreparedContourTerrain {
@@ -772,5 +846,16 @@ pub fn project_occluded_prepared_contours(terrain: List<PreparedContourTerrain>,
             || cuts_roof(dab.splat.position, view.frame.clip_motion && i >= view.frame.terrain_rows, occlusion.roof) { hidden_contour() }
         else { project_prepared_dab(dab, camera, light) }).filter(fn(row) => row.alpha > 0.0);
     let posing = project_field_actors(actors, camera, light, reveal, view.frame.clip_motion, occlusion.roof);
+    return sort_contours(ground.concat(posing));
+}
+
+pub fn project_shore_prepared_contours(terrain: List<PreparedContourTerrain>, actors: List<WorldGaussian>,
+    camera: Camera, light: ContourLight, reveal: ContourReveal, starts: List<f32>, water: ContourWaterOcclusion,
+    dry_cells: List<u32>) -> List<ContourEllipse> {
+    let occlusion = water.occlusion;
+    let ground = terrain.map_indexed(fn(i) => fn(dab) =>
+        if outside_shore_row(dab.splat, i, camera, reveal, starts, water, dry_cells) { hidden_contour() }
+        else { project_prepared_dab(dab, camera, light) }).filter(fn(row) => row.alpha > 0.0);
+    let posing = project_field_actors(actors, camera, light, reveal, occlusion.view.frame.clip_motion, occlusion.roof);
     return sort_contours(ground.concat(posing));
 }

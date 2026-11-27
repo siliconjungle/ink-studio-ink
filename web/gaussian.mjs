@@ -8,6 +8,7 @@ const contourLightOff = { enabled: false, direction: [0, 1, 0], actor_center: [0
 const contourRevealOff = { center: [0, 0], radius: 0, edge_width: 0, floor_height: 0 };
 const contourRoofOff = { height: 0, amount: 0 };
 const contourCutOff = { actor_base: [0, 0, 0], radius: 0, min_height: 0, slice_distance: 0, index_base: 0 };
+const contourShoreOff = { level: 0, pit: [0, 0, 0, 0], origin: [0, 0], width: 0, depth: 0, word_offset: 0 };
 
 function assertEllipseLayout(view, contours) {
   const fields = view.type?.element?.fields;
@@ -59,6 +60,11 @@ export async function createGaussianRenderer(device, format, { width, height, sp
       args: [{ input: 'splats' }, { input: 'actors' }, { input: 'camera' }] };
   }
   const directional = contours?.directional === true;
+  const dryCells = contours?.dryCells;
+  if (dryCells && (!directional || !Array.isArray(dryCells) || !dryCells.length
+      || !dryCells.every(word => Number.isInteger(word) && word >= 0 && word <= 0xffffffff))) {
+    throw new Error('Invalid contour shoreline map');
+  }
   if (directional) {
     const arrivalBlocks = contours.terrainBlocks ?? 1;
     if (!Number.isInteger(arrivalBlocks) || arrivalBlocks < 1) throw new Error('Invalid terrain block count');
@@ -71,6 +77,12 @@ export async function createGaussianRenderer(device, format, { width, height, sp
     };
     steps.at(-1).call = 'project_occluded_lit_contours';
     steps.at(-1).args.push(...['contourLight', 'contourReveal', 'terrainArrivals', 'contourOcclusion'].map(input => ({ input })));
+    if (dryCells) {
+      projection.input.contourOcclusion = { occlusion: projection.input.contourOcclusion, shore: contourShoreOff };
+      projection.input.dryCells = dryCells;
+      steps.at(-1).call = 'project_shore_lit_contours';
+      steps.at(-1).args.push({ input: 'dryCells' });
+    }
   }
   const compactedWorld = projection.call === 'project_visible_sorted_world' && !contours && !hasSkin;
   const ink = await loadInk(bundleURL, { device, parallelU64Merge: compactedWorld });
@@ -174,7 +186,7 @@ export async function createGaussianRenderer(device, format, { width, height, sp
         if (!directional || !starts.every(Number.isFinite)) throw new Error('Invalid contour terrain arrival times');
         return session.writeChanged('terrainArrivals', starts);
       },
-      stageContourClock(time, latest, blockRows, terrainRows, cut = contourCutOff, roof = contourRoofOff) {
+      stageContourClock(time, latest, blockRows, terrainRows, cut = contourCutOff, roof = contourRoofOff, shore = contourShoreOff) {
         if (!directional || !Number.isFinite(time) || !Number.isFinite(latest) ||
             !Number.isInteger(blockRows) || blockRows < 0 || blockRows > 0xffffffff ||
             (terrainRows !== undefined && (!Number.isInteger(terrainRows) || terrainRows < 0 || terrainRows > 0xffffffff))) {
@@ -189,10 +201,19 @@ export async function createGaussianRenderer(device, format, { width, height, sp
         if (!Number.isFinite(roof.height) || !Number.isFinite(roof.amount) || roof.amount < 0 || roof.amount > 1) {
           throw new Error('Invalid contour roof');
         }
-        return session.write('contourOcclusion', {
+        const occlusion = {
           view: { frame: { clock: { time, latest, block_rows: blockRows }, clip_motion: terrainRows !== undefined,
             terrain_rows: terrainRows ?? 0 }, cut }, roof,
-        });
+        };
+        if (!dryCells && shore.width === 0) return session.write('contourOcclusion', occlusion);
+        if (shore.width !== 0 && (
+          !Number.isInteger(shore.width) || shore.width < 1 || shore.width > 2 ** 23 ||
+          !Number.isInteger(shore.depth) || shore.depth < 1 || shore.depth > 2 ** 23 ||
+          shore.width * shore.depth > 0xffffffff || !Number.isInteger(shore.word_offset) || shore.word_offset < 0 ||
+          shore.word_offset + Math.ceil(shore.width * shore.depth / 32) > (dryCells?.length ?? 0) ||
+          !Number.isFinite(shore.level) || shore.pit?.length !== 4 || !shore.pit.every(Number.isFinite) ||
+          shore.origin?.length !== 2 || !shore.origin.every(Number.isInteger))) throw new Error('Invalid contour shoreline');
+        return session.write('contourOcclusion', { occlusion, shore });
       },
       async updateSkinCamera(value, { bones, light }) {
         if (!hasSkin) throw new Error('Skin updates require a skinned world view');
