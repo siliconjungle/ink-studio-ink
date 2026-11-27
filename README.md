@@ -133,6 +133,33 @@ preview and replay use separate output paths. File edits keep original version
 1 raster documents at version 1. The in-memory editor continues to migrate
 them when opening a journal.
 
+Native sessions accept named commands and the version 1 command envelope.
+
+```sh
+ink-studio-pixel session init work-drawing drawing.json
+ink-studio-pixel session begin work-drawing --label "Resize and paint"
+ink-studio-pixel session apply work-drawing patch.json
+ink-studio-pixel session preview work-drawing --exact --limit 40
+ink-studio-pixel session commit work-drawing
+ink-studio-pixel session export work-drawing --artifact png --out final.png
+```
+
+Use `session select`, `inspect`, `copy`, or `validate` to read the current draft.
+Use the `draw`, `mask`, `recolor`, and `transform` aliases with patch files.
+`session run DIRECTORY COMMAND --out result.json` saves a command's reply.
+A rejected edit still saves the rollback of its open draft. Session output
+paths cannot replace checkpoints or command inputs.
+
+Browser clients can use `createPixelCommandEditor(drawing, { sessionName: 'work-drawing' })`
+to autosave a named local session, then `openStoredPixelCommandSession('work-drawing')`
+after a reload. Use `sessionStatus()` to check the saved generation,
+`flushSession()` to retry a save, and `closeSession()` to flush and detach.
+A stale tab's changes stay in memory and its save reports a conflict. To keep a
+portable checkpoint in browser storage, pass `{ sessionName }` to
+`openPixelCommandSession(checkpoint, { sessionName })`. The browser stores names
+per origin in IndexedDB, and `exportSession()` returns a checkpoint the native
+editor can open.
+
 `raster` and `select-document` are the native equivalents. Their JSON request contains `document` and optional `frame`, `layer` or `cel`. Add `query` for `select-document`.
 
 `selectPixels(width, height, query, { rgba, saved, indexed })` in the same browser module returns selected `[x, y]` coordinates in native row order. The shared Ink implementation covers rectangular and elliptical marquees, lassos and polygons, literal and saved masks, mask combinations and modifiers, wand fills, swatches, and clusters. Wand fills take one packed `0xRRGGBBAA` word per pixel. Saved masks map selection IDs to coordinate lists.

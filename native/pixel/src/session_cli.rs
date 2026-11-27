@@ -1,14 +1,19 @@
+use super::{
+    cli_flags::split_arguments,
+    file_output::{absolute_normalized, output, stage},
+    session_commands::{self as commands, EDITS},
+};
 use ink_studio_pixel::PixelCommandEditor;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
-    fs::{self, OpenOptions},
-    io::{ErrorKind, Write},
+    fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
 };
 
-const USAGE: &str = "Usage: ink-studio-pixel session init DIRECTORY DOCUMENT | session run DIRECTORY COMMAND | session status|begin|commit|cancel|undo|redo DIRECTORY";
+const USAGE: &str = "Use a pixel-art session command. See ink-studio help for session actions.";
 const CHANGED: &str = "The pixel edit session advanced on disk. Reopen it before writing.";
 
 fn checkpoint(directory: &Path, revision: u64) -> PathBuf {
@@ -52,40 +57,13 @@ fn read(directory: &Path) -> Result<PixelCommandEditor, String> {
     Err("Could not read the current pixel edit session checkpoint".into())
 }
 
-pub(crate) fn stage(directory: &Path, data: &str) -> Result<PathBuf, String> {
-    static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
-    loop {
-        let id = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
-        let staging = directory.join(format!(".ink-checkpoint-{}-{id}", std::process::id()));
-        match OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&staging)
-        {
-            Ok(mut file) => {
-                if let Err(error) = (|| {
-                    file.write_all(data.as_bytes())?;
-                    file.write_all(b"\n")?;
-                    file.sync_all()
-                })() {
-                    let _ = fs::remove_file(&staging);
-                    return Err(error.to_string());
-                }
-                return Ok(staging);
-            }
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-}
-
 fn publish(
     directory: &Path,
     generation: u64,
     editor: &mut PixelCommandEditor,
 ) -> Result<(), String> {
     let contents = editor.export_session(generation)?;
-    let staged = stage(directory, &contents)?;
+    let staged = stage(directory, contents.as_bytes(), true)?;
     let target = checkpoint(directory, generation);
     let result = match fs::hard_link(&staged, &target) {
         Ok(()) => Ok(()),
@@ -105,7 +83,7 @@ fn publish(
     result?;
     if generation > 2 {
         // Keep the last two generations and reserve older names against stale writers.
-        if let Ok(tombstone) = stage(directory, "null") {
+        if let Ok(tombstone) = stage(directory, b"null", true) {
             if fs::rename(&tombstone, checkpoint(directory, generation - 2)).is_err() {
                 let _ = fs::remove_file(tombstone);
             }
@@ -114,8 +92,21 @@ fn publish(
     Ok(())
 }
 
-fn envelope(action: &str) -> Value {
-    json!({ "format": "ink-studio/pixel-command", "version": 1, "action": action })
+fn run_editor(
+    directory: &Path,
+    editor: &mut PixelCommandEditor,
+    generation: &mut u64,
+    request: commands::Request,
+) -> Result<Result<String, ink_studio_pixel::PixelEditError>, String> {
+    let before = editor.session_token()?;
+    let outcome = request.invoke(editor);
+    if editor.session_token()? != before {
+        *generation = generation
+            .checked_add(1)
+            .ok_or("Pixel edit session revision overflow")?;
+        publish(directory, *generation, editor)?;
+    }
+    Ok(outcome)
 }
 
 pub fn run(mut args: impl Iterator<Item = OsString>) -> Result<(), String> {
@@ -123,78 +114,95 @@ pub fn run(mut args: impl Iterator<Item = OsString>) -> Result<(), String> {
         .next()
         .and_then(|value| value.into_string().ok())
         .ok_or(USAGE)?;
-    let dir = PathBuf::from(args.next().ok_or(USAGE)?);
-    let extra: Vec<_> = args.collect();
-    let valid = match action.as_str() {
-        "init" | "run" => extra.len() == 1,
-        "begin" => extra.is_empty() || extra.len() == 2 && extra[0] == "--label",
-        "status" | "commit" | "cancel" | "undo" | "redo" => extra.is_empty(),
-        _ => false,
-    };
-    if !valid || dir.as_os_str().is_empty() {
+    let (paths, options) = split_arguments(args, USAGE)?;
+    let needs_input =
+        EDITS.contains(&action.as_str()) || matches!(action.as_str(), "init" | "run" | "select");
+    let valid = needs_input
+        || matches!(
+            action.as_str(),
+            "begin"
+                | "status"
+                | "commit"
+                | "cancel"
+                | "undo"
+                | "redo"
+                | "preview"
+                | "validate"
+                | "inspect"
+                | "copy"
+                | "export"
+        );
+    if !valid || paths.len() != usize::from(needs_input) + 1 {
         return Err(USAGE.into());
     }
+    let directory = &paths[0];
+    if directory.as_os_str().is_empty()
+        || directory
+            .to_str()
+            .is_some_and(|text| text.trim().is_empty())
+    {
+        return Err("A pixel edit session needs a directory".into());
+    }
+    let input = paths.get(1).map(PathBuf::as_path);
     let (mut editor, mut generation) = if action == "init" {
-        let source = fs::read_to_string(&extra[0]).map_err(|error| error.to_string())?;
+        commands::initialize(&options)?;
+        let source = fs::read_to_string(input.unwrap()).map_err(|error| error.to_string())?;
         let mut editor = PixelCommandEditor::new(&source, 100)?;
-        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-        publish(&dir, 1, &mut editor)?;
+        fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+        publish(directory, 1, &mut editor)?;
         (editor, 1)
     } else {
-        let editor = read(&dir)?;
+        let editor = read(directory)?;
         let generation = editor.session_generation();
         (editor, generation)
     };
-    let mut reply = None;
-    let mut rejected = false;
+    let travel = matches!(action.as_str(), "commit" | "cancel" | "undo" | "redo");
+    let mut changed = None;
     if !matches!(action.as_str(), "init" | "status") {
-        let command = if action == "run" {
-            fs::read_to_string(&extra[0]).map_err(|error| error.to_string())?
+        let out = if matches!(action.as_str(), "run" | "export") {
+            commands::target(directory, input, &options)?
         } else {
-            let mut command = envelope(&action);
-            if extra.len() == 2 {
-                command["label"] = json!(extra[1].to_str().ok_or(USAGE)?);
-            }
-            command.to_string()
+            None
         };
-        let before = editor.session_token()?;
-        let outcome = editor.execute(&command);
-        if editor.session_token()? != before {
-            generation = generation
-                .checked_add(1)
-                .ok_or("Pixel edit session revision overflow")?;
-            publish(&dir, generation, &mut editor)?;
+        if action == "export" && out.is_none() {
+            return Err("--out needs a file path".into());
         }
-        match outcome {
-            Ok(value) => {
-                let parsed: Value =
-                    serde_json::from_str(&value).map_err(|error| error.to_string())?;
-                rejected = parsed["valid"] == false;
-                reply = Some((value, parsed));
-            }
-            Err(mut error) => {
-                if let Some(receipt) = error.receipt.take() {
-                    println!("{receipt}");
-                    std::process::exit(2);
+        let request = commands::request(&action, input, &options)?;
+        let outcome = run_editor(directory, &mut editor, &mut generation, request)?;
+        let (text, rejected) = match outcome {
+            Ok(reply) => {
+                let value: Value =
+                    serde_json::from_str(&reply).map_err(|error| error.to_string())?;
+                if travel {
+                    changed = value["changed"].as_bool();
                 }
-                return Err(error.to_string());
+                (reply, value["valid"] == false)
             }
+            Err(error) => match error.receipt {
+                Some(receipt) if action == "run" => (receipt.to_string(), true),
+                _ => return Err(error.to_string()),
+            },
+        };
+        if !travel && action != "begin" {
+            if action == "export" {
+                println!("{}", commands::export(&text, out.as_deref().unwrap())?);
+            } else if let Some(file) = out {
+                output(&file, &text)?;
+            } else {
+                println!("{text}");
+            }
+            if rejected {
+                std::process::exit(2);
+            }
+            return Ok(());
         }
     }
-
-    if let Some((text, _)) = reply.as_ref().filter(|_| action == "run") {
-        println!("{text}");
-        if rejected {
-            std::process::exit(2);
-        }
-        return Ok(());
-    }
-    let absolute = fs::canonicalize(&dir).map_err(|error| error.to_string())?;
+    let absolute = absolute_normalized(directory)?;
     let (_, _, pending) = editor.session_token()?;
     let mut status = json!({ "directory": absolute, "revision": generation, "saved": true, "error": null,
         "pending": pending, "history": editor.history()? });
-    if matches!(action.as_str(), "commit" | "cancel" | "undo" | "redo") {
-        status["changed"] = reply.unwrap().1["changed"].clone();
+    if let Some(changed) = changed {
+        status["changed"] = json!(changed);
     } else {
         status["documentRevision"] = json!(editor.revision()?);
     }

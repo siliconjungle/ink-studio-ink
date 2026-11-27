@@ -1,3 +1,4 @@
+import { openPixelSessionStore } from './pixel-session-store.mjs';
 import { call, callOwned, compiledValues, createState, JsonCodec } from '../build/pixel_document.mjs';
 import { openPixelJournal } from './pixel-journal.mjs';
 import { parsePixelSession } from './pixel-session.mjs';
@@ -58,21 +59,53 @@ export function createPixelEditor(source) {
   return createPixelEditorCore(source).editor;
 }
 
-export async function createPixelCommandEditor(source, { historyLimit = 100 } = {}) {
+export async function createPixelCommandEditor(source, { historyLimit = 100, sessionName } = {}) {
   if (!Number.isInteger(historyLimit) || historyLimit < 0 || historyLimit > 0xffffffff) {
     throw new Error('historyLimit must be a non-negative integer within the pixel journal capacity');
   }
   const fromText = typeof source === 'string';
   const input = fromText ? JSON.parse(source) : source;
   const core = createPixelEditorCore(input, fromText);
-  return openPixelJournal({ ...core, codec, revision, revisionText }, input, historyLimit);
+  const storage = sessionName === undefined ? undefined : await openPixelSessionStore(sessionName);
+  try {
+    return await openPixelJournal({ ...core, codec, revision, revisionText }, input, historyLimit, undefined, storage);
+  } catch (error) {
+    storage?.close();
+    throw error;
+  }
 }
 
-export async function openPixelCommandSession(source) {
-  const checkpoint = parsePixelSession(typeof source === 'string' ? source : structuredClone(source));
+export async function openPixelCommandSession(source, { sessionName } = {}) {
+  const checkpoint = typeof source === 'string' ? source : structuredClone(source);
+  if (sessionName === undefined) return restorePixelSession(checkpoint);
+  const storage = await openPixelSessionStore(sessionName);
+  try {
+    const editor = await restorePixelSession(checkpoint, storage);
+    await storage.write(0, await editor.exportSession());
+    return editor;
+  } catch (error) {
+    storage.close();
+    throw error;
+  }
+}
+
+export async function openStoredPixelCommandSession(name) {
+  const storage = await openPixelSessionStore(name);
+  try {
+    const checkpoint = await storage.read();
+    if (!checkpoint) throw new Error('No pixel edit session named ' + storage.name);
+    return await restorePixelSession(checkpoint, storage);
+  } catch (error) {
+    storage.close();
+    throw error;
+  }
+}
+
+function restorePixelSession(source, storage) {
+  const checkpoint = parsePixelSession(source);
   const input = checkpoint.baseline.design;
   const core = createPixelEditorCore(input, true);
-  return openPixelJournal({ ...core, codec, revision, revisionText }, input, checkpoint.journal.historyLimit, checkpoint);
+  return openPixelJournal({ ...core, codec, revision, revisionText }, input, checkpoint.journal.historyLimit, checkpoint, storage);
 }
 
 function createPixelEditorCore(source, fromText = false) {

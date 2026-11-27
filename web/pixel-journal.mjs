@@ -183,7 +183,7 @@ function previewReport(codec, changes, targets, conflicts, links, exact) {
   return report;
 }
 
-export async function openPixelJournal({ editor, state, codec, revision, revisionText, restoreSnapshot, setGrid }, input, historyLimit, checkpoint) {
+export async function openPixelJournal({ editor, state, codec, revision, revisionText, restoreSnapshot, setGrid }, input, historyLimit, checkpoint, storage) {
   const bind = name => state.bind(name, { resultOnly: true });
   const read = bind('pixel_journal'), begin = bind('begin_pixel_edit');
   const commit = bind('commit_pixel_edit'), cancel = bind('cancel_pixel_edit');
@@ -205,6 +205,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
   const batchPure = (name, ...args) => callOwned('pixel_batch_' + name, args);
   const receipts = new Map();
   let nextReceipt = 0, previous = Promise.resolve();
+  let attached = storage, savedToken, saveError = null;
 
   function unwrap(result) {
     if (Object.hasOwn(result, 'Err')) throw new Error(result.Err);
@@ -216,8 +217,16 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
     return pixelPng(image, codec.toJS(image.metadata));
   }
 
-  function enqueue(run) {
-    const result = previous.then(run);
+  async function runWithSave(run) {
+    try {
+      return await run();
+    } finally {
+      await flushSession();
+    }
+  }
+
+  function enqueue(run, mayWrite = false) {
+    const result = previous.then(() => mayWrite && attached ? runWithSave(run) : run());
     previous = result.then(() => {}, () => {});
     return result;
   }
@@ -589,7 +598,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
   const [current, legacy] = await Promise.all([revisionText(baselineText), input.version === 1 ? revision(input) : '']);
   const legacyRevision = checkpoint ? checkpoint.baseline.legacyRevision : legacy || null;
   let slot = checkpoint?.slot;
-  const generation = checkpoint?.revision ?? 1;
+  let generation = checkpoint?.revision ?? (storage ? 0 : 1);
   const identity = (name, revision) => unwrap(callOwned('pixel_checkpoint_identity',
     [name, codec.fromJS(legacyRevision), BigInt(revision)]));
 
@@ -632,12 +641,12 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
       journal.redo.map(row => row.label), journal.draft ? { Some: journal.draft.label } : { None: null })));
   }
 
-  function exportSession(requested = generation) {
+  function exportSession(requested = generation, snapshotLayout = layout()) {
     if (!Number.isSafeInteger(requested) || requested < 1) throw new Error('Invalid pixel edit session checkpoint');
     slot ??= 'pixel-editor-' + crypto.randomUUID();
     const seed = identity(slot, requested);
     return pixelSessionCheckpoint({
-      slot, seed, revision: requested, baseline: { design: JSON.parse(baselineText), legacyRevision }, layout: layout(),
+      slot, seed, revision: requested, baseline: { design: JSON.parse(baselineText), legacyRevision }, layout: snapshotLayout,
       snapshot(id) {
         const edition = unwrap(checkpointSnapshot(id));
         const { cursor } = edition;
@@ -650,6 +659,33 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
   if (checkpoint) await restoreCheckpoint(checkpoint);
   else unwrap(bind('start_pixel_journal')(current, legacy, historyLimit));
 
+  function sessionToken({ revision, cursor, draft }) {
+    return [revision, cursor.receipt, draft.id].join(':');
+  }
+
+  async function flushSession() {
+    if (!attached) return false;
+    try {
+      const snapshotLayout = layout();
+      const nextToken = sessionToken(snapshotLayout);
+      if (nextToken !== savedToken) {
+        const next = exportSession(generation + 1, snapshotLayout);
+        await attached.write(generation, next);
+        generation = next.revision;
+        savedToken = nextToken;
+      }
+      saveError = null;
+    } catch (error) {
+      saveError = error.message;
+    }
+    return saveError === null;
+  }
+
+  if (attached) {
+    if (checkpoint) savedToken = sessionToken(layout());
+    else if (!await flushSession()) throw new Error(saveError);
+  }
+
   return Object.freeze({
     png(options = {}) {
       const saved = capture(options);
@@ -658,6 +694,16 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
     revision: () => enqueue(() => read().cursor.revision),
     history: () => enqueue(history),
     exportSession: generation => enqueue(() => exportSession(generation)),
+    sessionStatus: () => enqueue(() => attached ? {
+      name: attached.name, revision: generation, saved: saveError === null, error: saveError, pending: read().pending,
+    } : null),
+    flushSession: () => enqueue(flushSession),
+    closeSession: () => enqueue(async () => {
+      if (!await flushSession()) return false;
+      attached.close();
+      attached = undefined;
+      return true;
+    }),
     receipts: () => enqueue(() => structuredClone(receiptChain())),
     snapshot: () => enqueue(editor.snapshot),
     select: (query, options) => enqueue(() => editor.select(query, options)),
@@ -668,27 +714,27 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
     },
     captureBrush: options => enqueue(() => editor.captureBrush(options)),
     copySelection: options => enqueue(() => editor.copySelection(options)),
-    begin: (label = '') => enqueue(() => unwrap(begin(label))),
+    begin: (label = '') => enqueue(() => unwrap(begin(label)), true),
     preview: () => enqueue(() => {
       if (!read().pending) throw new Error('No active transaction');
       return editor.snapshot();
     }),
-    commit: () => enqueue(() => transition('commit')),
-    cancel: () => enqueue(() => transition('cancel')),
-    undo: () => enqueue(() => transition('undo')),
-    redo: () => enqueue(() => transition('redo')),
+    commit: () => enqueue(() => transition('commit'), true),
+    cancel: () => enqueue(() => transition('cancel'), true),
+    undo: () => enqueue(() => transition('undo'), true),
+    redo: () => enqueue(() => transition('redo'), true),
     execute(raw) {
       const command = capture(raw);
-      return enqueue(() => execute(command));
+      return enqueue(() => execute(command), true);
     },
     applyBatch(raw) {
       const plan = capture(raw);
-      return enqueue(async () => structuredClone(await applyBatch(plan ?? {})));
+      return enqueue(async () => structuredClone(await applyBatch(plan ?? {})), true);
     },
     recordBatch: () => enqueue(async () => structuredClone(await recordBatch())),
     replayBatch(raw) {
       const receipt = capture(raw);
-      return enqueue(async () => structuredClone(await replayBatch(receipt)));
+      return enqueue(async () => structuredClone(await replayBatch(receipt)), true);
     },
     revalidateBatch(raw, options) {
       const receipt = capture(raw), settings = capture(options);
@@ -707,11 +753,11 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
     },
     apply(raw) {
       const patch = capture(raw);
-      return enqueue(async () => (await attempt(patch)).document);
+      return enqueue(async () => (await attempt(patch)).document, true);
     },
     replay(raw) {
       const receipt = capture(raw);
-      return enqueue(async () => (await attempt(replayReceipt(receipt).command.patch, { expected: receipt })).document);
+      return enqueue(async () => (await attempt(replayReceipt(receipt).command.patch, { expected: receipt })).document, true);
     },
   });
 }

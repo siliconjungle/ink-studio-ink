@@ -1,8 +1,10 @@
+mod cli_flags;
 mod file_edit_cli;
 mod file_output;
 mod journal_cli;
 mod palette_cli;
 mod session_cli;
+mod session_commands;
 
 use ink_studio_pixel::{
     IndexedSelectionRaster, OpenedDocument, PixelEditor, mask_pixels, open_pixel_document,
