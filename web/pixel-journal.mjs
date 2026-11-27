@@ -1,3 +1,5 @@
+import { pixelPng, pngBase64 } from './pixel-png.mjs';
+
 const receiptFormat = 'ink-studio/pixel-edit-receipt';
 const isRevision = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -154,6 +156,7 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
   const plan = bind('plan_pixel_command'), describe = bind('describe_pixel_command_document');
   const inspect = bind('inspect_pixel_command');
   const stamp = bind('export_pixel_command_stamp'), deck = bind('export_pixel_command_layer_deck');
+  const png = bind('export_pixel_command_png');
   const observe = bind('observe_pixel_edit'), links = bind('pixel_edit_links');
   const observePreview = bind('observe_pixel_preview'), editDiff = bind('pixel_preview_diff');
   const draftDiff = bind('pixel_draft_diff');
@@ -164,6 +167,11 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
   function unwrap(result) {
     if (Object.hasOwn(result, 'Err')) throw new Error(result.Err);
     return result.Ok;
+  }
+
+  function encodePng(options) {
+    const image = unwrap(png(codec.fromJS(options)));
+    return pixelPng(image, codec.toJS(image.metadata));
   }
 
   function enqueue(run) {
@@ -353,6 +361,8 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
         return { artifact: 'document', data: editor.snapshot() };
       case 'export-stamp':
         return { artifact: 'stamp', data: stampAsset(codec, unwrap(stamp(codec.fromJS(raw.options ?? {})))) };
+      case 'export-png':
+        return { artifact: 'png', encoding: 'base64', data: pngBase64(await encodePng(raw.options ?? {})) };
       case 'export-layer-deck':
         return { artifact: 'layer-deck', data: deckAsset(codec, unwrap(deck())) };
       case 'export-scene': case 'export-shot-corrections': case 'export-splat-fit': case 'export-scan-paint':
@@ -367,6 +377,10 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
   unwrap(bind('start_pixel_journal')(current, legacy, historyLimit));
 
   return Object.freeze({
+    png(options = {}) {
+      const saved = capture(options);
+      return enqueue(() => encodePng(saved));
+    },
     revision: () => enqueue(() => read().cursor.revision),
     history: () => enqueue(history),
     receipts: () => enqueue(allReceipts),

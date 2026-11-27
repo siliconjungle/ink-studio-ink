@@ -1,5 +1,9 @@
 use super::{Json, Limits, PixelEditor, Wire, compiled_json};
-use serde::{Serialize, Serializer, ser::SerializeMap};
+use base64::Engine;
+use serde::{
+    Serialize, Serializer,
+    ser::{SerializeMap, SerializeSeq},
+};
 use serde_json::{Map, Value};
 
 #[derive(Serialize)]
@@ -125,6 +129,78 @@ pub(super) fn stamp(editor: &mut PixelEditor, options: Json) -> Result<String, S
                 .collect(),
         },
     )
+}
+
+struct Slots<'a>(&'a [i32]);
+
+impl Serialize for Slots<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut rows = serializer.serialize_seq(Some(self.0.len()))?;
+        for &slot in self.0 {
+            rows.serialize_element(&u32::try_from(slot).ok())?;
+        }
+        rows.end()
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PngMetadata<'a> {
+    version: u8,
+    palette: &'a [String],
+    swatch_ids: &'a [String],
+    slots: Slots<'a>,
+    #[serde(skip_serializing_if = "<[u32]>::is_empty")]
+    knockouts: &'a [u32],
+}
+
+pub(super) fn png(editor: &mut PixelEditor, options: Json) -> Result<Vec<u8>, String> {
+    let settings = compiled_json(options, &|kind, scalar, flag, values, keys| {
+        editor
+            .program
+            .function_l_pixel_json_value(kind, scalar, flag, values, keys)
+    });
+    let image = editor
+        .program
+        .invoke_view_l_export_pixel_command_png(settings)?
+        .result?;
+    let mut ink = serde_json::to_vec(&PngMetadata {
+        version: 1,
+        palette: &image.l_palette,
+        swatch_ids: &image.l_ids,
+        slots: Slots(&image.l_slots),
+        knockouts: &image.l_knockouts,
+    })
+    .map_err(|error| error.to_string())?;
+    let limits = Limits::default();
+    let extras = Json::from_ink(&image.l_metadata.to_json(), limits)?.stringify(limits)?;
+    if extras != "{}" {
+        ink.pop();
+        ink.push(b',');
+        ink.extend_from_slice(&extras.as_bytes()[1..]);
+    }
+    if ink.len() > image.l_slots.len() * 14 + 8_388_608 {
+        return Err("Ink PNG palette metadata exceeds the export budget".into());
+    }
+    super::png::encode(
+        super::png::Raster {
+            width: image.l_width,
+            height: image.l_height,
+            channels: image.l_channels,
+            pixels: &image.l_pixels,
+            colors: &image.l_colors,
+            coverage: &image.l_coverage,
+        },
+        &ink,
+    )
+}
+
+pub(super) fn png_command(editor: &mut PixelEditor, options: Json) -> Result<String, String> {
+    let bytes = png(editor, options)?;
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!(
+        r#"{{"artifact":"png","encoding":"base64","data":"{data}"}}"#
+    ))
 }
 
 pub(super) fn deck(editor: &mut PixelEditor) -> Result<String, String> {

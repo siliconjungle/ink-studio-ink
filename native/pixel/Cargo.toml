@@ -5,7 +5,10 @@ edition = "2024"
 publish = false
 
 [dependencies]
+base64 = "0.22"
 compiled-state = { path = "../../build/pixel_document-rust" }
+crc32fast = "1"
+cw-zlib = "=0.3.0"
 ink-abi = { git = "https://github.com/siliconjungle/ink-abi", rev = "6356464654b39341d1e442d61c64be1e3a720489" }
 ryu-js = "=1.0.2"
 indexmap = "2"

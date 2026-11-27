@@ -12,6 +12,7 @@ import "pixel_selection.ink" as selection;
 import "pixel_values.ink" as value;
 
 record Raster { slots: List<i32>, alpha: List<u32>, knockouts: List<u32>, }
+record IndexedRaster { colors: List<u32>, ids: List<String>, raster: Raster, }
 record Named { id: String, pixels: List<Vec2<u32>>, }
 record Stamp { info: json.Json, raster: Raster, selections: List<Named>, }
 record DeckCel { layer: String, info: json.Json, raster: Raster, }
@@ -134,33 +135,34 @@ fn export_scope(art: frame.Artwork, settings: List<json.Member>) -> Result<frame
 fn stamp(source: json.Json, art: frame.Artwork, positions: List<List<u32>>, options: json.Json) -> Result<Stamp, String> {
     let settings = value.fields(options);
     let scope = export_scope(art, settings)?;
-    let details = paint.protections(source, art)?;
-    let view = checked_export(art, scope, truthy(value.get(settings, "references")), false, details)?;
-    if value.has(settings, "layer") && !view.raw.found { return Err(string_concat("Unknown pixel layer ", scope.layer)); }
-    return Ok(stamp_view(value.fields(source), art, positions, scope.frame, view));
-}
-
-fn stamp_view(spec: List<json.Member>, art: frame.Artwork, positions: List<List<u32>>, id: String, view: frame.ExportView) -> Stamp {
+    let selected = scoped_raster(source, art, settings, scope, truthy(value.get(settings, "references")))?;
+    let spec = value.fields(source);
+    let id = scope.frame;
     let guides = scoped_rows(spec, "guides", id, true).map(fn(row) => local_fields(row));
     let bindings = scoped_rows(spec, "sceneBindings", id, true);
     let info = when_rows("guides", guides).concat(when_rows("sceneBindings", bindings));
     let chosen = named_rows(art.grid, spec, positions, id, true);
-    if view.raw.found {
-        let palette = art.colors.map(fn(rgb) => json.text(colors.color_text(rgb)));
-        return Stamp { info: json.object(stamp_info(spec, art.ids, palette).concat(info)),
-            raster: raw(view.raw), selections: chosen };
-    }
-    return composite_stamp(spec, art, view, info, chosen);
+    let palette = selected.colors.map(fn(rgb) => json.text(colors.color_text(rgb)));
+    return Ok(Stamp { info: json.object(stamp_info(spec, selected.ids, palette).concat(info)),
+        raster: selected.raster, selections: chosen });
 }
 
-fn composite_stamp(spec: List<json.Member>, art: frame.Artwork, view: frame.ExportView, info: List<json.Member>, chosen: List<Named>) -> Stamp {
+fn scoped_raster(source: json.Json, art: frame.Artwork, settings: List<json.Member>, scope: frame.Scope,
+    references: Bool) -> Result<IndexedRaster, String> {
+    let details = paint.protections(source, art)?;
+    let view = checked_export(art, scope, references, false, details)?;
+    if value.has(settings, "layer") && !view.raw.found { return Err(string_concat("Unknown pixel layer ", scope.layer)); }
+    if view.raw.found { return Ok(IndexedRaster { colors: art.colors, ids: art.ids, raster: raw(view.raw) }); }
+    return Ok(composite_raster(art, view));
+}
+
+fn composite_raster(art: frame.Artwork, view: frame.ExportView) -> IndexedRaster {
     let start = Blends { seen: Map.empty(), slots: Buffer.empty(), added: Buffer.empty() };
     let blends = foldl(view.pixels, start, fn(cell) => fn(out) => add_blend(art.colors, cell, out));
     let added = blends.added.freeze();
     let ids = art.ids.concat(added.map(fn(rgb) => blend_id(art.ids, rgb)));
-    let palette = art.colors.concat(added).map(fn(rgb) => json.text(colors.color_text(rgb)));
     let alpha = if view.uses_alpha { view.pixels.map(fn(cell) => if cell.slot < 0 { 255 } else { cell.alpha }) } else { [] };
-    return Stamp { info: json.object(stamp_info(spec, ids, palette).concat(info)), selections: chosen,
+    return IndexedRaster { colors: art.colors.concat(added), ids: ids,
         raster: Raster { slots: blends.slots.freeze(), alpha: alpha, knockouts: [] } };
 }
 

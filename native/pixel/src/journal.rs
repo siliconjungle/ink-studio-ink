@@ -625,6 +625,10 @@ impl PixelCommandEditor {
             .staged())
     }
 
+    pub fn png(&mut self, options: &str) -> Result<Vec<u8>, PixelEditError> {
+        super::export_assets::png(&mut self.editor, parse_json(options)?).map_err(Into::into)
+    }
+
     pub fn execute(&mut self, source: &str) -> Result<String, PixelEditError> {
         let mut request = parse_json(source)?;
         let make = |kind, scalar, flag, values, keys| {
@@ -702,6 +706,9 @@ impl PixelCommandEditor {
             )),
             "export-stamp" => {
                 super::export_assets::stamp(&mut self.editor, options).map_err(Into::into)
+            }
+            "export-png" => {
+                super::export_assets::png_command(&mut self.editor, options).map_err(Into::into)
             }
             "export-layer-deck" => super::export_assets::deck(&mut self.editor).map_err(Into::into),
             "export-scene"

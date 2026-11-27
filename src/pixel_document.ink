@@ -13,6 +13,7 @@ import "pixel_history.ink" as history;
 import "pixel_preview.ink" as preview;
 import "pixel_commands.ink" as commands;
 import "pixel_asset_export.ink" as assets;
+import "pixel_png.ink" as png;
 import "pixel_guarded_edit.ink" as guarded;
 import "pixel_inspect.ink" as inspection;
 
@@ -782,6 +783,10 @@ query inspect_pixel_command(at: json.Json, options: json.Json) -> Result<inspect
 
 query export_pixel_command_stamp(options: json.Json) -> Result<assets.Stamp, String> reads(EditorSource, EditorArtwork, EditorPositions) {
     return assets.stamp(EditorSource, EditorArtwork, EditorPositions, options);
+}
+
+query export_pixel_command_png(options: json.Json) -> Result<png.Image, String> reads(EditorSource, EditorArtwork) {
+    return png.prepare(EditorSource, EditorArtwork, options);
 }
 
 query export_pixel_command_layer_deck() -> Result<assets.Deck, String> reads(EditorSource, EditorArtwork, EditorPositions) {

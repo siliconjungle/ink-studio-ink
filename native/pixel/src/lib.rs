@@ -1,5 +1,6 @@
 pub mod edit_preview;
 mod export_assets;
+mod png;
 mod journal;
 pub use journal::{EditHistory, PixelCommandEditor, PixelEditError, PixelPreviewOptions, StagedPixelEdit};
 
