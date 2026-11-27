@@ -6,6 +6,27 @@ fn byte(value: String, offset: u32) -> u32 {
     return string_byte_at(value, offset).fold(fn(n) => n, fn(unit) => 0);
 }
 
+fn digit(c: u32) -> Bool { return c >= 48 && c <= 57; }
+fn letter(c: u32) -> Bool { return c >= 97 && c <= 122; }
+
+fn id_tail(value: String, i: u32, ok: Bool) -> Bool {
+    let c = byte(value, i + 1);
+    return ok && (letter(c) || digit(c) || c == 45);
+}
+
+fn stable_id(value: String) -> Bool {
+    let size = string_byte_len(value);
+    if size == 0 || size > 64 || !letter(byte(value, 0)) { return false; }
+    return repeat_until(size - 1, true, fn(ok) => !ok, fn(i) => fn(ok) => id_tail(value, i, ok));
+}
+
+fn hex_byte(c: u32) -> Bool { return digit(c) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102); }
+
+fn rgb(value: String) -> Bool {
+    if string_byte_len(value) != 7 || byte(value, 0) != 35 { return false; }
+    return repeat_until(6, true, fn(ok) => !ok, fn(i) => fn(ok) => ok && hex_byte(byte(value, i + 1)));
+}
+
 fn spaces(value: String, i: u32) -> u32 {
     let a = byte(value, i);
     if a == 32 || (a >= 9 && a <= 13) { return 1; }

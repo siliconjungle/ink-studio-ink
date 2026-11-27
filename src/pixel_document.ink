@@ -14,6 +14,8 @@ import "pixel_preview.ink" as preview;
 import "pixel_commands.ink" as commands;
 import "pixel_asset_export.ink" as assets;
 import "pixel_png.ink" as png;
+import "pixel_png_input.ink" as png_input;
+import "pixel_png_import.ink" as png_import;
 import "pixel_guarded_edit.ink" as guarded;
 import "pixel_inspect.ink" as inspection;
 
@@ -62,6 +64,19 @@ pub fn pixel_slot_plane(frame: String, layer: String, pixels: List<i32>) -> fram
     return frame_raster.SlotPlane { frame: frame, layer: layer, pixels: pixels };
 }
 
+pub fn inspect_pixel_png(words: List<u32>, size: u32) -> Result<png_input.Layout, String> {
+    return png_input.inspect(words, size);
+}
+
+pub fn decode_pixel_png(layout: png_input.Layout, words: List<u32>, size: u32) -> Result<png_input.Samples, String> {
+    return png_input.decode(layout, words, size);
+}
+
+pub fn restore_pixel_png(layout: png_input.Layout, samples: png_input.Samples, metadata: json.Json, slots: List<i32>,
+    alpha: List<u32>, knockouts: List<u32>) -> Result<png_import.Document, String> {
+    return png_import.restore(layout, samples, metadata, slots, alpha, knockouts);
+}
+
 // Assemble the standard JSON value from already parsed native components.
 pub fn pixel_json_value(kind: u32, scalar: String, flag: Bool, values: List<json.Json>, keys: List<String>) -> json.Json {
     if kind == 0 { return json.null(); }
@@ -96,7 +111,6 @@ fn slice(value: String, first: u32, end: u32) -> String {
     return string_slice(value, first, end).fold(fn(text) => text, fn(unit) => "");
 }
 fn digit(c: u32) -> Bool { return c >= 48 && c <= 57; }
-fn letter(c: u32) -> Bool { return c >= 97 && c <= 122; }
 fn max_integer() -> u64 { return 9007199254740991; }
 
 // The file adapters supply the decimal spelling of an ECMAScript Number.
@@ -120,18 +134,7 @@ fn positive(value: json.Json, limit: u64) -> u64 {
     return unsigned(token(value), limit).fold(fn(n) => n, fn(unit) => 0);
 }
 
-fn stable_id(value: String) -> Bool {
-    let size = string_byte_len(value);
-    if size == 0 || size > 64 || !letter(byte(value, 0)) { return false; }
-    var i: u32 = 1;
-    var valid: Bool = true;
-    for unused in buffer_fill(size - 1, 0).freeze() {
-        let c = byte(value, i);
-        valid = valid && (letter(c) || digit(c) || c == 45);
-        i = i + 1;
-    }
-    return valid;
-}
+fn stable_id(value: String) -> Bool { return labels.stable_id(value); }
 
 fn cel_id(value: String) -> Bool {
     return string_find(value, "/", 0).fold(fn(slash) =>
@@ -175,17 +178,7 @@ fn unit_opacity(value: json.Json) -> Bool {
         (c >= 49 && c <= 57 && string_find(s, "e-", 0).fold(fn(offset) => true, fn(unit) => false));
 }
 
-fn rgb(value: String) -> Bool {
-    if string_byte_len(value) != 7 || byte(value, 0) != 35 { return false; }
-    var i: u32 = 1;
-    var valid: Bool = true;
-    for unused in [0, 0, 0, 0, 0, 0] {
-        let c = byte(value, i);
-        valid = valid && (digit(c) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102));
-        i = i + 1;
-    }
-    return valid;
-}
+fn rgb(value: String) -> Bool { return labels.rgb(value); }
 
 fn swatch(item: json.Member, legacy: Bool) -> Bool {
     if !stable_id(item.key) { return false; }

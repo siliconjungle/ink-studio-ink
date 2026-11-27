@@ -72,6 +72,12 @@ Call `openPixelDocument(source)` from `web/pixel-document.mjs` in a secure brows
 cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- artwork.json
 ```
 
+Use `openPixelPng(bytes)` from `web/pixel-document.mjs` to import a `Uint8Array` as an editable version 2 document. It returns the document and its SHA-256 revision in the same format as `openPixelDocument`. The importer accepts noninterlaced and Adam7 PNGs up to 512 × 512 with 8-bit or smaller channels. Editable PNGs retain swatch IDs, labels, locks, ramps, alpha and knockout marks.
+
+```sh
+cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- import-png artwork.png
+```
+
 `rasterizePixelFrame(source, { frame, layer, cel })` compiles artwork into indexed slots, alpha, clipping and packed RGBA. Omit `layer` and `cel` for the frame composite. The same Ink code runs on both targets and handles held cels, content offsets, layer groups, blend modes, clipping masks, and authored point, run, stair, rectangle, path and polygon marks. The compiler needs `f64_from_decimal` to read authored numbers.
 
 Both loaders pass full cel slot arrays to Ink as palette indices. A held cel can share its source's slot plane. Snapshots and document exports restore the original swatch IDs, transparent slots and authored field order, including on 512 × 512 cels.

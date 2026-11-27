@@ -1,8 +1,10 @@
 pub mod edit_preview;
 mod export_assets;
 mod png;
+mod png_import;
 mod journal;
 pub use journal::{EditHistory, PixelCommandEditor, PixelEditError, PixelPreviewOptions, StagedPixelEdit};
+pub use png_import::open_pixel_png;
 
 use compiled_state::{State, ValueWireLimits, Wire};
 use indexmap::IndexMap;

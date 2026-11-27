@@ -1,5 +1,6 @@
 import { call, callOwned, compiledValues, createState, JsonCodec } from '../build/pixel_document.mjs';
 import { openPixelJournal } from './pixel-journal.mjs';
+import { decodePixelPng } from './pixel-png-import.mjs';
 
 const codec = new JsonCodec(compiledValues.open_pixel_document.params[0]);
 const utf8 = new TextEncoder();
@@ -21,6 +22,11 @@ export async function openPixelDocument(source) {
     opened.Ok.legacy ? revision(input) : null,
   ]);
   return { document, revision: current, legacyRevision: legacy };
+}
+
+export async function openPixelPng(bytes) {
+  const document = await decodePixelPng(bytes, codec);
+  return { document, revision: await revision(document), legacyRevision: null };
 }
 
 export function rasterizePixelFrame(source, { frame = '', layer = '', cel = '' } = {}) {

@@ -1,8 +1,8 @@
 mod journal_cli;
 
 use ink_studio_pixel::{
-    IndexedSelectionRaster, PixelEditor, mask_pixels, open_pixel_document, rasterize_pixel_frame,
-    select_pixel_mask_with_raster,
+    IndexedSelectionRaster, OpenedDocument, PixelEditor, mask_pixels, open_pixel_document,
+    open_pixel_png, rasterize_pixel_frame, select_pixel_mask_with_raster,
 };
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -142,11 +142,15 @@ fn select(path: std::ffi::OsString, packed: bool) -> Result<(), String> {
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel select|select-mask|raster|select-document|paint-document|save-selection-document|capture-brush-document|copy-selection-document|journal-document|command-document REQUEST";
+    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel import-png FILE | ink-studio-pixel select|select-mask|raster|select-document|paint-document|save-selection-document|capture-brush-document|copy-selection-document|journal-document|command-document REQUEST";
     let path = args.next().ok_or(usage)?;
     if let Some(request) = args.next() {
         if args.next().is_some() {
             return Err(usage.into());
+        }
+        if path == "import-png" {
+            let image = std::fs::read(request).map_err(|error| error.to_string())?;
+            return print_opened(open_pixel_png(&image)?);
         }
         if path == "select" || path == "select-mask" {
             return select(request, path == "select-mask");
@@ -169,7 +173,10 @@ fn run() -> Result<(), String> {
         return Err(usage.into());
     }
     let source = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let opened = open_pixel_document(&source)?;
+    print_opened(open_pixel_document(&source)?)
+}
+
+fn print_opened(opened: OpenedDocument) -> Result<(), String> {
     let document = opened.document_json;
     let legacy =
         serde_json::to_string(&opened.legacy_revision).map_err(|error| error.to_string())?;
