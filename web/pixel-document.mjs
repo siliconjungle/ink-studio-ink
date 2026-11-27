@@ -40,6 +40,7 @@ export function createPixelEditor(source) {
   const pick = state.bind('select_pixel_editor', { resultOnly: true });
   const draw = state.bind('paint_pixel_editor', { resultOnly: true });
   const read = state.bind('snapshot_pixel_editor', { resultOnly: true });
+  const capture = state.bind('capture_pixel_editor_brush', { resultOnly: true });
   let grid;
   function replaceDocument(source) {
     const input = typeof source === 'string' ? JSON.parse(source) : source;
@@ -53,13 +54,32 @@ export function createPixelEditor(source) {
       pixels: maskPixels(chosen.grid.width, chosen.words) };
   }
   function paint(operation, { frame, cel } = {}) {
-    const result = unwrap(draw(codec.fromJS(operation), option(frame), option(cel)));
-    const { pixelPerfect, selection, shape, ...target } = result;
+    const { metadata, slots } = packBrushSlots(operation);
+    const result = unwrap(draw(codec.fromJS(metadata), slots, option(frame), option(cel)));
+    const { pixelPerfect, selection, shape, shading, ramp, addedSwatches, ...target } = result;
     const drawing = ownData(operation, 'drawing');
     return { destination: 'raster', kind: 'raster', ...target,
       ...(pixelPerfect && { pixelPerfect }), ...(Object.hasOwn(shape, 'Some') && { shape: shape.Some }),
+      ...(Object.hasOwn(shading, 'Some') && { shading: shading.Some }),
+      ...(Object.hasOwn(ramp, 'Some') && { ramp: ramp.Some }),
+      ...(addedSwatches.length && { addedSwatches }),
       ...(Object.hasOwn(selection, 'Some') && { selection: selection.Some }),
       ...(drawing !== undefined && { drawing: structuredClone(drawing) }) };
+  }
+  function captureBrush(options = {}) {
+    const pixels = ownData(options, 'pixels');
+    let metadata = options, positions = [];
+    if (Array.isArray(pixels)) {
+      metadata = replacingDataField(options, 'pixels', []);
+      if (pixels.length <= grid.width * grid.height) {
+        positions = Uint32Array.from({ length: pixels.length }, (_, i) =>
+          documentPoint(grid.width, grid.height, ownData(pixels, i)));
+      }
+    }
+    const { width, height, anchor, palette, slots, settings } = unwrap(capture(codec.fromJS(metadata), positions));
+    return { format: 'ink-studio/pixel-brush', version: 1, width, height, anchor,
+      palette: palette.map(({ id, color }) => ({ ...(id && { id }), color })),
+      slots: slots.map(slot => slot < 0 ? null : slot), settings: codec.toJS(settings) };
   }
   function snapshot() {
     const saved = read();
@@ -71,7 +91,7 @@ export function createPixelEditor(source) {
     return document;
   }
   replaceDocument(source);
-  return Object.freeze({ replaceDocument, select, paint, snapshot });
+  return Object.freeze({ replaceDocument, select, paint, captureBrush, snapshot });
 }
 
 function ownData(value, key) {
@@ -112,6 +132,21 @@ function packNamedPixels(input) {
     rows.push(replacingDataField(row, 'pixels', []));
   }
   return { document: replacingDataField(input, 'selections', rows), positions };
+}
+
+// Dense tips cross the action boundary as integers. Keep their metadata and
+// the authored operation in the existing checked JSON representation.
+function packBrushSlots(operation) {
+  const brush = ownData(operation, 'brush');
+  const source = ownData(brush, 'slots');
+  if (!Array.isArray(source)) return { metadata: operation, slots: [] };
+  const slots = source.length <= 512 * 512 ? Int32Array.from({ length: source.length }, (_, i) => {
+    const slot = ownData(source, i);
+    if (slot === null) return -1;
+    return Number.isInteger(slot) && slot >= 0 && slot < 255 ? slot : -2;
+  }) : [];
+  const metadata = replacingDataField(operation, 'brush', replacingDataField(brush, 'slots', []));
+  return { metadata, slots };
 }
 
 function replacingDataField(source, name, value) {

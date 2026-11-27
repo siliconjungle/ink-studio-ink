@@ -11,7 +11,7 @@ record Rect { x: f64, y: f64, right: f64, bottom: f64, }
 record Box { x: u32, y: u32, w: u32, h: u32, }
 record Span { start: u32, length: u32, }
 record Runs { paint: Paint, end: u32, }
-record RunMark { slot: i32, spans: List<Vec3<u32>>, }
+record RunMark { slot: i32, alpha: Option<u32>, spans: List<Vec3<u32>>, }
 // Editor-created marks are already validated spans. Keep their authored prefix in order.
 record RunCache { prefix: List<json.Json>, tail: List<RunMark>, }
 record Step { x: i32, y: i32, dx: i32, dy: i32, down: Bool, }
@@ -681,23 +681,31 @@ fn mark(g: mask.Grid, ids: List<String>, raw: json.Json, paint: Paint) -> Paint 
 
 fn no_run_cache() -> RunCache { return RunCache { prefix: [], tail: [] }; }
 
-fn append_runs(content: List<json.Member>, cache: RunCache, added: RunMark) -> RunCache {
+fn append_runs(content: List<json.Member>, cache: RunCache, added: List<RunMark>) -> RunCache {
     let prefix = if length(cache.tail) == 0 { values.items(values.get(content, "marks")) } else { cache.prefix };
-    return RunCache { prefix: prefix, tail: cache.tail.concat([added]) };
+    return RunCache { prefix: prefix, tail: cache.tail.concat(added) };
 }
 
 fn retained_runs(g: mask.Grid, row: RunMark, old: Paint) -> Paint {
     if old.issue != "" { return old; }
+    let alpha = row.alpha.fold(fn(n) => n, fn(unit) => 4294967295);
     let prepared = spend_marks(Paint { ..old, drawing: 0 }, 1);
-    return foldl(row.spans, prepared, fn(span) => fn(out) =>
-        retained_span(g, span, row.slot, out));
+    let initial = if alpha <= 255 && prepared.alpha.len() == 0 {
+        Paint { ..prepared, alpha: buffer_fill(mask.size(g), 255) }
+    } else { prepared };
+    return foldl(row.spans, initial, fn(span) => fn(out) =>
+        retained_span(g, span, row.slot, alpha, out));
 }
 
-fn retained_span(g: mask.Grid, span: Vec3<u32>, slot: i32, old: Paint) -> Paint {
+fn retained_span(g: mask.Grid, span: Vec3<u32>, slot: i32, alpha: u32, old: Paint) -> Paint {
     if old.issue != "" { return old; }
     let charged = spend_runs(old, span.z);
     if charged.issue != "" { return charged; }
-    return write_span(charged, Span { start: span.x * g.width + span.y, length: span.z }, slot);
+    let first = span.x * g.width + span.y;
+    if alpha <= 255 {
+        return repeat_until(span.z, charged, fn(out) => false, fn(i) => fn(out) => write_alpha(out, first + i, alpha));
+    }
+    return write_span(charged, Span { start: first, length: span.z }, slot);
 }
 
 fn raster(g: mask.Grid, ids: List<String>, content: List<json.Member>, cache: RunCache, work: Work) -> Raw {

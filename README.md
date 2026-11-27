@@ -78,9 +78,11 @@ cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- artwork.
 
 Use `{ type: 'recall', id }` to resolve a document's saved selection. An unscoped top-level recall selects its saved frame. Recalls within a composed query use the active frame.
 
-`editor.paint(operation, { frame, cel })` applies pencil, eraser, fill and shape operations to the open document and returns the changed runs. Pass the layer in the operation or select a cel in the scope. Operations support the original named selection constraints, pixel-perfect pencil paths, mirror axes and wrapping. `editor.snapshot()` returns the edited pixel document and preserves author order in saved masks. The native library supports `PixelEditor::paint` and `snapshot`. Its `paint-document` command takes `document`, `operation`, and optional `frame` and `cel`, and returns the target report and updated document.
+`editor.paint(operation, { frame, cel })` applies pencil, eraser, fill, shape and saved brush operations to the open document and returns the changed runs. Pass the layer in the operation or select a cel in the scope. Operations support the original named selection constraints, pixel-perfect pencil paths, mirror axes and wrapping. `editor.snapshot()` returns the edited pixel document and preserves author order in saved masks. The native library supports `PixelEditor::paint` and `snapshot`. Its `paint-document` command takes `document`, `operation`, and optional `frame` and `cel`, and returns the target report and updated document.
 
 Set `tool: 'shape'` and pass `shape: { type, ...geometry }` for lines, quadratic or cubic curves, rectangles, ellipses, polygons, bitmap text and staircases. Filled shapes and outline widths follow the native pixel grid. Text supports individual scale, tracking, leading, alignment and column wrapping. Shapes honor the same named selections, protection, clipping, mirror axes and wrapping as other raster tools.
+
+`editor.captureBrush({ rect, pixels, selection, frame, layer, cel, anchor, settings })` saves an indexed tip. Supply one rectangle, one pixel list, or one named selection. Omit the layer and cel to capture the frame composite. Paint with `{ tool: 'brush', layer, brush, at }`, a `points` path, or timed `samples` with pressure. Brush operations support the original palette matching and additions, tint, color override, alpha changes, recolor and inline or named palette ramps. Native callers use `PixelEditor::capture_brush` or `capture-brush-document` with a JSON request containing `document` and `options`.
 
 `raster` and `select-document` are the native equivalents. Their JSON request contains `document` and optional `frame`, `layer` or `cel`. Add `query` for `select-document`.
 
@@ -99,7 +101,7 @@ cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- select-m
 
 ## Build and check
 
-Use [Ink Lang commit `7ff037b`](https://github.com/siliconjungle/ink-lang/commit/7ff037b76731a54c62b3d2f23388295073011432) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for immutable geometry and pixel document inputs. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
+Use [Ink Lang commit `4e4ebb4`](https://github.com/siliconjungle/ink-lang/commit/4e4ebb4ba975b4f15bc26b6bcb16d814b5ca95f6) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for immutable geometry and pixel document inputs. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
 
 ```sh
 ./scripts/build.sh --gpu

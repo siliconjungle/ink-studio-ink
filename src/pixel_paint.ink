@@ -1,6 +1,9 @@
 module StudioPixelPaint;
 
 import "std:json" as json;
+import "pixel_brush.ink" as brush;
+import "pixel_brush_motion.ink" as motion;
+import "pixel_brush_paint.ink" as brush_paint;
 import "pixel_drawing_grid.ink" as drawing;
 import "pixel_frame.ink" as frame;
 import "pixel_mask.ink" as mask;
@@ -9,17 +12,22 @@ import "pixel_selection.ink" as selection;
 import "pixel_shapes.ink" as shape;
 import "pixel_values.ink" as value;
 
-record Tool { kind: String, swatch: String, slot: i32, perfect: Bool, selection: Option<String>,
-    drawing: drawing.Drawing, points: List<drawing.Point>, geometry: json.Json, }
+record Tool { kind: String, slot: i32, perfect: Bool, selection: Option<String>,
+    drawing: drawing.Drawing, points: List<drawing.Point>, geometry: json.Json,
+    saved_brush: json.Json, samples: Option<json.Json>, shading: Option<json.Json>, }
 record Constraint { limited: Bool, words: List<u32>, }
 record Guard { drawn: frame.PaintView, protected: List<u32>, selected: Constraint, }
 record Stroke { words: Buffer<u32>, previous: drawing.Point, tip: drawing.Point, issue: String, }
 record Segment { pen: drawing.Pen, stroke: Stroke, }
 record Runs { spans: Buffer<Vec3<u32>>, y: u32, x: u32, length: u32, }
 record Report { frame: String, layer: String, cel: String, tool: String, pixelCount: u32,
-    runs: List<Vec3<u32>>, pixelPerfect: Bool, selection: Option<String>, shape: Option<String>, }
+    runs: List<Vec3<u32>>, pixelPerfect: Bool, selection: Option<String>, shape: Option<String>, shading: Option<String>,
+    ramp: Option<String>, addedSwatches: List<String>, }
 record Detail { id: String, kind: String, first: u32, last: u32, sites: List<u32>, }
 record Details { rows: Buffer<Detail>, issue: String, }
+record Changes { sites: List<u32>, marks: List<raster.RunMark>, added: List<brush.Swatch>, shading: brush_paint.Shading, }
+record Ranks { positions: Buffer<u32>, slots: Buffer<u32>, }
+record Groups { marks: Buffer<raster.RunMark>, index: u32, spans: Runs, }
 record Appended { authored: json.Json, runs: raster.RunCache, }
 record Edit { document: json.Json, artwork: frame.Artwork, report: Report,
     scope: frame.Scope, image: selection.Image, }
@@ -36,34 +44,42 @@ fn decode(g: mask.Grid, ids: List<String>, items: List<json.Member>) -> Result<T
 fn decode_points(grid: drawing.Drawing, ids: List<String>, kind: String, items: List<json.Member>) -> Result<Tool, String> {
     let swatch = value.text(value.get(items, "swatch"));
     let slot: i32 = if kind == "eraser" { -1 } else { selection.find_swatch(ids, swatch) };
-    if !(kind == "pencil" || kind == "fill" || kind == "eraser" || kind == "shape") {
-        return Err("Paint tools need a known swatch or saved brush colors. Eraser clears the active layer.");
-    }
-    if if kind == "eraser" { value.has(items, "swatch") } else { slot < 0 } {
-        return Err("Paint tools need a known swatch or saved brush colors. Eraser clears the active layer.");
-    }
-    if value.has(items, "brush") { return Err("A brush operation needs a saved brush"); }
-    if value.has(items, "shading") { return Err("Brush shading needs a saved tip. Only recolor accepts a swatch override."); }
+    let brushing = kind == "brush";
     let precise = kind == "shape";
-    if if precise { value.has(items, "at") || value.has(items, "points") } else { value.has(items, "shape") } {
+    let has_swatch = value.has(items, "swatch");
+    let allowed = brushing || precise || kind == "pencil" || kind == "fill" || kind == "eraser";
+    if !allowed || (if kind == "eraser" { has_swatch } else { (!brushing || has_swatch) && slot < 0 }) {
+        return Err("Paint tools need a known swatch or saved brush colors. Eraser clears the active layer.");
+    }
+    if value.has(items, "brush") != brushing { return Err("A brush operation needs a saved brush"); }
+    let shade = value.get(items, "shading");
+    let shading = json.lookup(items, "shading");
+    if value.has(items, "shading") && (!brushing || has_swatch && value.text(value.get(value.fields(shade), "mode")) != "recolor") {
+        return Err("Brush shading needs a saved tip. Only recolor accepts a swatch override.");
+    }
+    let at = value.has(items, "at");
+    let has_points = value.has(items, "points");
+    if if precise { at || has_points } else { value.has(items, "shape") } {
         return Err("Put shape geometry in the shape operation");
     }
-    if value.has(items, "samples") { return Err("Sampled brush motion replaces both at and points"); }
-    let decoded: Result<List<drawing.Point>, String> = if precise { Ok([]) } else { read_points(grid, kind, items) };
+    let sampled = value.has(items, "samples");
+    if sampled && (!brushing || at || has_points) { return Err("Sampled brush motion replaces both at and points"); }
+    let single = kind == "fill" || brushing && at;
+    let decoded: Result<List<drawing.Point>, String> = if precise || sampled { Ok([]) } else { read_points(grid, single, items) };
     let points = decoded?;
     let selected: Option<String> = json.lookup(items, "selection").fold(fn(raw) => Some(value.text(raw)), fn(unit) => None);
-    return Ok(Tool { kind: kind, swatch: swatch, slot: slot, perfect: value.flag(items, "pixelPerfect", false),
-        selection: selected, drawing: grid, points: points, geometry: value.get(items, "shape") });
+    return Ok(Tool { kind: kind, slot: slot, perfect: value.flag(items, "pixelPerfect", false),
+        selection: selected, drawing: grid, points: points, geometry: value.get(items, "shape"),
+        saved_brush: value.get(items, "brush"), samples: json.lookup(items, "samples"), shading: shading });
 }
 
-fn read_points(grid: drawing.Drawing, kind: String, items: List<json.Member>) -> Result<List<drawing.Point>, String> {
-    let fill = kind == "fill";
-    let points = if fill { [value.get(items, "at")] } else { value.items(value.get(items, "points")) };
-    if (if fill { value.has(items, "points") } else { value.has(items, "at") || length(points) == 0 || length(points) > 4096 }) {
+fn read_points(grid: drawing.Drawing, single: Bool, items: List<json.Member>) -> Result<List<drawing.Point>, String> {
+    let points = if single { [value.get(items, "at")] } else { value.items(value.get(items, "points")) };
+    if (if single { value.has(items, "points") } else { value.has(items, "at") || length(points) == 0 || length(points) > 4096 }) {
         return Err("Fill needs a seed pixel. Brush accepts one position or a path. Pencil and eraser need a path.");
     }
     let decoded = points.map(fn(p) => drawing.point(p, grid));
-    if length(decoded.filter(fn(p) => p.x == -30000 || p.y == -30000)) != 0 {
+    if length(decoded.filter(fn(p) => !drawing.inside(p, grid))) != 0 {
         return Err("A paint tool needs points inside the native grid or its wrapping neighbors");
     }
     return Ok(decoded);
@@ -141,6 +157,86 @@ fn paint_mask(tool: Tool, guard: Guard) -> Result<List<u32>, String> {
     return Ok(traced.words.freeze());
 }
 
+fn basic_changes(tool: Tool, guard: Guard) -> Result<Changes, String> {
+    let changed = paint_mask(tool, guard)?;
+    let sites = mask.indices(changed);
+    let marks: List<raster.RunMark> = if length(sites) == 0 { [] } else {
+        [raster.RunMark { slot: tool.slot, alpha: None, spans: runs(tool.drawing.grid, sites) }]
+    };
+    return Ok(Changes { sites: sites, marks: marks, added: [], shading: brush_paint.unshaded() });
+}
+
+fn brushed(source: json.Json, art: frame.Artwork, tool: Tool, guard: Guard, slots: List<i32>) -> Result<Changes, String> {
+    let b = brush.decode(tool.saved_brush, slots)?;
+    let traced = tool.samples.fold(fn(raw) => motion.trace(tool.drawing, b, raw),
+        fn(unit) => brush.static_path(tool.drawing, b, tool.points));
+    let stamps = traced?;
+    let parsed: Result<brush_paint.Shading, String> = tool.shading.fold(fn(raw) => brush_paint.read_shading(source, art.ids, raw),
+        fn(unit) => Ok(brush_paint.unshaded()));
+    let shade = parsed?;
+    let aimed = stamps.filter(fn(row) => selected(row.pixel, guard.selected)).map(fn(row) =>
+        brush_paint.shaded(row, guard.drawn.captured, shade)).filter(fn(row) => row.slot >= 0);
+    if length(aimed.filter(fn(row) => !writable(guard, row.pixel))) != 0 {
+        return Err("Paint tool cannot change this pixel");
+    }
+    return brush_changes(art, tool.slot, b, shade, aimed, guard.drawn.captured);
+}
+
+fn brush_changes(art: frame.Artwork, override: i32, b: brush.Brush, shade: brush_paint.Shading,
+    aimed: List<brush.Stamp>, captured: frame.Captured) -> Result<Changes, String> {
+    if shade.mode == "alpha" {
+        let sites = aimed.map(fn(row) => row.pixel).sort();
+        let marks: List<raster.RunMark> = if length(sites) == 0 { [] } else { [raster.RunMark { slot: -1, alpha: Some(shade.opacity), spans: runs(art.grid, sites) }] };
+        return Ok(Changes { sites: sites, marks: marks, added: [], shading: shade });
+    }
+    let empty = brush_paint.Colors { palette: [], slots: [], added: [], issue: "" };
+    let resolved: Result<brush_paint.Colors, String> = if shade.mode == "ramp" { Ok(empty) }
+        else { brush_paint.palette(art, b, aimed, override) };
+    let palette = resolved?;
+    let stamps = if shade.mode == "ramp" { aimed } else {
+        aimed.map(fn(row) => brush.Stamp { ..row, slot: palette.slots.at_or(drawing.unsigned(row.slot), -1) })
+    };
+    let keys = stamps.filter(fn(row) => captured.slots.at_or(row.pixel, -1) != row.slot)
+        .map(fn(row) => wrapping_shl(row.pixel, 8) + drawing.unsigned(row.slot)).sort();
+    let sites = keys.map(fn(key) => wrapping_shr(key, 8));
+    let marks = grouped_marks(art.grid, length(art.ids) + length(palette.added), keys);
+    return Ok(Changes { sites: sites, marks: marks, added: palette.added, shading: shade });
+}
+
+fn brush_rank(key: u32, old: Ranks) -> Ranks {
+    let slot = word_and(key, 255);
+    if old.positions.at_or(slot, 4294967295) != 4294967295 { return old; }
+    let i = old.slots.len();
+    return Ranks { slots: old.slots.push(slot), positions: old.positions.set(slot, i) };
+}
+
+fn grouped_marks(g: mask.Grid, count: u32, keys: List<u32>) -> List<raster.RunMark> {
+    if length(keys) == 0 { return []; }
+    let seed = Ranks { positions: buffer_fill(count, 4294967295), slots: Buffer.empty() };
+    let rank = foldl(keys, seed, fn(k) => fn(out) => brush_rank(k, out));
+    let positions = rank.positions.freeze();
+    let slots = rank.slots.freeze();
+    // Eight palette bits and eighteen canvas bits fit in one sortable word.
+    let ordered = keys.map(fn(key) =>
+        wrapping_shl(positions.at_or(word_and(key, 255), 0), 18) + wrapping_shr(key, 8)).sort();
+    let init = Groups { marks: Buffer.empty(), index: 4294967295, spans: empty_runs() };
+    let groups = foldl(ordered, init, fn(key) => fn(out) =>
+        group_visit(g, slots, wrapping_shr(key, 18), word_and(key, 262143), out));
+    return end_group(slots, groups).freeze();
+}
+
+fn end_group(slots: List<u32>, old: Groups) -> Buffer<raster.RunMark> {
+    if old.index == 4294967295 { return old.marks; }
+    let slot = drawing.signed(slots.at_or(old.index, 0));
+    return old.marks.push(raster.RunMark { slot: slot, alpha: None, spans: emit_span(old.spans).freeze() });
+}
+
+fn group_visit(g: mask.Grid, slots: List<u32>, i: u32, p: u32, old: Groups) -> Groups {
+    if old.index == i { return Groups { ..old, spans: add_span(g, p, old.spans) }; }
+    return Groups { index: i, marks: end_group(slots, old), spans: add_span(g, p, empty_runs()) };
+}
+
+
 fn seed_status(seeds: List<u32>, guard: Guard) -> Bool {
     return foldl(seeds, true, fn(p) => fn(ok) => ok && (!selected(p, guard.selected) || writable(guard, p)));
 }
@@ -176,8 +272,10 @@ fn emit_span(old: Runs) -> Buffer<Vec3<u32>> {
     return if old.length == 0 { old.spans } else { old.spans.push(vec3(old.y, old.x, old.length)) };
 }
 
+fn empty_runs() -> Runs { return Runs { spans: Buffer.empty(), y: 0, x: 0, length: 0 }; }
+
 fn runs(g: mask.Grid, sites: List<u32>) -> List<Vec3<u32>> {
-    let initial = Runs { spans: Buffer.empty(), y: 0, x: 0, length: 0 };
+    let initial = empty_runs();
     let collected = foldl(sites, initial, fn(p) => fn(out) => add_span(g, p, out));
     return emit_span(collected).freeze();
 }
@@ -381,25 +479,41 @@ fn replace(items: List<json.Member>, key: String, raw: json.Json) -> List<json.M
     return items.map(fn(item) => if item.key == key { member(key, raw) } else { item });
 }
 
-fn append_mark(art: frame.Artwork, scope: frame.Scope, tool: Tool, report: Report) -> Result<Appended, String> {
+fn local_mark(g: mask.Grid, offset: frame.Placement, row: raster.RunMark) -> Result<raster.RunMark, String> {
+    let local = row.spans.map(fn(span) => local_run(g, offset, span));
+    if length(local.filter(fn(span) => !is_valid_run(span))) != 0 { return Err("Edit lies outside the shifted cel grid"); }
+    let spans = local.map(fn(out) => out.fold(fn(span) => span, fn(issue) => vec3(0, 0, 0)));
+    return Ok(raster.RunMark { ..row, spans: spans });
+}
+
+fn encode_mark(ids: List<String>, row: raster.RunMark) -> json.Json {
+    let pigment = if row.slot < 0 { member("clear", json.boolean(true)) }
+        else { member("swatch", json.text(ids.at_or(drawing.unsigned(row.slot), ""))) };
+    let mark = row.alpha.fold(fn(a) => member("alpha", json.number(number(a))), fn(unit) => pigment);
+    return json.object([mark, member("runs", json.array(row.spans.map(fn(span) => encoded_run(span))))]);
+}
+
+fn append_marks(art: frame.Artwork, scope: frame.Scope, marks: List<raster.RunMark>, cel: String) -> Result<Appended, String> {
     let target = frame.active_cel(art.cels, scope.frame, scope.layer);
     let ordinal = frame.clip_index(art.layers, scope.layer, length(art.layers));
     let offset = frame.placement(art.inputs.at_or(ordinal, json.null()), target);
-    let local = report.runs.map(fn(span) => local_run(art.grid, offset, span));
-    if length(local.filter(fn(span) => !is_valid_run(span))) != 0 { return Err("Edit lies outside the shifted cel grid"); }
-    let spans = local.map(fn(out) => out.fold(fn(span) => span, fn(issue) => vec3(0, 0, 0)));
-    let mark = if tool.kind == "eraser" { member("clear", json.boolean(true)) } else { member("swatch", json.text(tool.swatch)) };
-    let added = json.object([mark, member("runs", json.array(spans.map(fn(row) => encoded_run(row))))]);
+    let rows = marks.map(fn(row) => local_mark(art.grid, offset, row));
+    if length(rows.filter(fn(row) => row.fold(fn(mark) => false, fn(issue) => true))) != 0 {
+        return Err("Edit lies outside the shifted cel grid");
+    }
+    let fallback = raster.RunMark { slot: -1, alpha: None, spans: [] };
+    let local = rows.map(fn(row) => row.fold(fn(mark) => mark, fn(issue) => fallback));
+    let added = local.map(fn(row) => encode_mark(art.ids, row));
     let source = frame.resolved_cel(art.cels, target);
-    let next = raster.append_runs(source.fields, source.runs, raster.RunMark { slot: tool.slot, spans: spans });
-    return Ok(Appended { authored: authored_cel(scope, target, source.fields, report.cel, added), runs: next });
+    let next = raster.append_runs(source.fields, source.runs, local);
+    return Ok(Appended { authored: authored_cel(scope, target, source.fields, cel, added), runs: next });
 }
 
-fn authored_cel(scope: frame.Scope, target: frame.Cel, source: List<json.Member>, id: String, added: json.Json) -> json.Json {
+fn authored_cel(scope: frame.Scope, target: frame.Cel, source: List<json.Member>, id: String, added: List<json.Json>) -> json.Json {
     let prior = value.items(value.get(source, "marks"));
     let active = target.fields.filter(fn(item) => item.key != "hold");
     let base = if target.id == "" && id != default_id(scope) { replace(active, "id", json.text(id)) } else { active };
-    let revised = replace(base, "marks", json.array(prior.concat([added])));
+    let revised = replace(base, "marks", json.array(prior.concat(added)));
     let slots = json.lookup(source, "slots");
     if value.has(target.fields, "hold") {
         return json.object(slots.fold(fn(raw) => replace(revised, "slots", raw), fn(unit) => revised));
@@ -434,8 +548,11 @@ fn replace_frame(row: json.Json, scope: frame.Scope, cel: json.Json) -> json.Jso
     return json.object(replace(fields, "cels", json.object(replace(cels, scope.layer, cel))));
 }
 
-fn revise(source: json.Json, scope: frame.Scope, cel: json.Json) -> json.Json {
-    let items = value.fields(source);
+fn revise(source: json.Json, scope: frame.Scope, cel: json.Json, added: List<brush.Swatch>) -> json.Json {
+    let base = value.fields(source);
+    let extra = added.map(fn(row) => member(row.id, json.text(brush_paint.color_text(row.color))));
+    let old_palette = value.fields(value.get(base, "palette"));
+    let items = if length(extra) == 0 { base } else { replace(base, "palette", json.object(old_palette.concat(extra))) };
     let authored = value.items(value.get(items, "frames"));
     return json.object(replace(items, "frames", json.array(authored.map(fn(row) => replace_frame(row, scope, cel)))));
 }
@@ -451,7 +568,7 @@ fn attach(art: frame.Artwork, scope: frame.Scope, id: String, added: Appended) -
 }
 
 fn paint(source: json.Json, art: frame.Artwork, named: selection.Named, operation: json.Json,
-    frame_id: Option<String>, cel: Option<String>, cached: frame.Scope) -> Result<Edit, String> {
+    slots: List<i32>, frame_id: Option<String>, cel: Option<String>, cached: frame.Scope) -> Result<Edit, String> {
     let error = "A raster tool needs a layer or cel and a pencil, eraser, fill, shape or brush operation";
     let parsed: Result<List<json.Member>, String> = json.members(operation).fold(fn(rows) => Ok(rows), fn(issue) => Err(error));
     let spec = parsed?;
@@ -459,10 +576,10 @@ fn paint(source: json.Json, art: frame.Artwork, named: selection.Named, operatio
         "brush", "shading", "drawing", "selection"]) { return Err(error); }
     let scope = target(art, spec, frame_id, cel)?;
     let tool = decode(art.grid, art.ids, spec)?;
-    return paint_target(source, art, named, scope, tool, cached);
+    return paint_target(source, art, named, scope, tool, slots, cached);
 }
 
-fn paint_target(source: json.Json, art: frame.Artwork, named: selection.Named, scope: frame.Scope, tool: Tool, cached: frame.Scope) -> Result<Edit, String> {
+fn paint_target(source: json.Json, art: frame.Artwork, named: selection.Named, scope: frame.Scope, tool: Tool, slots: List<i32>, cached: frame.Scope) -> Result<Edit, String> {
     let details = protections(source, art)?;
     let limit = constraint(art.grid, named, scope.frame, tool.selection)?;
     let drawn = frame.paint_view(art, scope)?;
@@ -470,29 +587,37 @@ fn paint_target(source: json.Json, art: frame.Artwork, named: selection.Named, s
     let issue = gap_issue(art.grid, active, drawn.pixels);
     if issue != "" { return Err(issue); }
     let guard = Guard { drawn: drawn, protected: locked_pixels(art.grid, active), selected: limit };
-    let delta = paint_mask(tool, guard);
-    let changed = delta?;
-    let sites = mask.indices(changed);
+    let delta: Result<Changes, String> = if tool.kind == "brush" { brushed(source, art, tool, guard, slots) }
+        else { basic_changes(tool, guard) };
+    let changes = delta?;
     let report = Report { frame: scope.frame, layer: scope.layer, cel: choose_cel(art, scope), tool: tool.kind,
-        pixelCount: length(sites), runs: runs(art.grid, sites), pixelPerfect: tool.perfect, selection: tool.selection,
-        shape: if tool.kind == "shape" { Some(shape.kind(tool.geometry)) } else { None } };
+        pixelCount: length(changes.sites), runs: runs(art.grid, changes.sites), pixelPerfect: tool.perfect, selection: tool.selection,
+        shape: if tool.kind == "shape" { Some(shape.kind(tool.geometry)) } else { None },
+        shading: optional_text(changes.shading.mode), ramp: optional_text(changes.shading.named),
+        addedSwatches: changes.added.map(fn(row) => row.id) };
     if report.pixelCount == 0 {
         return Ok(Edit { document: json.null(), artwork: frame.empty_artwork(), report: report, scope: cached,
             image: selection.Image { rgba: [], palette: mask.no_palette() } });
     }
     let retained = if cached.frame == scope.frame { cached } else { frame.Scope { frame: scope.frame, layer: "" } };
-    return commit_paint(source, art, scope, tool, report, details, active, retained);
+    return commit_paint(source, art, scope, changes, report, details, active, retained);
 }
 
-fn commit_paint(source: json.Json, art: frame.Artwork, scope: frame.Scope, tool: Tool, report: Report,
+fn optional_text(text: String) -> Option<String> { return if text == "" { None } else { Some(text) }; }
+
+fn commit_paint(source: json.Json, art: frame.Artwork, scope: frame.Scope, changes: Changes, report: Report,
     details: List<Detail>, active: List<Detail>, retained: frame.Scope) -> Result<Edit, String> {
-    let cel = append_mark(art, scope, tool, report)?;
-    let next = attach(art, scope, report.cel, cel);
+    let palette = if length(changes.added) == 0 { art } else {
+        frame.Artwork { ..art, ids: art.ids.concat(changes.added.map(fn(row) => row.id)),
+            colors: art.colors.concat(changes.added.map(fn(row) => row.color)) }
+    };
+    let cel = append_marks(palette, scope, changes.marks, report.cel)?;
+    let next = attach(palette, scope, report.cel, cel);
     let checked: Unit = check_dependent_frames(art, next, details)?;
     let canvas = frame.paint_view(next, retained)?;
     let issue = gap_issue(art.grid, active, canvas.pixels);
     if issue != "" { return Err(issue); }
     let updated = frame.finish_view(next, canvas, retained)?;
-    return Ok(Edit { document: revise(source, scope, cel.authored), artwork: next, report: report, scope: retained,
+    return Ok(Edit { document: revise(source, scope, cel.authored, changes.added), artwork: next, report: report, scope: retained,
         image: updated.image });
 }

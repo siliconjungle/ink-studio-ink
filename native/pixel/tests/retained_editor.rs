@@ -157,3 +157,48 @@ fn retained_runs_follow_holds_and_match_the_saved_raster_after_detaching() {
     assert_eq!(cel["marks"][1]["runs"], serde_json::json!([[0, 2, 3]]));
     assert_eq!(cel["marks"][2]["runs"], serde_json::json!([[0, 3, 1]]));
 }
+#[test]
+fn brush_palette_and_alpha_are_visible_to_capture_and_survive_reload() {
+    let mut editor = PixelEditor::new(&document(2, 5).to_string()).unwrap();
+    let brush = r##"{"format":"ink-studio/pixel-brush","version":1,"width":1,"height":1,
+      "anchor":[0,0],"palette":[{"id":"blue","color":"#213b71"}],"slots":[0],
+      "settings":{"angle":0,"size":[1,1],"swatch":{"mode":"original"}}}"##;
+    let stamp = |extra: &str| {
+        format!(r#"{{"tool":"brush","layer":"ink","brush":{brush},"at":[2,1]{extra}}}"#)
+    };
+    let capture = r#"{"rect":[2,1,1,1],"layer":"ink"}"#;
+    let report = editor.paint(&stamp(""), Some("front"), None).unwrap();
+    assert_eq!(report.added_swatches, ["blue"]);
+    assert_eq!(
+        editor.capture_brush(capture).unwrap().palette[0]
+            .id
+            .as_deref(),
+        Some("blue")
+    );
+    let hide = stamp(r#","shading":{"mode":"alpha","value":0}"#);
+    let restore = stamp(r#","shading":{"mode":"alpha","value":255}"#);
+    assert_eq!(
+        editor
+            .paint(&hide, Some("front"), None)
+            .unwrap()
+            .pixel_count,
+        1
+    );
+    assert!(editor.capture_brush(capture).is_err());
+    let hidden = editor.snapshot().unwrap();
+    let mut fresh = PixelEditor::new(&hidden).unwrap();
+    assert!(fresh.capture_brush(capture).is_err());
+    assert_eq!(
+        editor.paint(&restore, Some("front"), None).unwrap().runs,
+        [[1, 2, 1]]
+    );
+    assert_eq!(
+        fresh.paint(&restore, Some("front"), None).unwrap().runs,
+        [[1, 2, 1]]
+    );
+    assert_eq!(editor.snapshot().unwrap(), fresh.snapshot().unwrap());
+    assert_eq!(
+        editor.capture_brush(capture).unwrap().palette[0].color,
+        "#213b71"
+    );
+}

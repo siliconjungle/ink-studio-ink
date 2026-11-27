@@ -115,15 +115,10 @@ fn points(d: grid.Drawing, raw: List<json.Json>, lo: u32, hi: u32) -> Result<Lis
     return Ok(decoded);
 }
 
-fn path_length(points: List<grid.Point>, first: grid.Point) -> u32 {
-    return repeat_until(length(points) - 1, 1, fn(out) => false, fn(i) => fn(out) =>
-        out + grid.steps(points.at_or(i, first), points.at_or(i + 1, first)));
-}
-
 fn path(d: grid.Drawing, points: List<grid.Point>, width: i32, seed: Buffer<u32>) -> Result<List<u32>, String> {
     let first = points.at_or(0, grid.absent());
     let weight = grid.unsigned(width);
-    if d.supplied && path_length(points, first) * weight * weight > 8000000 {
+    if d.supplied && grid.path_steps(points, first) * weight * weight > 8000000 {
         return Err("Pixel shape exceeds its native drawing budget");
     }
     let init = stamp(d, first, width, seed);

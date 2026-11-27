@@ -83,6 +83,25 @@ fn paint(path: std::ffi::OsString) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Deserialize)]
+struct BrushCaptureRequest<'a> {
+    #[serde(borrow)]
+    document: &'a RawValue,
+    #[serde(borrow)]
+    options: Option<&'a RawValue>,
+}
+
+fn capture_brush(path: std::ffi::OsString) -> Result<(), String> {
+    let source = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let request: BrushCaptureRequest =
+        serde_json::from_str(&source).map_err(|error| error.to_string())?;
+    let mut editor = PixelEditor::new(request.document.get())?;
+    let brush = editor.capture_brush(request.options.map_or("{}", RawValue::get))?;
+    let output = serde_json::to_string(&brush).map_err(|error| error.to_string())?;
+    println!("{output}");
+    Ok(())
+}
+
 fn select(path: std::ffi::OsString, packed: bool) -> Result<(), String> {
     let source = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     let request: SelectionRequest =
@@ -107,7 +126,7 @@ fn select(path: std::ffi::OsString, packed: bool) -> Result<(), String> {
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel select|select-mask|raster|select-document|paint-document REQUEST";
+    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel select|select-mask|raster|select-document|paint-document|capture-brush-document REQUEST";
     let path = args.next().ok_or(usage)?;
     if let Some(request) = args.next() {
         if args.next().is_some() {
@@ -121,6 +140,9 @@ fn run() -> Result<(), String> {
         }
         if path == "paint-document" {
             return paint(request);
+        }
+        if path == "capture-brush-document" {
+            return capture_brush(request);
         }
         return Err(usage.into());
     }

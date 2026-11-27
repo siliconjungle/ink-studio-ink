@@ -6,6 +6,7 @@ import "pixel_mask.ink" as mask;
 import "pixel_labels.ink" as labels;
 import "pixel_frame.ink" as frame_raster;
 import "pixel_paint.ink" as paint;
+import "pixel_brush_capture.ink" as brushes;
 
 record Layer { id: String, kind: String, parent: String, }
 record Cel { id: String, hold: String, }
@@ -575,10 +576,10 @@ query snapshot_pixel_editor() -> EditorSnapshot reads(EditorSource, EditorPositi
     return EditorSnapshot { document: EditorSource, positions: EditorPositions };
 }
 
-change paint_pixel_editor(operation: json.Json, frame: Option<String>, cel: Option<String>) -> Result<paint.Report, String>
+change paint_pixel_editor(operation: json.Json, slots: List<i32>, frame: Option<String>, cel: Option<String>) -> Result<paint.Report, String>
     reads(EditorSource, EditorArtwork, EditorNamed, EditorScope)
     writes(EditorSource, EditorArtwork, EditorScope, EditorImage) {
-    let edit = paint.paint(EditorSource, EditorArtwork, EditorNamed, operation, frame, cel, EditorScope)?;
+    let edit = paint.paint(EditorSource, EditorArtwork, EditorNamed, operation, slots, frame, cel, EditorScope)?;
     if edit.report.pixelCount != 0 {
         EditorSource = edit.document;
         EditorArtwork = edit.artwork;
@@ -598,4 +599,8 @@ change select_pixel_editor(query: List<json.Json>, saved: json.Json, runs: List<
         EditorImage = raster.image;
     }
     return editor_selection(frame_raster.artwork_grid(EditorArtwork), scope, EditorImage, EditorNamed, query, saved, runs);
+}
+
+query capture_pixel_editor_brush(options: json.Json, pixels: List<u32>) -> Result<brushes.Capture, String> reads(EditorArtwork, EditorNamed) {
+    return brushes.capture(EditorArtwork, EditorNamed, options, pixels);
 }

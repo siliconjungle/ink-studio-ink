@@ -89,6 +89,11 @@ fn inside(p: Point, grid: Drawing) -> Bool { return contains(p.x, grid.x) && con
 
 fn steps(from: Point, to: Point) -> u32 { return unsigned(max(abs(to.x - from.x), abs(to.y - from.y))); }
 
+fn path_steps(points: List<Point>, first: Point) -> u32 {
+    return repeat_until(length(points) - 1, 1, fn(out) => false, fn(i) => fn(out) =>
+        out + steps(points.at_or(i, first), points.at_or(i + 1, first)));
+}
+
 fn segment(from: Point, to: Point) -> Pen {
     let dx = abs(to.x - from.x);
     let dy = -abs(to.y - from.y);

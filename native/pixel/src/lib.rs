@@ -174,6 +174,44 @@ fn coordinate_slot([width, height]: [u32; 2], point: &Json) -> u32 {
     }
 }
 
+fn member_mut<'a>(value: &'a mut Json, name: &str) -> Option<&'a mut Json> {
+    let Json::Object(fields) = value else {
+        return None;
+    };
+    fields
+        .iter_mut()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value)
+}
+
+fn take_array(value: &mut Json, name: &str) -> Option<Vec<Json>> {
+    let Json::Array(rows) = member_mut(value, name)? else {
+        return None;
+    };
+    Some(std::mem::take(rows))
+}
+
+fn pack_brush_slots(operation: &mut Json) -> Vec<i32> {
+    let Some(rows) = member_mut(operation, "brush").and_then(|brush| take_array(brush, "slots"))
+    else {
+        return Vec::new();
+    };
+    if rows.len() > 512 * 512 {
+        return Vec::new();
+    }
+    rows.into_iter()
+        .map(|row| match row {
+            Json::Null => -1,
+            Json::Number(token) => token
+                .parse::<i32>()
+                .ok()
+                .filter(|n| (0..255).contains(n))
+                .unwrap_or(-2),
+            _ => -2,
+        })
+        .collect()
+}
+
 fn pack_named_pixels(input: &mut Json) -> Vec<Vec<u32>> {
     let Json::Object(fields) = input else {
         return Vec::new();
@@ -513,6 +551,12 @@ pub struct RasterPaintReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shape: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub shading: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ramp: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub added_swatches: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub selection: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drawing: Option<serde_json::Value>,
@@ -520,6 +564,25 @@ pub struct RasterPaintReport {
 
 fn is_false(value: &bool) -> bool {
     !value
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct CapturedBrush {
+    pub format: &'static str,
+    pub version: u32,
+    pub width: u32,
+    pub height: u32,
+    pub anchor: [u32; 2],
+    pub palette: Vec<CapturedBrushSwatch>,
+    pub slots: Vec<Option<u32>>,
+    pub settings: Box<serde_json::value::RawValue>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct CapturedBrushSwatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub color: String,
 }
 
 pub struct PixelEditor {
@@ -560,7 +623,7 @@ impl PixelEditor {
         frame: Option<&str>,
         cel: Option<&str>,
     ) -> Result<RasterPaintReport, String> {
-        let OrderedJson(operation) =
+        let OrderedJson(mut operation) =
             serde_json::from_str(operation).map_err(|error| error.to_string())?;
         let drawing = match &operation {
             Json::Object(items) => items
@@ -578,11 +641,13 @@ impl PixelEditor {
             self.program
                 .function_l_pixel_json_value(kind, scalar, flag, values, keys)
         };
+        let slots = pack_brush_slots(&mut operation);
         let operation = compiled_json(operation, &build);
         let report = self
             .program
             .invoke_view_l_paint_pixel_editor(
                 operation,
+                slots,
                 frame.map(str::to_owned),
                 cel.map(str::to_owned),
             )?
@@ -598,8 +663,56 @@ impl PixelEditor {
             runs: report.l_runs,
             pixel_perfect: report.l_pixelPerfect,
             shape: report.l_shape,
+            shading: report.l_shading,
+            ramp: report.l_ramp,
+            added_swatches: report.l_addedSwatches,
             selection: report.l_selection,
             drawing,
+        })
+    }
+
+    pub fn capture_brush(&mut self, options: &str) -> Result<CapturedBrush, String> {
+        let OrderedJson(mut options) =
+            serde_json::from_str(options).map_err(|error| error.to_string())?;
+        let canvas = self.grid;
+        let pixels = take_array(&mut options, "pixels")
+            .filter(|rows| rows.len() <= (canvas[0] * canvas[1]) as usize)
+            .map_or_else(Vec::new, |rows| {
+                rows.iter()
+                    .map(|row| coordinate_slot(canvas, row))
+                    .collect()
+            });
+        let encoded = compiled_json(options, &|kind, scalar, flag, values, keys| {
+            self.program
+                .function_l_pixel_json_value(kind, scalar, flag, values, keys)
+        });
+        let result = self
+            .program
+            .invoke_view_l_capture_pixel_editor_brush(encoded, pixels)?
+            .result?;
+        let limits = Limits::default();
+        let settings = Json::from_ink(&result.l_settings.to_json(), limits)?.stringify(limits)?;
+        Ok(CapturedBrush {
+            format: "ink-studio/pixel-brush",
+            version: 1,
+            width: result.l_width,
+            height: result.l_height,
+            anchor: result.l_anchor,
+            palette: result
+                .l_palette
+                .into_iter()
+                .map(|row| CapturedBrushSwatch {
+                    id: (!row.l_id.is_empty()).then_some(row.l_id),
+                    color: row.l_color,
+                })
+                .collect(),
+            slots: result
+                .l_slots
+                .into_iter()
+                .map(|slot| u32::try_from(slot).ok())
+                .collect(),
+            settings: serde_json::value::RawValue::from_string(settings)
+                .map_err(|error| error.to_string())?,
         })
     }
 
