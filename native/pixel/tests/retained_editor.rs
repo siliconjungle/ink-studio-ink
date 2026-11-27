@@ -92,3 +92,68 @@ fn paint_updates_a_warm_raster_and_preserves_the_document_on_error() {
         select(&mut editor)
     );
 }
+
+#[test]
+fn retained_runs_follow_holds_and_match_the_saved_raster_after_detaching() {
+    let mut design = document(1, 8);
+    design["palette"]["blue"] = serde_json::json!("#213b71");
+    design["frames"][0]["cels"]["ink"]["id"] = serde_json::json!("original");
+    design["frames"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "back", "durationMs": 100,
+            "cels": { "ink": { "id": "held", "hold": "original", "offset": [1, 1] } }
+        }));
+    let mut editor = PixelEditor::new(&design.to_string()).unwrap();
+    let shape = r#"{"tool":"shape","layer":"ink","swatch":"blue",
+        "shape":{"type":"line","from":[2,0],"to":[4,0]}}"#;
+    assert_eq!(
+        editor.paint(shape, Some("front"), None).unwrap().runs,
+        [[0, 2, 3]]
+    );
+    let selected = |editor: &mut PixelEditor, swatch, frame| {
+        editor
+            .select(swatch, Some(frame), Some("ink"), None, "{}")
+            .unwrap()
+            .pixels
+    };
+    let blue = r#"{"type":"swatch","id":"blue"}"#;
+    let rust = r#"{"type":"swatch","id":"rust"}"#;
+    assert_eq!(
+        selected(&mut editor, blue, "back"),
+        [[3, 1], [4, 1], [5, 1]]
+    );
+
+    let erase = r#"{"tool":"eraser","points":[[4,1]]}"#;
+    assert_eq!(
+        editor.paint(erase, None, Some("held")).unwrap().runs,
+        [[1, 4, 1]]
+    );
+    let paint = r#"{"tool":"pencil","layer":"ink","swatch":"rust","points":[[3,0]]}"#;
+    assert_eq!(
+        editor.paint(paint, Some("front"), None).unwrap().runs,
+        [[0, 3, 1]]
+    );
+
+    let saved = editor.snapshot().unwrap();
+    let mut reloaded = PixelEditor::new(&saved).unwrap();
+    assert_eq!(selected(&mut editor, blue, "back"), [[3, 1], [5, 1]]);
+    assert_eq!(selected(&mut editor, rust, "back"), [[2, 2]]);
+    for (swatch, frame) in [
+        (blue, "back"),
+        (blue, "front"),
+        (rust, "back"),
+        (rust, "front"),
+    ] {
+        assert_eq!(
+            selected(&mut editor, swatch, frame),
+            selected(&mut reloaded, swatch, frame)
+        );
+    }
+    let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    let cel = &saved["frames"][1]["cels"]["ink"];
+    assert!(cel.get("hold").is_none());
+    assert_eq!(cel["marks"][1]["runs"], serde_json::json!([[0, 2, 3]]));
+    assert_eq!(cel["marks"][2]["runs"], serde_json::json!([[0, 3, 1]]));
+}

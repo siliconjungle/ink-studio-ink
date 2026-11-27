@@ -4,6 +4,7 @@ import "std:json" as json;
 import "pixel_drawing_grid.ink" as drawing;
 import "pixel_frame.ink" as frame;
 import "pixel_mask.ink" as mask;
+import "pixel_raster.ink" as raster;
 import "pixel_selection.ink" as selection;
 import "pixel_shapes.ink" as shape;
 import "pixel_values.ink" as value;
@@ -19,6 +20,7 @@ record Report { frame: String, layer: String, cel: String, tool: String, pixelCo
     runs: List<Vec3<u32>>, pixelPerfect: Bool, selection: Option<String>, shape: Option<String>, }
 record Detail { id: String, kind: String, first: u32, last: u32, sites: List<u32>, }
 record Details { rows: Buffer<Detail>, issue: String, }
+record Appended { authored: json.Json, runs: raster.RunCache, }
 record Edit { document: json.Json, artwork: frame.Artwork, report: Report,
     scope: frame.Scope, image: selection.Image, }
 
@@ -379,20 +381,21 @@ fn replace(items: List<json.Member>, key: String, raw: json.Json) -> List<json.M
     return items.map(fn(item) => if item.key == key { member(key, raw) } else { item });
 }
 
-fn append_mark(art: frame.Artwork, scope: frame.Scope, tool: Tool, report: Report) -> Result<json.Json, String> {
+fn append_mark(art: frame.Artwork, scope: frame.Scope, tool: Tool, report: Report) -> Result<Appended, String> {
     let target = frame.active_cel(art.cels, scope.frame, scope.layer);
     let ordinal = frame.clip_index(art.layers, scope.layer, length(art.layers));
     let offset = frame.placement(art.inputs.at_or(ordinal, json.null()), target);
     let local = report.runs.map(fn(span) => local_run(art.grid, offset, span));
     if length(local.filter(fn(span) => !is_valid_run(span))) != 0 { return Err("Edit lies outside the shifted cel grid"); }
-    let shapes = local.map(fn(out) => encoded_run(out.fold(fn(span) => span, fn(issue) => vec3(0, 0, 0))));
+    let spans = local.map(fn(out) => out.fold(fn(span) => span, fn(issue) => vec3(0, 0, 0)));
     let mark = if tool.kind == "eraser" { member("clear", json.boolean(true)) } else { member("swatch", json.text(tool.swatch)) };
-    let added = json.object([mark, member("runs", json.array(shapes))]);
-    return Ok(authored_cel(art, scope, target, report.cel, added));
+    let added = json.object([mark, member("runs", json.array(spans.map(fn(row) => encoded_run(row))))]);
+    let source = frame.resolved_cel(art.cels, target);
+    let next = raster.append_runs(source.fields, source.runs, raster.RunMark { slot: tool.slot, spans: spans });
+    return Ok(Appended { authored: authored_cel(scope, target, source.fields, report.cel, added), runs: next });
 }
 
-fn authored_cel(art: frame.Artwork, scope: frame.Scope, target: frame.Cel, id: String, added: json.Json) -> json.Json {
-    let source = frame.content(art.cels, target);
+fn authored_cel(scope: frame.Scope, target: frame.Cel, source: List<json.Member>, id: String, added: json.Json) -> json.Json {
     let prior = value.items(value.get(source, "marks"));
     let active = target.fields.filter(fn(item) => item.key != "hold");
     let base = if target.id == "" && id != default_id(scope) { replace(active, "id", json.text(id)) } else { active };
@@ -437,8 +440,9 @@ fn revise(source: json.Json, scope: frame.Scope, cel: json.Json) -> json.Json {
     return json.object(replace(items, "frames", json.array(authored.map(fn(row) => replace_frame(row, scope, cel)))));
 }
 
-fn attach(art: frame.Artwork, scope: frame.Scope, id: String, authored: json.Json) -> frame.Artwork {
-    let cel = frame.Cel { id: id, frame: scope.frame, layer: scope.layer, fields: value.fields(authored) };
+fn attach(art: frame.Artwork, scope: frame.Scope, id: String, added: Appended) -> frame.Artwork {
+    let cel = frame.Cel { id: id, frame: scope.frame, layer: scope.layer, fields: value.fields(added.authored),
+        runs: added.runs };
     if frame.location(art.locations, id).id != "" {
         return frame.Artwork { ..art, cels: art.cels.map(fn(row) => if row.id == id { cel } else { row }) };
     }
@@ -488,7 +492,7 @@ fn commit_paint(source: json.Json, art: frame.Artwork, scope: frame.Scope, tool:
     let canvas = frame.paint_view(next, retained)?;
     let issue = gap_issue(art.grid, active, canvas.pixels);
     if issue != "" { return Err(issue); }
-    let raster = frame.finish_view(next, canvas, retained)?;
-    return Ok(Edit { document: revise(source, scope, cel), artwork: next, report: report, scope: retained,
-        image: raster.image });
+    let updated = frame.finish_view(next, canvas, retained)?;
+    return Ok(Edit { document: revise(source, scope, cel.authored), artwork: next, report: report, scope: retained,
+        image: updated.image });
 }

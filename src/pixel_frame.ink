@@ -7,7 +7,7 @@ import "pixel_raster.ink" as paint;
 import "pixel_selection.ink" as selection;
 
 record Location { id: String, frame: String, layer: String, }
-record Cel { id: String, layer: String, frame: String, fields: List<json.Member>, }
+record Cel { id: String, layer: String, frame: String, fields: List<json.Member>, runs: paint.RunCache, }
 record Placement { x: i32, y: i32, opacity: f64, }
 record Layer { id: String, kind: String, parent: String, clip: String, blend: String, protect: Bool,
     locked: Bool, visible: Bool, opacity: f64, }
@@ -38,7 +38,7 @@ fn hex_digit(byte: u32) -> u32 {
     return if byte <= 70 { byte - 55 } else { byte - 87 };
 }
 
-fn no_cel() -> Cel { return Cel { id: "", layer: "", frame: "", fields: [] }; }
+fn no_cel() -> Cel { return Cel { id: "", layer: "", frame: "", fields: [], runs: paint.no_run_cache() }; }
 fn no_capture() -> Captured { return Captured { found: false, slots: [], alpha: [], clipping: [] }; }
 fn blank() -> Pixel { return Pixel { slot: -1, color: 0, alpha: 0, locked: false }; }
 
@@ -46,7 +46,7 @@ fn cel_entry(frame: String, row: json.Member) -> Cel {
     let spec = value.fields(row.value);
     let id = json.lookup(spec, "id").fold(fn(v) => value.text(v), fn(unit) =>
         string_concat(string_concat(frame, "/"), row.key));
-    return Cel { id: id, frame: frame, layer: row.key, fields: spec };
+    return Cel { id: id, frame: frame, layer: row.key, fields: spec, runs: paint.no_run_cache() };
 }
 
 fn all_cels(frames: List<json.Json>) -> List<Cel> {
@@ -75,10 +75,9 @@ fn match_location(cel: Cel, frame: String, layer: String, found: Cel) -> Cel {
     return if cel.frame == frame && cel.layer == layer { cel } else { found };
 }
 
-fn content(cels: List<Cel>, start: Cel) -> List<json.Member> {
-    let resolved = repeat_until(length(cels), start, fn(cel) => !value.has(cel.fields, "hold"),
+fn resolved_cel(cels: List<Cel>, start: Cel) -> Cel {
+    return repeat_until(length(cels), start, fn(cel) => !value.has(cel.fields, "hold"),
         fn(i) => fn(cel) => find_cel(cels, value.text(value.get(cel.fields, "hold"))));
-    return resolved.fields;
 }
 
 fn layer_spec(raw: json.Json) -> Layer {
@@ -302,7 +301,8 @@ fn step(art: Artwork, scope: Scope, scene: Scene) -> Scene {
     if layer.kind == "group" { return open_group(art, job.ordinal, layer, old); }
     let active = active_cel(art.cels, scope.frame, layer.id);
     let place = placement(art.inputs.at_or(job.ordinal, json.null()), active);
-    let raw = translated(art.grid, paint.raster(art.grid, art.ids, content(art.cels, active), old.work), place);
+    let source = resolved_cel(art.cels, active);
+    let raw = translated(art.grid, paint.raster(art.grid, art.ids, source.fields, source.runs, old.work), place);
     if raw.issue != "" { return Scene { ..old, issue: raw.issue }; }
     let next = Scene { ..old, work: raw.work };
     return apply_layer(art, scope, job.ordinal, layer, layer.opacity * place.opacity, Source { raw: raw, group: [] }, false, next);

@@ -11,6 +11,9 @@ record Rect { x: f64, y: f64, right: f64, bottom: f64, }
 record Box { x: u32, y: u32, w: u32, h: u32, }
 record Span { start: u32, length: u32, }
 record Runs { paint: Paint, end: u32, }
+record RunMark { slot: i32, spans: List<Vec3<u32>>, }
+// Editor-created marks are already validated spans. Keep their authored prefix in order.
+record RunCache { prefix: List<json.Json>, tail: List<RunMark>, }
 record Step { x: i32, y: i32, dx: i32, dy: i32, down: Bool, }
 record Stroke { paint: Paint, tip: Step, }
 record Position { x: f64, y: f64, }
@@ -676,9 +679,32 @@ fn mark(g: mask.Grid, ids: List<String>, raw: json.Json, paint: Paint) -> Paint 
     return out;
 }
 
-fn raster(g: mask.Grid, ids: List<String>, content: List<json.Member>, work: Work) -> Raw {
+fn no_run_cache() -> RunCache { return RunCache { prefix: [], tail: [] }; }
+
+fn append_runs(content: List<json.Member>, cache: RunCache, added: RunMark) -> RunCache {
+    let prefix = if length(cache.tail) == 0 { values.items(values.get(content, "marks")) } else { cache.prefix };
+    return RunCache { prefix: prefix, tail: cache.tail.concat([added]) };
+}
+
+fn retained_runs(g: mask.Grid, row: RunMark, old: Paint) -> Paint {
+    if old.issue != "" { return old; }
+    let prepared = spend_marks(Paint { ..old, drawing: 0 }, 1);
+    return foldl(row.spans, prepared, fn(span) => fn(out) =>
+        retained_span(g, span, row.slot, out));
+}
+
+fn retained_span(g: mask.Grid, span: Vec3<u32>, slot: i32, old: Paint) -> Paint {
+    if old.issue != "" { return old; }
+    let charged = spend_runs(old, span.z);
+    if charged.issue != "" { return charged; }
+    return write_span(charged, Span { start: span.x * g.width + span.y, length: span.z }, slot);
+}
+
+fn raster(g: mask.Grid, ids: List<String>, content: List<json.Member>, cache: RunCache, work: Work) -> Raw {
     let base = initial(g, ids, content, work);
-    let drawn = foldl(values.items(values.get(content, "marks")), base, fn(row) => fn(out) =>
+    let marks = if length(cache.tail) == 0 { values.items(values.get(content, "marks")) } else { cache.prefix };
+    let authored = foldl(marks, base, fn(row) => fn(out) =>
         if out.issue == "" { mark(g, ids, row, out) } else { out });
+    let drawn = foldl(cache.tail, authored, fn(row) => fn(out) => retained_runs(g, row, out));
     return Raw { slots: drawn.slots.freeze(), alpha: drawn.alpha.freeze(), work: drawn.work, issue: drawn.issue };
 }
