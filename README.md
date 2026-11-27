@@ -62,9 +62,19 @@ Lathe profiles can ripple as they taper, including the phase-shifted power profi
 
 `src/texture_address.ink` packs UV address fields with optional coverage. It samples RGBA texels using nearest or linear filtering and independently clamps, mirrors, wraps, or clears each axis. `surface_material_at` uses the same coordinates to return a surface attachment and the sampled color.
 
+## Pixel documents
+
+`src/pixel_document.ink` opens version 1 and version 2 pixel documents. It checks the grid, palette, layer stack, frame timing, cel IDs and hold links. Version 1 drawings migrate to a single square-pixel `artwork` frame with their original drawing data and metadata. Both hosts return the normalized document and SHA-256 revisions for the document and its legacy source when present. Raster validation, editing, and the rest of the authoring workflows remain in the parity checklist.
+
+Call `openPixelDocument(source)` from `web/pixel-document.mjs` in a secure browser context after building. The native loader is also available as a command.
+
+```sh
+cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- artwork.json
+```
+
 ## Build and check
 
-Use [Ink Lang commit `4f73de9`](https://github.com/siliconjungle/ink-lang/commit/4f73de907bd036dbdb909e225ba11638e3e6a778) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for the bake's immutable geometry inputs, including optional geometry. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
+Use [Ink Lang commit `7ff037b`](https://github.com/siliconjungle/ink-lang/commit/7ff037b76731a54c62b3d2f23388295073011432) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for immutable geometry and pixel document inputs. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
 
 ```sh
 ./scripts/build.sh --gpu
