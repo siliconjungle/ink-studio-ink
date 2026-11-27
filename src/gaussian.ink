@@ -41,6 +41,17 @@ record WorldGaussian {
     alpha: f32,
 }
 
+// World RGB has 24 pigment bits. The high bit marks a baked reflection until projection.
+fn reflection_bit() -> u32 { return 2147483648; }
+
+pub fn mark_reflection(row: WorldGaussian) -> WorldGaussian {
+    return WorldGaussian { ..row, rgb: word_or(row.rgb, reflection_bit()) };
+}
+
+pub fn is_reflection(row: WorldGaussian) -> Bool {
+    return word_and(row.rgb, reflection_bit()) != 0;
+}
+
 record Camera {
     eye: Vec3<f32>,
     right: Vec3<f32>,
@@ -175,7 +186,7 @@ fn screen_gaussian(splat: WorldGaussian, camera: Camera, position: Vec3<f32>, de
         yy: dot3(jy, cov_y),
         variance: if camera.variance >= 0.0 { camera.variance } else { 0.3 },
         reach: splat.reach,
-        rgb: splat.rgb,
+        rgb: word_and(splat.rgb, word_xor(reflection_bit(), 4294967295)),
         alpha: splat.alpha,
     };
 }

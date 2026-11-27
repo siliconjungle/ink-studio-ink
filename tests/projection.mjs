@@ -234,6 +234,28 @@ const roofCases = [
   ];
 });
 for (const { pure, args, expected } of roofCases) assert.deepEqual(call(pure, args), expected);
+// Reflection identity survives as an input, leaving the projected pigment intact.
+const taggedReflection = call('mark_reflection', [disc]);
+assert.equal(call('is_reflection', [taggedReflection]), true);
+assert.equal(call('is_reflection', [disc]), false);
+const reflectionCases = [
+  {
+    pure: 'project_world',
+    args: [[taggedReflection], camera],
+    expected: call('project_world', [[disc], camera]),
+  },
+  {
+    pure: 'project_lit_contour_scene',
+    args: [[taggedReflection], [], camera, lamp],
+    expected: call('project_lit_contour_scene', [[disc], [], camera, lamp]),
+  },
+  {
+    pure: 'project_prepared_lit_contour_scene',
+    args: [call('prepare_contour_terrain', [[taggedReflection]]), [], camera, lamp],
+    expected: call('project_lit_contour_scene', [[disc], [], camera, lamp]),
+  },
+];
+for (const { pure, args, expected } of reflectionCases) assert.deepEqual(call(pure, args), expected);
 const sourceRow = [1, 2, 3, 0.5, 4, 5, 6, 0xf08010, 7, 8, 9, 128, 11, 12, 13, 14];
 const imported = [{ position: [1, 2, 3], covariance0: [4, 5, 6], covariance1: [7, 8, 9],
   reach: 3, rgb: 0xf08010, alpha: 0.5 }];
@@ -286,6 +308,7 @@ try {
     ...motionCases,
     ...cutCases,
     ...roofCases,
+    ...reflectionCases,
     { pure: 'import_builder_splats', args: [sourceRow], expected: imported, cpuOnly: true },
   ];
   writeFileSync(requestsPath, JSON.stringify(tests.map(({ pure, args }) => ({ pure, args }))));
