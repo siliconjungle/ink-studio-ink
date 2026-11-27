@@ -1,3 +1,5 @@
+mod batch;
+
 use super::edit_preview::{CellChange, Color, Location, PixelEditPreview, Preview, Sample, Site};
 use super::{
     Json, Limits, OrderedJson, PixelEditor, Wire, compiled_json, coordinate, is_legacy, member_mut,
@@ -133,6 +135,27 @@ fn valid_revision(value: &Value) -> bool {
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     })
+}
+
+fn check_replay_receipt(expected: &Value) -> Result<(), PixelEditError> {
+    let command = &expected["command"];
+    if expected["format"] != RECEIPT_FORMAT
+        || expected["version"] != 1
+        || expected["status"] != "applied"
+        || command["runner"] != "sdk"
+        || command["action"] != "edit"
+        || !command["patch"].is_object()
+        || !command["options"].is_object()
+        || !valid_revision(&expected["inputs"]["documentRevision"])
+        || !valid_revision(&expected["outputs"]["artifactRevision"])
+    {
+        return Err(
+            "Replay needs an applied version 1 pixel edit receipt from the sdk"
+                .to_owned()
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn receipt_matches(receipt: &Value, expected: &Value) -> bool {
@@ -599,29 +622,13 @@ impl PixelCommandEditor {
 
     fn replay_edit(&mut self, mut recorded: Json) -> Result<StagedPixelEdit, PixelEditError> {
         let expected = json_value(&recorded)?;
-        let command = &expected["command"];
-        if expected["format"] != RECEIPT_FORMAT
-            || expected["version"] != 1
-            || expected["status"] != "applied"
-            || command["runner"] != "sdk"
-            || command["action"] != "edit"
-            || !command["patch"].is_object()
-            || !command["options"].is_object()
-            || !valid_revision(&expected["inputs"]["documentRevision"])
-            || !valid_revision(&expected["outputs"]["artifactRevision"])
-        {
-            return Err(
-                "Replay needs an applied version 1 pixel edit receipt from the sdk"
-                    .to_owned()
-                    .into(),
-            );
-        }
+        check_replay_receipt(&expected)?;
         let patch = member_mut(&mut recorded, "command")
             .and_then(|value| member_mut(value, "patch"))
             .map(|value| std::mem::replace(value, Json::Null))
             .unwrap_or(Json::Null);
         Ok(self
-            .edit(patch, Some(expected), None, EditMode::Apply)?
+            .edit(patch, Some(&expected), None, EditMode::Apply)?
             .staged())
     }
 
@@ -659,6 +666,9 @@ impl PixelCommandEditor {
             "replay" => {
                 let stage = self.replay_edit(take_member(&mut request, "receipt"))?;
                 encode_command(stage.receipt.as_ref())
+            }
+            "batch" | "record-batch" | "replay-batch" | "revalidate-batch" => {
+                self.execute_batch_command(&plan.l_action, request, options)
             }
             "begin" => {
                 let label = take_member(&mut request, "label");
@@ -880,7 +890,7 @@ impl PixelCommandEditor {
     fn edit(
         &mut self,
         patch: Json,
-        expected: Option<Value>,
+        expected: Option<&Value>,
         shot: Option<Value>,
         mode: EditMode,
     ) -> Result<EditOutcome, PixelEditError> {
@@ -893,7 +903,6 @@ impl PixelCommandEditor {
         };
         let mut options = Map::new();
         if let Some(shot) = expected
-            .as_ref()
             .and_then(|receipt| receipt["command"]["options"].get("shotHitFrame"))
             .cloned()
             .or(shot)
@@ -908,7 +917,7 @@ impl PixelCommandEditor {
         let mut started = false;
         let outcome = (|| -> Result<_, EditConflicts> {
             let invalid = |error: String| EditConflicts::from(conflict("invalid-edit", error));
-            if let Some(recorded) = &expected {
+            if let Some(recorded) = expected {
                 if common["command"]["options"] != recorded["command"]["options"] {
                     return Err(conflict(
                         "receipt-arguments",
@@ -1008,7 +1017,6 @@ impl PixelCommandEditor {
             }
             common["outputs"] = json!({ "kind": gate.l_kind, "documentRevision": after, "artifactRevision": after });
             if expected
-                .as_ref()
                 .is_some_and(|old| !receipt_matches(&common, old))
             {
                 return Err(conflict(

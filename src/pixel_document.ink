@@ -12,6 +12,7 @@ import "pixel_transform.ink" as transforms;
 import "pixel_history.ink" as history;
 import "pixel_preview.ink" as preview;
 import "pixel_commands.ink" as commands;
+import "pixel_batch.ink" as batch;
 import "pixel_asset_export.ink" as assets;
 import "pixel_png.ink" as png;
 import "pixel_png_input.ink" as png_input;
@@ -789,6 +790,34 @@ query resolve_pixel_edit(patch: json.Json) -> history.Command reads(EditorSource
 
 query plan_pixel_command(command: json.Json) -> Result<commands.Plan, String> reads(EditorSource) {
     return commands.plan(EditorSource, command);
+}
+
+query plan_pixel_batch_step(command: json.Json) -> Result<commands.Plan, String> reads(EditorSource) {
+    return commands.plan_batch_step(EditorSource, command);
+}
+
+query pixel_batch_draft() -> Result<batch.Draft, String> reads(JournalDraft, JournalVersions) {
+    if JournalDraft.id == 0 { return Err("Open a pixel transaction before recording a batch"); }
+    let base = JournalVersions.get(JournalDraft.id).ok_or("Missing pixel edit transaction")?;
+    return Ok(batch.Draft { label: JournalDraft.label, receipt: base.cursor.receipt, anchor: batch.anchor(base.cursor) });
+}
+
+query pixel_batch_anchor() -> json.Json reads(JournalCursor) { return batch.anchor(JournalCursor); }
+
+pub fn pixel_batch_plan(metadata: json.Json, length: u32) -> Result<String, String> {
+    return batch.plan(metadata, length);
+}
+
+pub fn pixel_batch_count(length: u32) -> Result<Unit, String> { return batch.count(length); }
+
+pub fn pixel_batch_receipt(receipt: json.Json) -> Result<Unit, String> { return batch.receipt(receipt); }
+
+pub fn pixel_batch_input_changes(expected: json.Json, actual: json.Json) -> List<json.Json> {
+    return batch.input_changes(expected, actual);
+}
+
+pub fn pixel_batch_same_target(before: json.Json, after: json.Json) -> Bool {
+    return batch.same_target(before, after);
 }
 
 query describe_pixel_command_document() -> Result<json.Json, String> reads(EditorSource, EditorArtwork, JournalCursor) {

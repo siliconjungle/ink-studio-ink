@@ -1,3 +1,4 @@
+import { callOwned } from '../build/pixel_document.mjs';
 import { pixelPng, pngBase64 } from './pixel-png.mjs';
 
 const receiptFormat = 'ink-studio/pixel-edit-receipt';
@@ -29,6 +30,38 @@ function replayReceipt(receipt) {
 
 function editError(code, message, details = {}) {
   return Object.assign(new Error(message), { conflict: { code, message, ...details } });
+}
+
+const batchFormat = 'ink-studio/pixel-edit-batch';
+
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (isRecord(value)) return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
+  return value;
+}
+
+function batchFailure(error) {
+  return {
+    ...(error.batchStep !== undefined && { failedStep: error.batchStep }),
+    conflicts: error.receipt?.conflicts ?? error.conflicts ??
+      [error.conflict ?? { code: 'invalid-edit', message: error.message }],
+    ...(error.receipt && { editReceipt: error.receipt }),
+  };
+}
+
+function rejectBatch(action, error, recordedRevision) {
+  const failure = batchFailure(error);
+  error.receipt = { format: 'ink-studio/pixel-batch-rejection', version: 1, action,
+    ...(isRevision(recordedRevision) && { recordedRevision }), ...failure };
+  throw error;
+}
+
+async function runBatchStep(index, run) {
+  try {
+    return await run();
+  } catch (error) {
+    throw Object.assign(error, { batchStep: index });
+  }
 }
 
 function gateFields(patch) {
@@ -161,6 +194,9 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
   const observePreview = bind('observe_pixel_preview'), editDiff = bind('pixel_preview_diff');
   const draftDiff = bind('pixel_draft_diff');
   const accept = bind('accept_pixel_edit');
+  const batchStep = bind('plan_pixel_batch_step'), batchDraft = bind('pixel_batch_draft');
+  const batchAnchor = bind('pixel_batch_anchor');
+  const batchPure = (name, ...args) => callOwned('pixel_batch_' + name, args);
   const receipts = new Map();
   let nextReceipt = 0, previous = Promise.resolve();
 
@@ -193,11 +229,11 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
     for (const id of receipts.keys()) if (!reachable.has(id)) receipts.delete(id);
   }
 
-  function allReceipts() {
+  function receiptChain(base = 0) {
     const rows = [];
-    for (let id = read().cursor.receipt; id;) {
+    for (let id = read().cursor.receipt; id !== base;) {
       const row = receipts.get(id);
-      rows.push(structuredClone(row.receipt));
+      rows.push(row.receipt);
       id = row.parent;
     }
     return rows.reverse();
@@ -330,6 +366,147 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
     return previewReport(codec, result.changes, structuredClone(targets.reverse()), [], result.celLinks.Some, exact);
   }
 
+  const anchor = () => codec.toJS(batchAnchor());
+
+  function requireNoDraft() {
+    if (read().pending) {
+      throw editError('active-transaction', 'Finish the open pixel transaction before running a batch');
+    }
+  }
+
+  async function sealBatch(label, inputs, outputs, steps, revalidatedFrom) {
+    const body = { format: batchFormat, version: 1, label, inputs, outputs, steps,
+      ...(revalidatedFrom !== undefined && { revalidatedFrom }) };
+    return { ...body, revision: await revision(canonical(body)) };
+  }
+
+  async function readBatch(raw) {
+    const metadata = isRecord(raw) ? Object.fromEntries(Object.entries(raw).map(([key, data]) =>
+      [key, key === 'steps' ? null : data])) : null;
+    unwrap(batchPure('receipt', codec.fromJS(metadata)));
+    const { revision: recordedRevision, ...body } = raw;
+    if (await revision(canonical(body)) !== recordedRevision) {
+      throw editError('batch-integrity', 'The pixel batch receipt has changed', { revision: recordedRevision });
+    }
+    unwrap(batchPure('count', Array.isArray(body.steps) ? body.steps.length : 0));
+    body.steps.forEach(replayReceipt);
+    return raw;
+  }
+
+  async function settleBatch(label, run, save = true) {
+    unwrap(begin(label));
+    try {
+      const result = await run();
+      if (save) transition('commit');
+      return result;
+    } finally {
+      if (read().pending) transition('cancel');
+    }
+  }
+
+  async function applyBatch(raw) {
+    try {
+      requireNoDraft();
+      const metadata = isRecord(raw) ? Object.fromEntries(Object.entries(raw).map(([key, data]) =>
+        [key, key === 'revision' || key === 'label' ? data : null])) : null;
+      const label = unwrap(batchPure('plan', codec.fromJS(metadata),
+        Array.isArray(raw?.commands) ? raw.commands.length : 0));
+      const inputs = anchor();
+      if (raw.revision !== inputs.documentRevision) {
+        throw editError('stale-document', 'Pixel batch needs its observed base revision',
+          { expected: raw.revision, actual: inputs.documentRevision });
+      }
+      return await settleBatch(label, async () => {
+        const steps = [];
+        for (const [index, step] of raw.commands.entries()) {
+          steps.push(await runBatchStep(index, async () => {
+            const ready = unwrap(batchStep(codec.fromJS(commandMetadata(step))));
+            const patch = normalizedPatch(step.patch, ready);
+            if (!Object.hasOwn(patch, 'revision')) patch.revision = read().cursor.revision;
+            return (await attempt(patch, { options: step.options })).receipt;
+          }));
+        }
+        return sealBatch(label, inputs, anchor(), steps);
+      });
+    } catch (error) {
+      rejectBatch('batch', error);
+    }
+  }
+
+  async function recordBatch() {
+    try {
+      if (!read().pending) throw editError('missing-transaction', 'Open a pixel transaction before recording a batch');
+      const base = unwrap(batchDraft());
+      const steps = receiptChain(base.receipt);
+      unwrap(batchPure('count', steps.length));
+      return sealBatch(base.label, codec.toJS(base.anchor), anchor(), steps);
+    } catch (error) {
+      rejectBatch('record-batch', error);
+    }
+  }
+
+  async function replayBatch(raw) {
+    try {
+      requireNoDraft();
+      const recorded = await readBatch(raw);
+      const conflicts = batchPure('input_changes', codec.fromJS(recorded.inputs), codec.fromJS(anchor()))
+        .map(issue => codec.toJS(issue));
+      if (conflicts.length) throw Object.assign(new Error(conflicts[0].message), { conflicts });
+      return await settleBatch(recorded.label, async () => {
+        for (const [index, expected] of recorded.steps.entries()) {
+          await runBatchStep(index, () => attempt(expected.command.patch, { expected }));
+        }
+        const actual = anchor();
+        if (!equal(actual, recorded.outputs)) {
+          throw editError('batch-output-mismatch', 'Replay did not reproduce the recorded transaction outputs',
+            { expected: recorded.outputs, actual });
+        }
+        return recorded;
+      });
+    } catch (error) {
+      rejectBatch('replay-batch', error, raw?.revision);
+    }
+  }
+
+  async function revalidateBatch(raw, options) {
+    const report = { format: 'ink-studio/pixel-batch-revalidation', version: 1,
+      ...(isRevision(raw?.revision) && { recordedRevision: raw.revision }) };
+    try {
+      requireNoDraft();
+      const recorded = await readBatch(raw);
+      const inputs = anchor();
+      return await settleBatch(recorded.label, async () => {
+        const changes = [], steps = [];
+        for (const [index, previous] of recorded.steps.entries()) {
+          await runBatchStep(index, async () => {
+            const patch = structuredClone(previous.command.patch);
+            patch.revision = read().cursor.revision;
+            if (!Object.hasOwn(patch, 'frame') && !Object.hasOwn(patch, 'cel') && previous.command.frame) {
+              patch.frame = previous.command.frame;
+            }
+            const { receipt } = await attempt(patch, { options: previous.command.options });
+            const before = previous.affectedTargets?.[0], after = receipt.affectedTargets[0];
+            if (!batchPure('same_target', codec.fromJS(before ?? null), codec.fromJS(after))) {
+              throw editError('changed-target', 'The current edit resolves to a different destination or target',
+                { ...(before && { before }), after });
+            }
+            const evidence = ({ affectedTargets: targets, skippedHits, shotHits }) => ({ targets, skippedHits, shotHits });
+            const previousEvidence = evidence(previous), currentEvidence = evidence(receipt);
+            if (!equal(previousEvidence, currentEvidence)) {
+              changes.push({ step: index, before: previousEvidence, after: currentEvidence });
+            }
+            steps.push(receipt);
+          });
+        }
+        const preview = previewDraft({ exact: options?.exact ?? false, limit: options?.limit });
+        const batch = await sealBatch(recorded.label, inputs, anchor(), steps, recorded.revision);
+        return { ...report, valid: true, batch, preview, changes, conflicts: [] };
+      }, false);
+    } catch (error) {
+      return { ...report, valid: false, ...batchFailure(error) };
+    }
+  }
+
   async function execute(raw) {
     const ready = unwrap(plan(codec.fromJS(commandMetadata(raw))));
     switch (ready.action) {
@@ -339,6 +516,13 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
         const expected = replayReceipt(raw.receipt);
         return structuredClone((await attempt(expected.command.patch, { expected })).receipt);
       }
+      case 'batch': {
+        const { revision, label, commands } = raw;
+        return structuredClone(await applyBatch({ revision, commands, ...(label !== undefined && { label }) }));
+      }
+      case 'record-batch': return structuredClone(await recordBatch());
+      case 'replay-batch': return structuredClone(await replayBatch(raw.batch));
+      case 'revalidate-batch': return revalidateBatch(raw.batch, raw.options);
       case 'begin':
         unwrap(begin(raw.label ?? ''));
         return { history: history() };
@@ -383,7 +567,7 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
     },
     revision: () => enqueue(() => read().cursor.revision),
     history: () => enqueue(history),
-    receipts: () => enqueue(allReceipts),
+    receipts: () => enqueue(() => structuredClone(receiptChain())),
     snapshot: () => enqueue(editor.snapshot),
     select: (query, options) => enqueue(() => editor.select(query, options)),
     captureBrush: options => enqueue(() => editor.captureBrush(options)),
@@ -400,6 +584,19 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
     execute(raw) {
       const command = capture(raw);
       return enqueue(() => execute(command));
+    },
+    applyBatch(raw) {
+      const plan = capture(raw);
+      return enqueue(async () => structuredClone(await applyBatch(plan ?? {})));
+    },
+    recordBatch: () => enqueue(async () => structuredClone(await recordBatch())),
+    replayBatch(raw) {
+      const receipt = capture(raw);
+      return enqueue(async () => structuredClone(await replayBatch(receipt)));
+    },
+    revalidateBatch(raw, options) {
+      const receipt = capture(raw), settings = capture(options);
+      return enqueue(() => revalidateBatch(receipt, settings));
     },
     previewPatch(raw) {
       const patch = capture(raw);

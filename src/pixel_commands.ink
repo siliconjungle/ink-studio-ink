@@ -162,6 +162,15 @@ fn export_plan(spec: List<json.Member>) -> Result<Plan, String> {
     return Ok(no_edits(string_concat("export-", artifact)));
 }
 
+fn plan_batch_step(source: json.Json, raw: json.Json) -> Result<Plan, String> {
+    let spec = prepare(raw)?;
+    let action = value.text(value.get(spec, "action"));
+    if !edit(action) { return Err("A batch step must be a pixel edit command"); }
+    let checked = check_options(spec, option_fields(action))?;
+    let patch = json.members(value.get(spec, "patch")).map_err(fn(issue) => "A batch step needs a pixel edit patch")?;
+    return alias(source, action, spec);
+}
+
 fn plan(source: json.Json, raw: json.Json) -> Result<Plan, String> {
     let spec = prepare(raw)?;
     let action = value.text(value.get(spec, "action"));

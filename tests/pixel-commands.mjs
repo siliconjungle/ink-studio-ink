@@ -180,6 +180,142 @@ export function commandCases(root) {
     run(edit('draw', { tool: 'pencil', layer: 'ground', swatch: 'brass', points: [[2, 0]] }, { frame: 'back' }));
     run(command('export', { artifact: 'layer-deck' }));
   });
+  const { seal } = createRequire(import.meta.url)(resolve(root, 'cli/pixel-edit-batch.js'));
+  const reseal = batch => seal(batch.label, batch.inputs, batch.outputs, batch.steps, batch.revalidatedFrom);
+  const wrongRevision = '0'.repeat(64);
+  const pencil = (id, at, swatch = 'brick') => command('draw', { patch: {
+    id, frame: 'front', operation: { tool: 'pencil', layer: 'ink', swatch, points: [at] },
+  } });
+  scenario('ordered batches roll back on rejection and support atomic history and receipt replay', design, run => {
+    const revision = run(command('validate')).revision;
+    const steps = [pencil('batch-mark', [2, 1]), command('mask', { patch: {
+      id: 'batch-mask', frame: 'front', operation: { id: 'selected', query: { type: 'swatch', id: 'brick' } },
+    } }), command('recolor', { patch: {
+      id: 'batch-recolor', frame: 'front', operation: { layer: 'ink', selection: 'selected', from: 'brick', to: 'glass' },
+    } }), command('transform', { patch: {
+      id: 'batch-move', frame: 'front', operation: { layer: 'ink', selection: 'selected', transform: { offset: [1, 0] } },
+    } })];
+    const batch = commands => command('batch', { revision, label: 'Paint and move 🖋', commands });
+    run(command('batch', { revision, commands: [] }));
+    run(command('batch', { revision, commands: Array(257).fill(steps[0]) }));
+    run(command('batch', { revision, label: '\u2003\n', commands: steps }));
+    run(command('batch', { revision: wrongRevision, commands: steps }));
+    run(batch([steps[0], command('undo')]));
+    run(batch([steps[0], command('draw', { patch: null })]));
+    run(batch([steps[0], { ...steps[1], options: { unknown: true } }]));
+    run(batch([steps[0], { ...steps[1], patch: { ...steps[1].patch, revision: wrongRevision } }]));
+    assert.deepEqual(run(command('export')).data, design);
+    assert.equal(run(command('undo')).changed, false);
+
+    const applied = run(batch(steps));
+    assert.equal(applied.steps.length, 4);
+    assert.equal(applied.steps[1].command.patch.revision, applied.steps[0].outputs.documentRevision);
+    assert.equal(run(command('inspect', { at: [3, 1] })).swatch, 'glass');
+    const edited = run(command('export')).data;
+    assert.deepEqual(run(command('undo')).history, { undo: [], redo: [applied.label] });
+    assert.deepEqual(run(command('export')).data, design);
+
+    const badStep = structuredClone(applied);
+    badStep.steps[2].outputs.artifactRevision = wrongRevision;
+    run(command('replay-batch', { batch: badStep }));
+    run(command('replay-batch', { batch: reseal(badStep) }));
+    const badOutput = structuredClone(applied);
+    badOutput.outputs.documentRevision = wrongRevision;
+    run(command('replay-batch', { batch: reseal(badOutput) }));
+    const badSource = structuredClone(applied);
+    badSource.inputs.renderRevision = wrongRevision;
+    badSource.inputs.scene = { ref: 'original-source', revision: wrongRevision };
+    run(command('replay-batch', { batch: reseal(badSource) }));
+    assert.deepEqual(run(command('export')).data, design);
+    assert.deepEqual(run(command('redo')).history, { undo: [applied.label], redo: [] });
+    assert.deepEqual(run(command('export')).data, edited);
+    run(command('undo'));
+
+    const reorder = (_key, value) => value && Object.getPrototypeOf(value) === Object.prototype
+      ? Object.fromEntries(Object.entries(value).reverse()) : value;
+    assert.deepEqual(run(command('replay-batch', { batch: JSON.parse(JSON.stringify(applied, reorder)) })), applied);
+    assert.deepEqual(run(command('export')).data, edited);
+    assert.deepEqual(run(command('undo')).history, { undo: [], redo: [applied.label] });
+    assert.deepEqual(run(command('export')).data, design);
+  });
+
+  scenario('recording and revalidating batches leaves the open draft or committed document intact', design, run => {
+    const revision = run(command('validate')).revision;
+    run(command('record-batch'));
+    run(command('begin', { label: 'My draft' }));
+    run(command('record-batch'));
+    run({ ...pencil('first', [2, 1]), patch: { ...pencil('first', [2, 1]).patch, revision } });
+    const recorded = run(command('record-batch'));
+    assert.equal(recorded.label, 'My draft');
+    assert.equal(recorded.steps.length, 1);
+    run(command('batch', { revision, commands: [pencil('second', [3, 1])] }));
+    run(command('replay-batch', { batch: recorded }));
+    run(command('revalidate-batch', { batch: recorded }));
+    assert.equal(run(command('preview')).pixelCount, 1);
+    assert.deepEqual(run(command('cancel')).history, { undo: [], redo: [] });
+
+    const pick = command('mask', { patch: { id: 'sample', frame: 'front',
+      operation: { id: 'sampled', query: { type: 'swatch', id: 'brick' } } } });
+    const batch = run(command('batch', { revision, commands: [pencil('sample-mark', [2, 1]), pick] }));
+    run(command('undo'));
+    run({ ...pencil('new-brick', [1, 2]), patch: { ...pencil('new-brick', [1, 2]).patch, revision } });
+    const before = run(command('export')).data;
+    run(command('replay-batch', { batch }));
+    const review = run(command('revalidate-batch', { batch, options: { exact: true, limit: 0 } }));
+    assert.equal(review.valid, true);
+    assert.equal(review.batch.revalidatedFrom, batch.revision);
+    assert.equal(review.changes[0].after.targets[0].pixelCount, 2);
+    assert.deepEqual(run(command('export')).data, before);
+    run(command('replay-batch', { batch: review.batch }));
+    assert.deepEqual(run(command('select', { query: { type: 'recall', id: 'sampled' } })).pixels, [[2, 1], [1, 2]]);
+    assert.deepEqual(run(command('undo')).history, { undo: ['new-brick'], redo: [batch.label] });
+    assert.deepEqual(run(command('export')).data, before);
+  });
+
+  scenario('local revalidation retains explicit pixel guards', design, run => {
+    const revision = run(command('validate')).revision;
+    const patch = { id: 'guarded', frame: 'front', edits: [{ at: [2, 1], layer: null, from: null, to: 'glass' }] };
+    const result = run(command('batch', { revision, commands: [command('apply', { patch })] }));
+    run(command('undo'));
+    run({ ...pencil('fill-guard', [2, 1]), patch: { ...pencil('fill-guard', [2, 1]).patch, revision } });
+    const before = run(command('export')).data;
+    const review = run(command('revalidate-batch', { batch: result }));
+    assert.equal(review.valid, false);
+    assert.equal(review.failedStep, 0);
+    assert.equal(review.conflicts[0].code, 'pixel-changed');
+    assert.deepEqual(run(command('export')).data, before);
+    assert.deepEqual(run(command('undo')).history, { undo: [], redo: ['fill-guard'] });
+  });
+
+  const schema = createRequire(import.meta.url)(resolve(root, 'docs/reference/pixel-command-schema.json'));
+  const examples = schema['x-ink'];
+  for (const action of ['batch', 'record-batch', 'replay-batch', 'revalidate-batch']) {
+    for (const { command: example, setup, result } of examples.commands[action].examples) {
+      scenario('published ' + action + ' example', examples.exampleDocument, run => {
+        setup.forEach(run);
+        assert.deepEqual(JSON.parse(JSON.stringify(run(example))), result);
+      });
+    }
+  }
+
+  scenario('the full 256-step batch keeps the legacy anchor through undo and replay', {
+    format: 'ink-studio/pixel-art', version: 1, width: 3, height: 2, palette: { brick: design.palette.brick, glass: design.palette.glass },
+    layers: [{ id: 'ink', marks: [] }],
+  }, run => {
+    const revision = run(command('validate')).revision;
+    const commands = Array.from({ length: 256 }, (_, index) => {
+      const { patch } = pencil('legacy-' + index, [1, 0], index % 2 ? 'glass' : 'brick');
+      return command('draw', { patch: { ...patch, frame: 'artwork' } });
+    });
+    const applied = run(command('batch', { revision, commands }));
+    assert.equal(applied.steps.length, 256);
+    assert.ok(applied.inputs.legacyRevision);
+    assert.equal(applied.outputs.legacyRevision, null);
+    run(command('undo'));
+    assert.deepEqual(run(command('replay-batch', { batch: applied })), applied);
+    assert.deepEqual(run(command('undo')).history, { undo: [], redo: ['Pixel edit batch'] });
+  });
+
   return cases;
 }
 
@@ -220,7 +356,7 @@ async function main(root, native) {
       writeFileSync(file, JSON.stringify(request));
       const result = spawnSync(resolve(native), ['journal-document', file], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
       assert.equal(result.status, 0, result.stderr);
-      verifyCommands(result.stdout.trim().split('\n').map(line => JSON.parse(line)), replies, 'Rust ' + label);
+      verifyCommands(result.stdout.trim().split('\n').map(line => JSON.parse(line)), JSON.parse(JSON.stringify(replies)), 'Rust ' + label);
     }
     if (native) {
       const { request, replies } = cases[1];
