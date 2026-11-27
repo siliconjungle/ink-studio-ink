@@ -64,7 +64,7 @@ Lathe profiles can ripple as they taper, including the phase-shifted power profi
 
 ## Build and check
 
-Use [Ink Lang commit `fa29d8f`](https://github.com/siliconjungle/ink-lang/commit/fa29d8fb5468b8b9dfbfe77b895e4b4226ac321d) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for the bake's immutable geometry inputs, including optional geometry. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
+Use [Ink Lang commit `6d6f3b7`](https://github.com/siliconjungle/ink-lang/commit/6d6f3b7296e30d84d8fd69c9e97f91365470016b) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for the bake's immutable geometry inputs, including optional geometry. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
 
 ```sh
 ./scripts/build.sh --gpu
@@ -83,6 +83,6 @@ python3 -m http.server --bind 127.0.0.1
 
 Open `/tests/webgpu.html` on the local server to check browser dispatch, resident camera updates and compositing. Both GPU tests also check rig uploads, bit-exact signed-zero changes, and replacement after other writes. To include native GPU compute in the value comparison, build `build/gpu/native/Cargo.toml` with Cargo and set `INK_WGPU_PROGRAM` to the generated `ink-gpu-program` executable.
 
-Open `/bench/camera.html` on the same server to run the camera probe.
+Open `/bench/camera.html` on the same server to run the camera probe. For sorted resident worlds, `updateCameraAndDraw` in the browser and `update_packed_camera_and_draw` in wgpu encode projection and drawing in one submission.
 
 The ongoing port includes additional shape recipes, textured materials, additional rig types, animation clips, the remaining art and streaming features, simulation tools, additional editor tools, and the CLI.

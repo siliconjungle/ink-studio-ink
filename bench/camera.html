@@ -32,10 +32,15 @@
         let dispatches;
         for (let frame = 0; frame < 38; frame++) {
           const start = performance.now();
-          ({ dispatches } = await renderer.updateCamera({ ...camera, eye: [frame / 256, 0, 0] }));
-          const encoder = device.createCommandEncoder();
-          renderer.draw(encoder, targetView);
-          device.queue.submit([encoder.finish()]);
+          const next = { ...camera, eye: [frame / 256, 0, 0] };
+          if (preordered) {
+            ({ dispatches } = await renderer.updateCamera(next));
+            const encoder = device.createCommandEncoder();
+            renderer.draw(encoder, targetView);
+            device.queue.submit([encoder.finish()]);
+          } else {
+            ({ dispatches } = await renderer.updateCameraAndDraw(next, targetView));
+          }
           await device.queue.onSubmittedWorkDone();
           if (frame >= 8) elapsed.push(performance.now() - start);
         }

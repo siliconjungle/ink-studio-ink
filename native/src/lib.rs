@@ -24,6 +24,7 @@ pub struct GaussianRenderer {
     count: u32,
     skin_rows: u32,
     directional: bool,
+    compacted_world: bool,
     packed_inputs: PackedInputs,
 }
 
@@ -237,7 +238,9 @@ impl GaussianRenderer {
         };
         let contour = matches!(raster, Raster::Contours(_));
         let mut engine = Engine::with_device(device.clone(), queue.clone());
-        if options.parallel_u64_merge {
+        let compacted_world = !contour && camera.as_ref()
+            .is_some_and(|(_, ordering)| matches!(ordering, WorldOrder::Sort));
+        if options.parallel_u64_merge || compacted_world {
             engine.prefer_parallel_u64_merge()?;
         }
         let mut inputs = json!({"splats": splats});
@@ -253,7 +256,7 @@ impl GaussianRenderer {
                     args.insert(1, json!({"input": "actors"}));
                     "project_contour_scene"
                 }
-                WorldOrder::Sort => "project_sorted_world",
+                WorldOrder::Sort => "project_visible_sorted_world",
                 WorldOrder::Preordered => "project_world",
                 WorldOrder::Actor(placement) => {
                     inputs["actor"] = placement;
@@ -317,6 +320,7 @@ impl GaussianRenderer {
             count,
             skin_rows,
             directional,
+            compacted_world,
             packed_inputs: PackedInputs::default(),
         };
         renderer.project(device)?;
@@ -487,22 +491,48 @@ impl GaussianRenderer {
         Ok(upload_bytes(&bone_write)? + upload_bytes(&light_write)?)
     }
 
+    /// Project and draw a sorted world camera update in one GPU submission.
+    pub fn update_packed_camera_and_draw(
+        &mut self, camera: Camera, target: &wgpu::TextureView,
+    ) -> Result<Value, String> {
+        if !self.compacted_world {
+            return Err("combined camera draws require WorldOrder::Sort with the smooth renderer".into());
+        }
+        self.write_packed_camera(camera)?;
+        let output = self.bindings.as_ref().expect("renderer prepared");
+        let raster = &self.raster;
+        let draw_args = self.draw_args.as_ref();
+        let count = self.count;
+        let outcome = self.engine.step_and_encode(self.session, |encoder| {
+            Self::encode_draw(raster, output, draw_args, count, encoder, target);
+        })?;
+        Ok(outcome["counters"].clone())
+    }
+
     pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
-        let (ellipses, bindings) = self.bindings.as_ref().expect("renderer prepared");
-        let (pipeline, bindings) = match (&self.raster, bindings) {
+        let output = self.bindings.as_ref().expect("renderer prepared");
+        Self::encode_draw(&self.raster, output, self.draw_args.as_ref(), self.count, encoder, target);
+    }
+
+    fn encode_draw(
+        raster: &Raster, (ellipses, bindings): &(wgpu::Buffer, Bindings),
+        draw_args: Option<&wgpu::Buffer>, count: u32,
+        encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView,
+    ) {
+        let (pipeline, bindings) = match (raster, bindings) {
             (Raster::Smooth(pipeline), Bindings::Smooth(bindings)) => (pipeline, bindings),
             (Raster::Contours(contour), Bindings::Contours(bindings)) => {
-                contour.draw(encoder, target, bindings, self.count);
+                contour.draw(encoder, target, bindings, count);
                 return;
             }
             _ => unreachable!("bindings have the same raster as their renderer"),
         };
-        let draw = if let Some(args) = &self.draw_args {
+        let draw = if let Some(args) = draw_args {
             // Ink's list header is the compacted row count. A GPU copy patches instance_count.
             encoder.copy_buffer_to_buffer(ellipses, 0, args, 4, 4);
             SplatDraw::Visible(args)
         } else {
-            SplatDraw::Capacity(self.count)
+            SplatDraw::Capacity(count)
         };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Ink Studio Gaussian raster"),

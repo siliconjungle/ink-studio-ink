@@ -367,9 +367,25 @@ record DepthEllipse {
 }
 
 fn project_tagged(splat: WorldGaussian, camera: Camera) -> DepthEllipse {
-    let ellipse = project_world_one(splat, camera);
-    return DepthEllipse { depth: if ellipse.alpha > 0.0 { depth_rank(splat.position, camera) } else { 0 },
+    let empty = DepthEllipse { depth: 0, ellipse: hidden() };
+    if !contributes(splat) { return empty; }
+    let position = from_eye(splat.position, camera);
+    let depth = -dot3(camera.back, position);
+    if !world_visible(camera, depth) { return empty; }
+    let ellipse = project_one(screen_gaussian(splat, camera, position, depth), camera.half_viewport);
+    return DepthEllipse { depth: if ellipse.alpha > 0.0 { rank_depth(depth) } else { 0 },
         ellipse: ellipse };
+}
+
+// The renderer consumes only visible ellipses. Keep the full-list projection
+// available to callers that depend on a placeholder for every input row.
+pub fn project_visible_sorted_world(splats: List<WorldGaussian>, camera: Camera) -> List<Ellipse> {
+    let projected = splats.map(fn(splat) => project_tagged(splat, camera));
+    let keys = projected.map_indexed(fn(index) => fn(row) =>
+        if row.ellipse.alpha > 0.0 { indexed_depth(row.depth, index) } else { 18446744073709551615 });
+    let visible = keys.filter(fn(key) => key != 18446744073709551615).sort();
+    let fallback = DepthEllipse { depth: 0, ellipse: hidden() };
+    return visible.map(fn(key) => projected.at_or(word_narrow_u64_to_u32(key), fallback).ellipse);
 }
 
 fn visible_world(splats: List<WorldGaussian>, camera: Camera) -> List<DepthEllipse> {

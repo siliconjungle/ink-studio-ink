@@ -31,7 +31,7 @@ export async function createGaussianRenderer(device, format, { width, height, sp
     throw new Error('Colored Contours requires sorted world or skinned splats');
   }
   const projection = camera
-    ? { call: preordered ? 'project_world' : 'project_sorted_world',
+    ? { call: preordered ? 'project_world' : 'project_visible_sorted_world',
       input: { camera: cameraInput(camera) }, view: [{ input: 'camera' }] }
     : { call: 'project', input: {}, view: [halfViewport] };
   if (actor) {
@@ -61,7 +61,8 @@ export async function createGaussianRenderer(device, format, { width, height, sp
     steps.at(-1).call = 'project_lit_contour_scene';
     steps.at(-1).args.push({ input: 'contourLight' });
   }
-  const ink = await loadInk(bundleURL, { device });
+  const compactedWorld = projection.call === 'project_visible_sorted_world' && !contours && !hasSkin;
+  const ink = await loadInk(bundleURL, { device, parallelU64Merge: compactedWorld });
   let session;
   let viewport;
   let drawArgs;
@@ -103,6 +104,19 @@ export async function createGaussianRenderer(device, format, { width, height, sp
       }
       return counters;
     }
+    function draw(encoder, target) {
+      if (contourRaster) return contourRaster.draw(encoder, target, bindings);
+      // Ink's list header is the compacted row count. A GPU copy patches instanceCount.
+      encoder.copyBufferToBuffer(boundBuffer, 0, drawArgs, 4, 4);
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{ view: target, loadOp: 'clear', storeOp: 'store',
+          clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
+      });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindings);
+      pass.drawIndirect(drawArgs, 0);
+      pass.end();
+    }
     const initialCounters = await project();
     return {
       initialCounters,
@@ -121,6 +135,12 @@ export async function createGaussianRenderer(device, format, { width, height, sp
         await session.write('camera', cameraInput(value));
         if (placement) await session.write('actor', placement);
         return project();
+      },
+      async updateCameraAndDraw(value, target) {
+        if (!compactedWorld) throw new Error('Combined camera draws require a sorted smooth world');
+        await session.write('camera', cameraInput(value));
+        const { counters } = await session.stepAndEncode(encoder => draw(encoder, target));
+        return counters;
       },
       setContourGrade(grade) {
         if (!contourRaster) throw new Error('A contour grade requires Colored Contours');
@@ -141,19 +161,7 @@ export async function createGaussianRenderer(device, format, { width, height, sp
         const counters = await project();
         return { counters, rigUploadBytes };
       },
-      draw(encoder, target) {
-        if (contourRaster) return contourRaster.draw(encoder, target, bindings);
-        // Ink's list header is the compacted row count. A GPU copy patches instanceCount.
-        encoder.copyBufferToBuffer(boundBuffer, 0, drawArgs, 4, 4);
-        const pass = encoder.beginRenderPass({
-          colorAttachments: [{ view: target, loadOp: 'clear', storeOp: 'store',
-            clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
-        });
-        pass.setPipeline(pipeline);
-        pass.setBindGroup(0, bindings);
-        pass.drawIndirect(drawArgs, 0);
-        pass.end();
-      },
+      draw,
       async close() {
         viewport.destroy();
         drawArgs?.destroy();

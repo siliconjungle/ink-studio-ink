@@ -49,6 +49,11 @@ const colors = [255, 65280, 16711680, 65535];
 const unordered = [4, 7, 4, 6].map((depth, i) => ({ ...world, position: [0, 0, -depth], rgb: colors[i] }));
 const ordered = call('project_sorted_world', [unordered, camera]);
 assert.deepEqual(ordered.map((splat) => splat.rgb), [65280, 65535, 255, 16711680]);
+const interleaved = [unordered[0], { ...world, position: [120, 0, -4] }, unordered[1],
+  { ...world, alpha: 0 }, unordered[2], { ...world, position: [0, 0, -10] }, unordered[3]];
+const visibleOrdered = call('project_sorted_world', [interleaved, camera]).filter(row => row.alpha > 0);
+assert.deepEqual(call('project_visible_sorted_world', [interleaved, camera]), visibleOrdered);
+
 const actor = { first: 1, origin: [1, -1, -7], forward: [0, 1] };
 const scenery = { ...world, position: [0, 0, -5], rgb: 65280 };
 const local = { ...world, position: [1, 2, 1], covariance0: [4, 0.5, 0.25], covariance1: [2, -0.75, 1] };
@@ -116,6 +121,8 @@ try {
     { pure: 'project_world', args: [worldRows, camera], expected: orthographic },
     { pure: 'project_world', args: [worldRows, perspective], expected: orthographic },
     { pure: 'project_sorted_world', args: [unordered, camera], expected: ordered },
+    { pure: 'project_visible_sorted_world', args: [interleaved, camera], expected: visibleOrdered },
+    { pure: 'project_visible_sorted_world', args: [[], camera], expected: [] },
     { pure: 'project_sorted_actor', args: actorArgs, expected: placed },
     { pure: 'skin_world', args: skinArgs, expected: skinned },
     { pure: 'project_sorted_scene', args: sceneArgs, expected: visible },
