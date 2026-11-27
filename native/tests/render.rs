@@ -1,5 +1,5 @@
 use ink_gpu_program::{Backend, Engine};
-use ink_studio_wgpu::{Bone, Camera, ContourSettings, GaussianRenderer, RigLight, WorldOrder};
+use ink_studio_wgpu::{Bone, Camera, ContourSettings, ContourWindow, GaussianRenderer, RigLight, WorldOrder};
 use serde_json::json;
 
 #[test]
@@ -120,6 +120,16 @@ fn computes_and_draws_from_the_same_device_buffer() {
     assert!(lit.chunks_exact(4).zip(shade.chunks_exact(4))
         .any(|(light, dark)| light[0] > dark[0] && dark[0] > shade[0] && light[0] < lit[center]));
     directional.stage_contour_lighting(None).unwrap();
+    directional.project(&device).unwrap();
+    assert_eq!(draw_fixture(&device, &queue, &texture, &readback, &directional), data);
+    directional.stage_contour_window(ContourWindow { center: [0.0, -2.0], radius: 1.0 }).unwrap();
+    directional.project(&device).unwrap();
+    assert_eq!(draw_fixture(&device, &queue, &texture, &readback, &directional), data);
+    directional.stage_contour_window(ContourWindow { center: [0.0, -5.0], radius: 1.0 }).unwrap();
+    directional.project(&device).unwrap();
+    let outside = draw_fixture(&device, &queue, &texture, &readback, &directional);
+    assert_eq!(outside[center], outside[0]);
+    directional.stage_contour_window(ContourWindow { center: [0.0, -5.0], radius: 0.0 }).unwrap();
     directional.project(&device).unwrap();
     assert_eq!(draw_fixture(&device, &queue, &texture, &readback, &directional), data);
 }

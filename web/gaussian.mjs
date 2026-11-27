@@ -58,8 +58,9 @@ export async function createGaussianRenderer(device, format, { width, height, sp
   const directional = contours?.directional === true;
   if (directional) {
     projection.input.contourLight = contourLightOff;
-    steps.at(-1).call = 'project_lit_contour_scene';
-    steps.at(-1).args.push({ input: 'contourLight' });
+    projection.input.contourWindow = { center: [0, 0], radius: 0 };
+    steps.at(-1).call = 'project_windowed_lit_contours';
+    steps.at(-1).args.push({ input: 'contourLight' }, { input: 'contourWindow' });
   }
   const compactedWorld = projection.call === 'project_visible_sorted_world' && !contours && !hasSkin;
   const ink = await loadInk(bundleURL, { device, parallelU64Merge: compactedWorld });
@@ -151,6 +152,12 @@ export async function createGaussianRenderer(device, format, { width, height, sp
         const frame = light ?? contourLightOff;
         await session.write('contourLight', frame);
         contourRaster.setLighting(frame);
+      },
+      stageContourWindow(center, radius) {
+        if (!directional || center.length !== 2 || !center.every(Number.isFinite) || !Number.isFinite(radius) || radius < 0) {
+          throw new Error('Invalid directional contour window');
+        }
+        return session.write('contourWindow', { center, radius });
       },
       async updateSkinCamera(value, { bones, light }) {
         if (!hasSkin) throw new Error('Skin updates require a skinned world view');

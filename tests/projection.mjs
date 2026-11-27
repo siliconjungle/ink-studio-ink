@@ -91,6 +91,25 @@ assert.deepEqual(left.map(row => row.rgb >>> 24), [0, 1, 255]);
 const unlit = [...litArgs.slice(0, 3), { ...lamp, enabled: false }];
 assert.deepEqual(lit.map(row => ({ ...row, rgb: row.rgb & 0xffffff })), call('project_contour_scene', litArgs.slice(0, 3)));
 assert.deepEqual(call('project_lit_contour_scene', unlit), call('project_contour_scene', litArgs.slice(0, 3)));
+const windowTerrain = [
+  { ...disc, position: [0, 1, -5] },
+  { ...disc, position: [0, 0, -6], rgb: 65280 },
+];
+const windowActors = [{ ...disc, position: [0, 0, -7], rgb: 16711680 }];
+const window = { center: [0, -4], radius: 1 };
+const windowArgs = [windowTerrain, windowActors, camera, lamp, window];
+const preparedWindowArgs = [call('prepare_contour_terrain', [windowTerrain]), ...windowArgs.slice(1)];
+const windowed = call('project_lit_contour_scene', [windowTerrain.slice(0, 1), ...windowArgs.slice(1, 4)]);
+const unwindowed = call('project_lit_contour_scene', windowArgs.slice(0, 4));
+assert.equal(windowed.length, 2);
+assert.equal(unwindowed.length, 3);
+assert.deepEqual(call('project_windowed_lit_contours', windowArgs), windowed);
+assert.deepEqual(call('project_windowed_prepared_contours', preparedWindowArgs), windowed);
+const disabledWindow = { ...window, radius: 0 };
+const disabledWindowArgs = [...windowArgs.slice(0, 4), disabledWindow];
+const disabledPreparedArgs = [...preparedWindowArgs.slice(0, 4), disabledWindow];
+assert.deepEqual(call('project_windowed_lit_contours', disabledWindowArgs), unwindowed);
+assert.deepEqual(call('project_windowed_prepared_contours', disabledPreparedArgs), unwindowed);
 const sourceRow = [1, 2, 3, 0.5, 4, 5, 6, 0xf08010, 7, 8, 9, 128, 11, 12, 13, 14];
 const imported = [{ position: [1, 2, 3], covariance0: [4, 5, 6], covariance1: [7, 8, 9],
   reach: 3, rgb: 0xf08010, alpha: 0.5 }];
@@ -130,6 +149,10 @@ try {
     { pure: 'project_lit_contour_scene', args: litArgs, expected: lit },
     { pure: 'project_lit_contour_scene', args: fromLeft, expected: left },
     { pure: 'project_lit_contour_scene', args: unlit, expected: call('project_contour_scene', litArgs.slice(0, 3)) },
+    { pure: 'project_windowed_lit_contours', args: windowArgs, expected: windowed },
+    { pure: 'project_windowed_prepared_contours', args: preparedWindowArgs, expected: windowed },
+    { pure: 'project_windowed_lit_contours', args: disabledWindowArgs, expected: unwindowed },
+    { pure: 'project_windowed_prepared_contours', args: disabledPreparedArgs, expected: unwindowed },
     { pure: 'import_builder_splats', args: [sourceRow], expected: imported, cpuOnly: true },
   ];
   writeFileSync(requestsPath, JSON.stringify(tests.map(({ pure, args }) => ({ pure, args }))));

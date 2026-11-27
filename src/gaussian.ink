@@ -449,6 +449,15 @@ record ContourLight {
     key: Vec3<f32>,
 }
 
+record ContourWindow { center: Vec2<f32>, radius: f32, }
+
+fn outside_window(position: Vec3<f32>, window: ContourWindow) -> Bool {
+    if !(window.radius > 0.0) { return false; }
+    let x = position.x - window.center.x;
+    let z = position.z - window.center.y;
+    return x * x + z * z > window.radius * window.radius;
+}
+
 fn near_unit(vector: Vec3<f32>, floor: f32, default: Vec3<f32>) -> Vec3<f32> {
     let length = sqrt(dot3(vector, vector));
     if length <= floor { return default; }
@@ -500,7 +509,15 @@ fn shade_contour(row: ContourEllipse, normal: Vec3<f32>, light: ContourLight) ->
 // available to the contour palette matcher and edge votes.
 pub fn project_lit_contour_scene(terrain: List<WorldGaussian>, actors: List<WorldGaussian>,
     camera: Camera, light: ContourLight) -> List<ContourEllipse> {
-    let ground = terrain.map(fn(splat) => directional_contour(splat, camera, light, false)).filter(fn(row) => row.alpha > 0.0);
+    return project_windowed_lit_contours(terrain, actors, camera, light,
+        ContourWindow { center: vec2(0.0, 0.0), radius: 0.0 });
+}
+
+pub fn project_windowed_lit_contours(terrain: List<WorldGaussian>, actors: List<WorldGaussian>,
+    camera: Camera, light: ContourLight, window: ContourWindow) -> List<ContourEllipse> {
+    let ground = terrain.map(fn(splat) =>
+        if outside_window(splat.position, window) { hidden_contour() }
+        else { directional_contour(splat, camera, light, false) }).filter(fn(row) => row.alpha > 0.0);
     let posing = actors.map_indexed(fn(i) => fn(splat) =>
         directional_contour(splat, camera, light, i < light.actor_rows)).filter(fn(row) => row.alpha > 0.0);
     return sort_contours(ground.concat(posing));
@@ -527,7 +544,15 @@ fn project_prepared_dab(dab: PreparedContourTerrain, camera: Camera, light: Cont
 
 pub fn project_prepared_lit_contour_scene(terrain: List<PreparedContourTerrain>, actors: List<WorldGaussian>,
     camera: Camera, light: ContourLight) -> List<ContourEllipse> {
-    let ground = terrain.map(fn(dab) => project_prepared_dab(dab, camera, light)).filter(fn(row) => row.alpha > 0.0);
+    return project_windowed_prepared_contours(terrain, actors, camera, light,
+        ContourWindow { center: vec2(0.0, 0.0), radius: 0.0 });
+}
+
+pub fn project_windowed_prepared_contours(terrain: List<PreparedContourTerrain>, actors: List<WorldGaussian>,
+    camera: Camera, light: ContourLight, window: ContourWindow) -> List<ContourEllipse> {
+    let ground = terrain.map(fn(dab) =>
+        if outside_window(dab.splat.position, window) { hidden_contour() }
+        else { project_prepared_dab(dab, camera, light) }).filter(fn(row) => row.alpha > 0.0);
     let posing = actors.map_indexed(fn(i) => fn(splat) =>
         directional_contour(splat, camera, light, i < light.actor_rows)).filter(fn(row) => row.alpha > 0.0);
     return sort_contours(ground.concat(posing));

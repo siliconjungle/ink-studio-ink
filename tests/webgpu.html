@@ -129,6 +129,15 @@
     if (lit[center] < 240 || shade[center] > 80 || lit[red] !== shade[red] ||
         !lit.some((channel, i) => i % 4 === red && i !== center && channel > shade[i] && shade[i] > shade[red]) ||
         disabled.some((channel, i) => channel !== originalGrade[i])) throw new Error('Directional contours did not light both grids or restore the grade');
+    await directional.stageContourWindow([0, -2], 1);
+    const inside = await directionalPixels(null);
+    if (inside.some((channel, i) => channel !== disabled[i])) throw new Error('The terrain window changed an inside splat');
+    await directional.stageContourWindow([0, -5], 1);
+    const outside = await directionalPixels(null);
+    if (outside[center] !== outside[red]) throw new Error('The terrain window kept an outside splat');
+    await directional.stageContourWindow([0, -5], 0);
+    const reopened = await directionalPixels(null);
+    if (reopened.some((channel, i) => channel !== disabled[i])) throw new Error('Disabling the terrain window did not restore the splat');
     await directional.close();
     readback.destroy();
     const bone = { axis_x: [1, 0, 0], axis_y: [0, 1, 0], axis_z: [0, 0, 1], offset: [0, 0, 0] };

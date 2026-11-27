@@ -88,6 +88,8 @@ impl ContourLight {
     };
 }
 
+gpu_record!(ContourWindow { center: [f32; 2], radius: f32 });
+
 pub(super) fn list<T: GpuWords>() -> Value {
     json!({"kind": "list", "element": T::layout()})
 }
@@ -109,4 +111,5 @@ pub(super) struct PackedInputs {
     pub(super) bones: Option<PackedInput>,
     pub(super) rig_light: Option<PackedInput>,
     pub(super) contour_light: Option<PackedInput>,
+    pub(super) contour_window: Option<PackedInput>,
 }

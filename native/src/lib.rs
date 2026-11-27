@@ -9,7 +9,7 @@ mod present;
 mod render;
 pub use contours::ContourSettings;
 use contours::ContourRaster;
-pub use packed_inputs::{Bone, Camera, ContourLight, RigLight, WorldSplat};
+pub use packed_inputs::{Bone, Camera, ContourLight, ContourWindow, RigLight, WorldSplat};
 use packed_inputs::{GpuWords, PackedInputs, binding};
 pub use present::PixelPresenter;
 
@@ -281,13 +281,15 @@ impl GaussianRenderer {
         if directional {
             inputs["contourLight"] = contour_light_off();
             args.push(json!({ "input": "contourLight" }));
-            function = "project_lit_contour_scene";
+            inputs["contourWindow"] = json!({"center": [0, 0], "radius": 0});
+            args.push(json!({ "input": "contourWindow" }));
+            function = "project_windowed_lit_contours";
         }
         let retained_steps = if directional && retain_terrain {
             steps.push(json!({"id": "terrain-normals", "call": "prepare_contour_terrain",
                 "args": [{"input": "splats"}]}));
             args[0] = json!({"step": "terrain-normals"});
-            function = "project_prepared_lit_contour_scene";
+            function = "project_windowed_prepared_contours";
             &["terrain-normals"][..]
         } else {
             &[]
@@ -445,6 +447,20 @@ impl GaussianRenderer {
             "contourLight", ContourLight::layout)?;
         self.engine.write_packed(input, light.words())?;
         contour.set_lighting(light.ambient, light.key, light.enabled);
+        Ok(())
+    }
+
+    /// Stage the horizontal terrain visibility window for directional contours.
+    /// A zero radius disables clipping.
+    pub fn stage_contour_window(&mut self, window: ContourWindow) -> Result<(), String> {
+        if !self.directional || !window.radius.is_finite() || window.radius < 0.0
+            || window.center.iter().any(|v| !v.is_finite())
+        {
+            return Err("Invalid directional contour window".into());
+        }
+        let input = binding(&mut self.packed_inputs.contour_window, &self.engine, self.session,
+            "contourWindow", ContourWindow::layout)?;
+        self.engine.write_packed(input, window.words())?;
         Ok(())
     }
 
