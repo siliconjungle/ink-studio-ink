@@ -1,4 +1,4 @@
-use ink_studio_pixel::{open_pixel_document, select_pixels};
+use ink_studio_pixel::{mask_pixels, open_pixel_document, select_pixel_mask};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
@@ -11,35 +11,40 @@ struct SelectionRequest<'a> {
     rgba: Vec<u32>,
     #[serde(default, borrow)]
     saved: Option<&'a RawValue>,
+    #[serde(default)]
+    large: bool,
 }
 
-fn select(path: std::ffi::OsString) -> Result<(), String> {
+fn select(path: std::ffi::OsString, packed: bool) -> Result<(), String> {
     let source = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     let request: SelectionRequest =
         serde_json::from_str(&source).map_err(|error| error.to_string())?;
-    let pixels = select_pixels(
+    let words = select_pixel_mask(
         request.width,
         request.height,
         request.query.get(),
         request.rgba,
         request.saved.map_or("{}", RawValue::get),
+        request.large,
     )?;
-    println!(
-        "{}",
-        serde_json::to_string(&pixels).map_err(|error| error.to_string())?
-    );
+    let result = if packed {
+        serde_json::to_string(&words)
+    } else {
+        serde_json::to_string(&mask_pixels(request.width, &words))
+    };
+    println!("{}", result.map_err(|error| error.to_string())?);
     Ok(())
 }
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel select REQUEST";
+    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel select|select-mask REQUEST";
     let path = args.next().ok_or(usage)?;
     if let Some(request) = args.next() {
-        if path != "select" || args.next().is_some() {
+        if (path != "select" && path != "select-mask") || args.next().is_some() {
             return Err(usage.into());
         }
-        return select(request);
+        return select(request, path == "select-mask");
     }
     let source = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     let opened = open_pixel_document(&source)?;

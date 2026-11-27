@@ -106,17 +106,81 @@ fn revision(document: &str) -> String {
     format!("{:x}", Sha256::digest(document.as_bytes()))
 }
 
+fn coordinate(value: &Json, limit: u32) -> Option<u32> {
+    let Json::Number(token) = value else {
+        return None;
+    };
+    token.parse::<u32>().ok().filter(|&n| n < limit)
+}
+
+fn coordinate_runs([width, height]: [u32; 2], pixels: Json, limit: u32) -> Vec<u32> {
+    let Json::Array(points) = pixels else {
+        return Vec::new();
+    };
+    let count = points.len();
+    if count > limit as usize {
+        return Vec::new();
+    }
+    let mut runs = vec![count as u32];
+    for point in points {
+        let slot = match point {
+            Json::Array(pair) if pair.len() == 2 => coordinate(&pair[0], width)
+                .zip(coordinate(&pair[1], height))
+                .map_or(u32::MAX, |(x, y)| y * width + x),
+            _ => u32::MAX,
+        };
+        let end = runs.len() - 1;
+        if end > 0 && runs[end - 1].checked_add(runs[end]) == Some(slot) {
+            runs[end] += 1;
+        } else {
+            runs.extend([slot, 1]);
+        }
+    }
+    runs
+}
+
+fn append_runs(canvas: [u32; 2], pixels: Json, limit: u32, runs: &mut Vec<Vec<u32>>) -> Json {
+    runs.push(coordinate_runs(canvas, pixels, limit));
+    Json::Number(runs.len().to_string())
+}
+
 // Flatten the recursive query references before crossing the compiled boundary.
-fn append_selection_node(mut node: Json, nodes: &mut Vec<Json>) -> u32 {
+fn append_selection_node(
+    mut node: Json,
+    canvas: [u32; 2],
+    nodes: &mut Vec<Json>,
+    runs: &mut Vec<Vec<u32>>,
+) -> u32 {
     if nodes.len() == 33 {
         return 0;
     }
     let index = nodes.len();
     nodes.push(Json::Null);
     if let Json::Object(fields) = &mut node {
+        let coordinates = fields.iter().find_map(|(key, value)| {
+            if key != "type" {
+                return None;
+            }
+            match value {
+                Json::Text(kind) if kind == "pixels" => Some(("pixels", canvas[0] * canvas[1])),
+                Json::Text(kind) if kind == "lasso" => Some(("points", 4096)),
+                Json::Text(kind) if kind == "polygon" => Some(("points", 128)),
+                _ => None,
+            }
+        });
+        if let Some((field, limit)) = coordinates {
+            if let Some((_, pixels)) = fields.iter_mut().find(|(name, _)| name == field) {
+                *pixels = append_runs(canvas, std::mem::replace(pixels, Json::Null), limit, runs);
+            }
+        }
         for key in ["base", "with", "source"] {
             if let Some((_, value)) = fields.iter_mut().find(|(name, _)| name == key) {
-                let child = append_selection_node(std::mem::replace(value, Json::Null), nodes);
+                let child = append_selection_node(
+                    std::mem::replace(value, Json::Null),
+                    canvas,
+                    nodes,
+                    runs,
+                );
                 *value = Json::Number(child.to_string());
             }
         }
@@ -158,10 +222,64 @@ pub fn select_pixels(
     rgba: Vec<u32>,
     saved: &str,
 ) -> Result<Vec<[u32; 2]>, String> {
+    let words = select_pixel_mask(width, height, query, rgba, saved, false)?;
+    Ok(mask_pixels(width, &words))
+}
+
+pub fn mask_pixels(width: u32, words: &[u32]) -> Vec<[u32; 2]> {
+    let mut pixels = Vec::new();
+    for (i, &word) in words.iter().enumerate() {
+        let mut bits = word;
+        while bits != 0 {
+            let slot = i as u32 * 32 + bits.trailing_zeros();
+            pixels.push([slot % width, slot / width]);
+            bits &= bits - 1;
+        }
+    }
+    pixels
+}
+
+pub fn select_pixel_mask(
+    width: u32,
+    height: u32,
+    query: &str,
+    rgba: Vec<u32>,
+    saved: &str,
+    large: bool,
+) -> Result<Vec<u32>, String> {
+    let limit = if large { 8192 } else { 512 };
+    if width == 0 || height == 0 || width > limit || height > limit || width * height > 16_777_216 {
+        return Err(if large {
+            "Selection exceeds the material canvas budget"
+        } else {
+            "Pixel selections need a canvas from 1 to 512 pixels on each axis"
+        }
+        .into());
+    }
     let OrderedJson(query) = serde_json::from_str(query).map_err(|error| error.to_string())?;
     let OrderedJson(saved) = serde_json::from_str(saved).map_err(|error| error.to_string())?;
+    let canvas = [width, height];
+    let mut runs = Vec::new();
     let mut nodes = Vec::new();
-    append_selection_node(query, &mut nodes);
+    append_selection_node(query, canvas, &mut nodes, &mut runs);
+    let mut packed_saved = Vec::new();
+    if let Json::Object(entries) = saved {
+        for (id, pixels) in entries {
+            let used = nodes.iter().any(|node| match node {
+                Json::Object(fields) => {
+                    fields.iter().any(|(k, v)| {
+                        k == "type" && matches!(v, Json::Text(kind) if kind == "recall")
+                    }) && fields
+                        .iter()
+                        .any(|(k, v)| k == "id" && matches!(v, Json::Text(name) if *name == id))
+                }
+                _ => false,
+            });
+            if used {
+                packed_saved.push((id, append_runs(canvas, pixels, width * height, &mut runs)));
+            }
+        }
+    }
     let program = State::new();
     let build = |kind, scalar, flag, values, keys| {
         program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
@@ -170,12 +288,8 @@ pub fn select_pixels(
         .into_iter()
         .map(|node| compiled_json(node, &build))
         .collect();
-    let saved = compiled_json(saved, &build);
-    let selected = program.function_l_select_pixel_indices(nodes, width, height, rgba, saved)?;
-    Ok(selected
-        .into_iter()
-        .map(|slot| [slot % width, slot / width])
-        .collect())
+    let saved = compiled_json(Json::Object(packed_saved), &build);
+    program.function_l_select_pixel_words(nodes, width, height, rgba, saved, runs, large)
 }
 
 pub fn open_pixel_document(source: &str) -> Result<OpenedDocument, String> {

@@ -74,12 +74,13 @@ cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- artwork.
 
 `selectPixels(width, height, query, { rgba, saved })` in the same browser module returns selected `[x, y]` coordinates in native row order. The shared Ink implementation covers rectangular and elliptical marquees, lassos and polygons, literal and saved masks, mask combinations and modifiers, wand fills, and clusters with a supplied source mask. Wand fills take one packed `0xRRGGBBAA` word per pixel. Saved masks map selection IDs to coordinate lists.
 
-Chrome's value transport can hit its node limit when a literal mask lists every coordinate on a 512 × 512 grid. A rectangle or wand fill can cover that entire grid.
+For tools that work with whole masks, `selectPixelMask(width, height, query, options)` keeps the result packed. Pixel `y * width + x` uses the corresponding bit, starting with the least significant bit of each 32-bit word. Set `large: true` for a material canvas of up to 8,192 pixels per axis and 16,777,216 total pixels. Literal and saved coordinate lists travel as runs, including full-canvas masks.
 
-The native `select` command reads a JSON request with `width`, `height`, and `query`, plus optional `rgba` and `saved`.
+The native `select` and `select-mask` commands read a JSON request with `width`, `height`, and `query`, plus optional `rgba`, `saved`, and `large`. `select` returns coordinates. `select-mask` returns the packed words.
 
 ```sh
 cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- select selection.json
+cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- select-mask selection.json
 ```
 
 ## Build and check

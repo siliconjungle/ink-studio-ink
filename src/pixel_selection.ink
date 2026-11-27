@@ -3,10 +3,18 @@ module StudioPixelSelection;
 import "std:json" as json;
 import "pixel_mask.ink" as mask;
 
-record Inputs { grid: mask.Grid, nodes: List<json.Json>, rgba: List<u32>, saved: List<json.Member>, }
+record Inputs {
+    grid: mask.Grid,
+    nodes: List<json.Json>,
+    rgba: List<u32>,
+    saved: List<json.Member>,
+    runs: List<List<u32>>,
+    packed: Bool,
+}
 record Job { operation: String, query: json.Json, }
 record Run { pending: Buffer<Job>, values: Buffer<List<u32>>, count: u32, issue: String, }
 record Choice { mask: List<u32>, issue: String, }
+record Literal { words: Buffer<u32>, issue: String, total: u32, }
 
 fn members(raw: json.Json) -> List<json.Member> {
     return json.members(raw).fold(fn(items) => items, fn(reason) => []);
@@ -32,7 +40,7 @@ fn word(value: json.Json) -> u32 {
     let token = json.as_number(value).fold(fn(value) => value, fn(reason) => "");
     let size = string_byte_len(token);
     if token == "-0" { return 0; }
-    if size == 0 || size > 3 { return 4294967295; }
+    if size == 0 || size > 4 { return 4294967295; }
     return repeat_until(size, 0, fn(value) => value == 4294967295, fn(i) => fn(value) =>
         decimal_digit(value, string_byte_at(token, i).fold(fn(byte) => byte, fn(unit) => 0)));
 }
@@ -77,10 +85,32 @@ fn in_grid(coords: List<Vec2<u32>>, g: mask.Grid) -> Bool {
     return foldl(coords, true, fn(p) => fn(valid) => valid && inside(p, g));
 }
 
-fn lasso(g: mask.Grid, query: List<json.Member>, polygon: Bool) -> Choice {
+fn append_points(g: mask.Grid, points: Buffer<Vec2<u32>>, first: u32, n: u32, total: u32) -> Buffer<Vec2<u32>> {
+    if first >= mask.size(g) || n == 0 || n > mask.size(g) - first || n > total - points.len() {
+        return points.push(vec2(g.width, g.height));
+    }
+    return repeat_until(n, points, fn(out) => false, fn(i) => fn(out) =>
+        out.push(vec2(rem_or(first + i, g.width, 0), quot_or(first + i, g.width, 0))));
+}
+
+fn packed_points(input: Inputs, raw: json.Json, limit: u32) -> List<Vec2<u32>> {
+    let runs = input.runs.at_or(word(raw) - 1, []);
+    let n = length(runs);
+    let count = runs.at_or(0, 4294967295);
+    if count > limit || rem_or(n, 2, 0) != 1 { return []; }
+    let out: Buffer<Vec2<u32>> = Buffer.empty();
+    let points = repeat_until(quot_or(n, 2, 0), out, fn(out) => out.len() > count, fn(i) => fn(out) =>
+        append_points(input.grid, out, runs.at_or(i * 2 + 1, 4294967295), runs.at_or(i * 2 + 2, 0), count));
+    if points.len() != count { return []; }
+    return points.freeze();
+}
+
+fn lasso(input: Inputs, query: List<json.Member>, polygon: Bool) -> Choice {
     if !allowed(query, ["points"]) { return bad(bad_tool()); }
-    let raw = items(field(query, "points"));
-    let coords = points(raw, g);
+    let g = input.grid;
+    let raw = field(query, "points");
+    let limit: u32 = if polygon { 128 } else { 4096 };
+    let coords = if input.packed { packed_points(input, raw, limit) } else { points(items(raw), g) };
     let n = length(coords);
     let valid = if polygon { n >= 3 && n <= 128 } else { n >= 1 && n <= 4096 };
     if !valid || !in_grid(coords, g) {
@@ -89,24 +119,60 @@ fn lasso(g: mask.Grid, query: List<json.Member>, polygon: Bool) -> Choice {
     return chosen(mask.lasso(g, coords));
 }
 
-fn has_duplicate(sorted: List<u32>) -> Bool {
-    return repeat_until(length(sorted), false, fn(found) => found, fn(i) => fn(found) =>
-        i > 0 && sorted.at_or(i, 0) == sorted.at_or(i - 1, 0));
+fn add_run(g: mask.Grid, first: u32, n: u32, old: Literal) -> Literal {
+    let size = mask.size(g);
+    if old.issue != "" { return old; }
+    if first >= size || n > size - first || n == 0 {
+        return Literal { ..old, issue: "A selection pixel is outside the native grid" };
+    }
+    let last = first + n - 1;
+    let start = mask.word_slot(first);
+    let overlap = old.total != 0 && repeat_until(mask.word_slot(last) - start + 1, false, fn(on) => on, fn(i) => fn(on) =>
+        word_and(old.words.at_or(start + i, 0), mask.span_bits(start + i, first, last)) != 0);
+    if overlap {
+        return Literal { ..old, issue: "A selection mask repeats a pixel" };
+    }
+    return Literal { words: mask.fill(old.words, first, last), total: old.total + n, issue: "" };
 }
 
-fn literal(g: mask.Grid, raw: json.Json) -> Choice {
+fn literal_error() -> String { return "A pixel mask needs a list of native coordinates"; }
+
+fn initial_literal(g: mask.Grid) -> Literal { return Literal { words: mask.blank(g), total: 0, issue: "" }; }
+
+fn finish_literal(raster: Literal, expected: u32) -> Choice {
+    if raster.issue != "" { return bad(raster.issue); }
+    if raster.total != expected { return bad(literal_error()); }
+    return chosen(raster.words.freeze());
+}
+
+fn packed_literal(input: Inputs, pointer: json.Json) -> Choice {
+    let runs = input.runs.at_or(word(pointer) - 1, []);
+    let n = length(runs);
+    let expected = runs.at_or(0, 4294967295);
+    if expected > mask.size(input.grid) || rem_or(n, 2, 0) != 1 { return bad(literal_error()); }
+    if n == 3 && expected == mask.size(input.grid) && runs.at_or(1, 4294967295) == 0 &&
+        runs.at_or(2, 0) == expected { return chosen(mask.full(input.grid)); }
+    let raster = repeat_until(quot_or(n, 2, 0), initial_literal(input.grid),
+        fn(old) => old.issue != "", fn(i) => fn(old) =>
+        add_run(input.grid, runs.at_or(2 * i + 1, 4294967295), runs.at_or(2 * i + 2, 0), old));
+    return finish_literal(raster, expected);
+}
+
+fn literal(input: Inputs, raw: json.Json) -> Choice {
+    if input.packed { return packed_literal(input, raw); }
+    let g = input.grid;
     let has_pixels = json.elements(raw).fold(fn(values) => length(values) <= mask.size(g), fn(reason) => false);
-    if !has_pixels { return bad("A pixel mask needs a list of native coordinates"); }
+    if !has_pixels { return bad(literal_error()); }
     let coords = points(items(raw), g);
-    if !in_grid(coords, g) { return bad("A selection pixel is outside the native grid"); }
-    if has_duplicate(coords.map(fn(p) => mask.index(g, p)).sort()) { return bad("A selection mask repeats a pixel"); }
-    return chosen(mask.literal(g, coords));
+    let raster = foldl(coords, initial_literal(g), fn(p) => fn(old) =>
+        add_run(g, if inside(p, g) { mask.index(g, p) } else { 4294967295 }, 1, old));
+    return finish_literal(raster, length(coords));
 }
 
 fn recall(input: Inputs, query: List<json.Member>) -> Choice {
     let id = field(query, "id");
     if !allowed(query, ["id"]) || !is_text(id) { return bad("Recall needs a saved selection ID"); }
-    return json.lookup(input.saved, text(id)).fold(fn(raw) => literal(input.grid, raw),
+    return json.lookup(input.saved, text(id)).fold(fn(raw) => literal(input, raw),
         fn(unit) => bad(string_concat("Unknown saved selection ", text(id))));
 }
 
@@ -124,11 +190,11 @@ fn wand(input: Inputs, query: List<json.Member>) -> Choice {
 
 fn leaf(input: Inputs, operation: String, query: List<json.Member>) -> Choice {
     if operation == "rectangle" || operation == "ellipse" { return marquee(input.grid, query, operation == "ellipse"); }
-    if operation == "lasso" || operation == "polygon" { return lasso(input.grid, query, operation == "polygon"); }
+    if operation == "lasso" || operation == "polygon" { return lasso(input, query, operation == "polygon"); }
     if operation == "wand" { return wand(input, query); }
     if operation == "recall" { return recall(input, query); }
     if operation == "pixels" {
-        return if allowed(query, ["pixels"]) { literal(input.grid, field(query, "pixels")) }
+        return if allowed(query, ["pixels"]) { literal(input, field(query, "pixels")) }
             else { bad("A literal selection needs native pixels") };
     }
     if operation == "swatch" || operation == "binding" || operation == "object" || operation == "part" ||
@@ -209,16 +275,18 @@ fn step(input: Inputs, old: Run) -> Run {
     return publish(Run { ..run, values: run.values.pop() }, apply(input.grid, job, last));
 }
 
-fn select(width: u32, height: u32, query: List<json.Json>, rgba: List<u32>, saved: json.Json) -> Result<List<u32>, String> {
-    if width == 0 || height == 0 || width > 512 || height > 512 {
-        return Err("Pixel selections need a canvas from 1 to 512 pixels on each axis");
+fn select(width: u32, height: u32, query: List<json.Json>, rgba: List<u32>, saved: json.Json,
+    runs: List<List<u32>>, packed: Bool, large: Bool) -> Result<List<u32>, String> {
+    let limit: u32 = if large { 8192 } else { 512 };
+    if width == 0 || height == 0 || width > limit || height > limit || width * height > 16777216 {
+        return Err(if large { "Selection exceeds the material canvas budget" }
+            else { "Pixel selections need a canvas from 1 to 512 pixels on each axis" });
     }
-    let input = Inputs { grid: mask.Grid { width: width, height: height }, nodes: query, rgba: rgba, saved: members(saved) };
+    let input = Inputs { grid: mask.Grid { width: width, height: height }, nodes: query, rgba: rgba,
+        saved: members(saved), runs: runs, packed: packed };
     let run = Run { pending: buffer([node(query.at_or(0, json.null()))]), values: Buffer.empty(), count: 0, issue: "" };
     let result = repeat_until(65, run, fn(run) => run.issue != "" || run.pending.len() == 0,
         fn(i) => fn(run) => step(input, run));
     if result.issue != "" { return Err(result.issue); }
-    let selected = result.values.at_or(0, []);
-    let pixels = selected.map_indexed(fn(i) => fn(on) => if on == 0 { 4294967295 } else { i });
-    return Ok(pixels.filter(fn(i) => i != 4294967295));
+    return Ok(result.values.at_or(0, []));
 }

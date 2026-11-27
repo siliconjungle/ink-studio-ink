@@ -2,6 +2,7 @@ module StudioPixelDocument;
 
 import "std:json" as json;
 import "pixel_selection.ink" as selection;
+import "pixel_mask.ink" as mask;
 
 record Layer { id: String, kind: String, parent: String, }
 record Cel { id: String, hold: String, }
@@ -14,7 +15,13 @@ record LabelScan { offset: u32, visible: Bool, }
 record Opened { document: json.Json, legacy: Bool, }
 
 pub fn select_pixel_indices(query: List<json.Json>, width: u32, height: u32, rgba: List<u32>, saved: json.Json) -> Result<List<u32>, String> {
-    return selection.select(width, height, query, rgba, saved);
+    let selected = selection.select(width, height, query, rgba, saved, [], false, false)?;
+    return Ok(mask.indices(selected));
+}
+
+pub fn select_pixel_words(query: List<json.Json>, width: u32, height: u32, rgba: List<u32>, saved: json.Json,
+    literal_runs: List<List<u32>>, large: Bool) -> Result<List<u32>, String> {
+    return selection.select(width, height, query, rgba, saved, literal_runs, true, large);
 }
 
 // Assemble the standard JSON value from already parsed native components.
