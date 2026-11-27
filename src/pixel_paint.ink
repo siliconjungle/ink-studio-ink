@@ -1,133 +1,66 @@
 module StudioPixelPaint;
 
 import "std:json" as json;
+import "pixel_drawing_grid.ink" as drawing;
 import "pixel_frame.ink" as frame;
 import "pixel_mask.ink" as mask;
 import "pixel_selection.ink" as selection;
+import "pixel_shapes.ink" as shape;
 import "pixel_values.ink" as value;
 
-record Point { x: i32, y: i32, }
-record Axis { size: i32, mirror: i32, wrap: Bool, }
-record Drawing { grid: mask.Grid, x: Axis, y: Axis, }
 record Tool { kind: String, swatch: String, slot: i32, perfect: Bool, selection: Option<String>,
-    drawing: Drawing, points: List<Point>, }
+    drawing: drawing.Drawing, points: List<drawing.Point>, geometry: json.Json, }
 record Constraint { limited: Bool, words: List<u32>, }
 record Guard { drawn: frame.PaintView, protected: List<u32>, selected: Constraint, }
-record Stroke { words: Buffer<u32>, previous: Point, tip: Point, issue: String, }
-record Pen { position: Point, dx: i32, dy: i32, sx: i32, sy: i32, error: i32, }
-record Segment { pen: Pen, stroke: Stroke, }
+record Stroke { words: Buffer<u32>, previous: drawing.Point, tip: drawing.Point, issue: String, }
+record Segment { pen: drawing.Pen, stroke: Stroke, }
 record Runs { spans: Buffer<Vec3<u32>>, y: u32, x: u32, length: u32, }
 record Report { frame: String, layer: String, cel: String, tool: String, pixelCount: u32,
-    runs: List<Vec3<u32>>, pixelPerfect: Bool, selection: Option<String>, }
+    runs: List<Vec3<u32>>, pixelPerfect: Bool, selection: Option<String>, shape: Option<String>, }
 record Detail { id: String, kind: String, first: u32, last: u32, sites: List<u32>, }
 record Details { rows: Buffer<Detail>, issue: String, }
 record Edit { document: json.Json, artwork: frame.Artwork, report: Report,
     scope: frame.Scope, image: selection.Image, }
 
-fn signed(n: u32) -> i32 { return i32_from_f64(f64_from_u32(n)).fold(fn(x) => x, fn(unit) => 0); }
-fn unsigned(n: i32) -> u32 { return value.as_word(f64_from_i32(n)); }
-fn absent() -> Point { return Point { x: -30000, y: -30000 }; }
-fn abs(n: i32) -> i32 { return if n < 0 { -n } else { n }; }
-fn sign(n: i32) -> i32 { return if n < 0 { -1 } else { if n > 0 { 1 } else { 0 } }; }
-
-fn axis(size: u32, raw: json.Json, wrap: Bool, has_mirror: Bool) -> Axis {
-    if !has_mirror { return Axis { size: signed(size), mirror: -2, wrap: wrap }; }
-    let n = value.number(raw) * 2.0f64;
-    let valid = n == trunc(n) && n >= -1.0f64 && n <= f64_from_u32(size * 2 - 1);
-    let mirror = if valid { i32_from_f64(n).fold(fn(p) => p, fn(unit) => -3) } else { -3 };
-    return Axis { size: signed(size), mirror: mirror, wrap: wrap };
-}
-
-fn bool_field(items: List<json.Member>, key: String) -> Bool {
-    return json.lookup(items, key).fold(fn(v) => json.as_boolean(v).fold(fn(b) => true, fn(issue) => false), fn(unit) => true);
-}
-
-fn drawing(g: mask.Grid, items: List<json.Member>) -> Result<Drawing, String> {
-    let options: Result<List<json.Member>, String> = json.lookup(items, "drawing").fold(fn(v) =>
-        json.members(v).fold(fn(rows) => Ok(rows), fn(issue) => Err("Drawing grid accepts mirrorX, mirrorY, wrapX and wrapY")),
-        fn(unit) => Ok([]));
-    let raw = options?;
-    if !value.only(raw, ["mirrorX", "mirrorY", "wrapX", "wrapY"]) {
-        return Err("Drawing grid accepts mirrorX, mirrorY, wrapX and wrapY");
-    }
-    let x = axis(g.width, value.get(raw, "mirrorX"), value.flag(raw, "wrapX", false), value.has(raw, "mirrorX"));
-    let y = axis(g.height, value.get(raw, "mirrorY"), value.flag(raw, "wrapY", false), value.has(raw, "mirrorY"));
-    if x.mirror == -3 || y.mirror == -3 || !bool_field(raw, "wrapX") || !bool_field(raw, "wrapY") {
-        return Err("Mirror axes need pixel or half-pixel positions on the canvas. Wrap flags must be boolean.");
-    }
-    return Ok(Drawing { grid: g, x: x, y: y });
-}
-
-fn drawing_coordinate(raw: json.Json, d: Axis) -> i32 {
-    let lo: i32 = if d.wrap { -d.size } else { 0 };
-    let hi: i32 = if d.wrap { 2 * d.size - 1 } else { d.size - 1 };
-    return value.integer(raw, lo, hi).fold(fn(x) => x, fn(u) => -30000);
-}
-
-fn point(raw: json.Json, grid: Drawing) -> Point {
-    let xy = value.items(raw);
-    if length(xy) != 2 { return absent(); }
-    let x = drawing_coordinate(xy.at_or(0, json.null()), grid.x);
-    let y = drawing_coordinate(xy.at_or(1, json.null()), grid.y);
-    return Point { x: x, y: y };
-}
-
-fn normalize(n: i32, axis: Axis) -> i32 {
-    if !axis.wrap { return if n < 0 || n >= axis.size { -1 } else { n }; }
-    let nonnegative = n + 3 * axis.size;
-    return signed(rem_or(unsigned(nonnegative), unsigned(axis.size), 0));
-}
-
-fn position(g: mask.Grid, x: i32, y: i32) -> u32 {
-    return if x < 0 || y < 0 { 4294967295 } else { unsigned(y) * g.width + unsigned(x) };
-}
-
-// Keep the original visitation order so the first rejected mirror is stable.
-fn copies(grid: Drawing, p: Point) -> List<u32> {
-    let a = normalize(p.x, grid.x);
-    let b = normalize(p.y, grid.y);
-    let c = if grid.x.mirror == -2 { -1 } else { normalize(grid.x.mirror - p.x, grid.x) };
-    let d = if grid.y.mirror == -2 { -1 } else { normalize(grid.y.mirror - p.y, grid.y) };
-    return [position(grid.grid, a, b), if c != a { position(grid.grid, c, b) } else { 4294967295 },
-        if d != b { position(grid.grid, a, d) } else { 4294967295 },
-        if c != a && d != b { position(grid.grid, c, d) } else { 4294967295 }].filter(fn(i) => i != 4294967295);
-}
-
 fn decode(g: mask.Grid, ids: List<String>, items: List<json.Member>) -> Result<Tool, String> {
     let kind = value.text(value.get(items, "tool"));
-    if value.has(items, "pixelPerfect") && (kind != "pencil" || !bool_field(items, "pixelPerfect")) {
+    if value.has(items, "pixelPerfect") && (kind != "pencil" || !drawing.bool_field(items, "pixelPerfect")) {
         return Err("Pixel-perfect cleanup is a boolean pencil option");
     }
-    let grid = drawing(g, items)?;
+    let grid = drawing.drawing(g, items)?;
     return decode_points(grid, ids, kind, items);
 }
 
-fn decode_points(grid: Drawing, ids: List<String>, kind: String, items: List<json.Member>) -> Result<Tool, String> {
+fn decode_points(grid: drawing.Drawing, ids: List<String>, kind: String, items: List<json.Member>) -> Result<Tool, String> {
     let swatch = value.text(value.get(items, "swatch"));
     let slot: i32 = if kind == "eraser" { -1 } else { selection.find_swatch(ids, swatch) };
-    if !(kind == "pencil" || kind == "fill" || kind == "eraser") {
-        return Err("Choose a pencil, eraser or fill operation");
+    if !(kind == "pencil" || kind == "fill" || kind == "eraser" || kind == "shape") {
+        return Err("Paint tools need a known swatch or saved brush colors. Eraser clears the active layer.");
     }
     if if kind == "eraser" { value.has(items, "swatch") } else { slot < 0 } {
         return Err("Paint tools need a known swatch or saved brush colors. Eraser clears the active layer.");
     }
     if value.has(items, "brush") { return Err("A brush operation needs a saved brush"); }
     if value.has(items, "shading") { return Err("Brush shading needs a saved tip. Only recolor accepts a swatch override."); }
-    if value.has(items, "shape") { return Err("Put shape geometry in the shape operation"); }
+    let precise = kind == "shape";
+    if if precise { value.has(items, "at") || value.has(items, "points") } else { value.has(items, "shape") } {
+        return Err("Put shape geometry in the shape operation");
+    }
     if value.has(items, "samples") { return Err("Sampled brush motion replaces both at and points"); }
-    let points = read_points(grid, kind, items)?;
+    let decoded: Result<List<drawing.Point>, String> = if precise { Ok([]) } else { read_points(grid, kind, items) };
+    let points = decoded?;
     let selected: Option<String> = json.lookup(items, "selection").fold(fn(raw) => Some(value.text(raw)), fn(unit) => None);
     return Ok(Tool { kind: kind, swatch: swatch, slot: slot, perfect: value.flag(items, "pixelPerfect", false),
-        selection: selected, drawing: grid, points: points });
+        selection: selected, drawing: grid, points: points, geometry: value.get(items, "shape") });
 }
 
-fn read_points(grid: Drawing, kind: String, items: List<json.Member>) -> Result<List<Point>, String> {
+fn read_points(grid: drawing.Drawing, kind: String, items: List<json.Member>) -> Result<List<drawing.Point>, String> {
     let fill = kind == "fill";
     let points = if fill { [value.get(items, "at")] } else { value.items(value.get(items, "points")) };
     if (if fill { value.has(items, "points") } else { value.has(items, "at") || length(points) == 0 || length(points) > 4096 }) {
         return Err("Fill needs a seed pixel. Brush accepts one position or a path. Pencil and eraser need a path.");
     }
-    let decoded = points.map(fn(p) => point(p, grid));
+    let decoded = points.map(fn(p) => drawing.point(p, grid));
     if length(decoded.filter(fn(p) => p.x == -30000 || p.y == -30000)) != 0 {
         return Err("A paint tool needs points inside the native grid or its wrapping neighbors");
     }
@@ -141,13 +74,13 @@ fn writable(guard: Guard, p: u32) -> Bool {
         guard.drawn.captured.clipping.at_or(p, 255) != 0;
 }
 
-fn emit(tool: Tool, guard: Guard, p: Point, old: Stroke) -> Stroke {
+fn emit(tool: Tool, guard: Guard, p: drawing.Point, old: Stroke) -> Stroke {
     let grid = tool.drawing;
     if grid.x.mirror == -2 && grid.y.mirror == -2 {
-        let index = position(grid.grid, normalize(p.x, grid.x), normalize(p.y, grid.y));
+        let index = drawing.position(grid.grid, drawing.normalize(p.x, grid.x), drawing.normalize(p.y, grid.y));
         return plot(guard, tool.slot, index, old);
     }
-    return foldl(copies(tool.drawing, p), old, fn(index) => fn(stroke) =>
+    return foldl(drawing.copies(tool.drawing, p), old, fn(index) => fn(stroke) =>
         plot(guard, tool.slot, index, stroke));
 }
 
@@ -158,49 +91,50 @@ fn plot(guard: Guard, slot: i32, p: u32, stroke: Stroke) -> Stroke {
     return Stroke { ..stroke, words: mask.mark(stroke.words, p) };
 }
 
-fn corner(previous: Point, tip: Point, next: Point) -> Bool {
+fn corner(previous: drawing.Point, tip: drawing.Point, next: drawing.Point) -> Bool {
     if previous.x == -30000 { return false; }
     let x = tip.x - previous.x;
     let y = tip.y - previous.y;
     let u = next.x - tip.x;
     let v = next.y - tip.y;
-    return (abs(x) == 1 && y == 0 && u == 0 && abs(v) == 1) ||
-        (x == 0 && abs(y) == 1 && abs(u) == 1 && v == 0);
+    return (drawing.abs(x) == 1 && y == 0 && u == 0 && drawing.abs(v) == 1) ||
+        (x == 0 && drawing.abs(y) == 1 && drawing.abs(u) == 1 && v == 0);
 }
 
-fn join_point(tool: Tool, guard: Guard, next: Point, stroke: Stroke) -> Stroke {
+fn join_point(tool: Tool, guard: Guard, next: drawing.Point, stroke: Stroke) -> Stroke {
     if stroke.tip.x == -30000 { return Stroke { ..stroke, tip: next }; }
     let previous = stroke.tip;
-    let dx = abs(next.x - previous.x);
-    let dy = -abs(next.y - previous.y);
-    let pen = Pen { position: previous, dx: dx, dy: dy,
-        sx: sign(next.x - previous.x), sy: sign(next.y - previous.y), error: dx + dy };
+    let pen = drawing.segment(previous, next);
     let start = Segment { pen: pen, stroke: stroke };
-    let steps = unsigned(if dx > -dy { dx } else { -dy });
+    let steps = drawing.steps(previous, next);
     return repeat_until(steps, start, fn(state) => state.stroke.issue != "", fn(i) => fn(state) =>
         step_pen(tool, guard, state)).stroke;
 }
 
 fn step_pen(tool: Tool, guard: Guard, state: Segment) -> Segment {
-    let pen = state.pen;
-    let twice = pen.error * 2;
-    let x = twice >= pen.dy;
-    let y = twice <= pen.dx;
-    let next = Point { x: pen.position.x + (if x { pen.sx } else { 0 }),
-        y: pen.position.y + (if y { pen.sy } else { 0 }) };
+    let pen = drawing.advance(state.pen);
+    let next = pen.position;
     let stroke = state.stroke;
     let advanced = if tool.perfect && corner(stroke.previous, stroke.tip, next) { stroke }
         else { emit(tool, guard, stroke.tip, Stroke { ..stroke, previous: stroke.tip }) };
-    return Segment { pen: Pen { ..pen, position: next,
-        error: pen.error + (if x { pen.dy } else { 0 }) + (if y { pen.dx } else { 0 }) },
-        stroke: Stroke { ..advanced, tip: next } };
+    return Segment { pen: pen, stroke: Stroke { ..advanced, tip: next } };
 }
 
 fn stroke(tool: Tool, guard: Guard) -> Result<List<u32>, String> {
-    let init = Stroke { words: mask.blank(tool.drawing.grid), previous: absent(), tip: absent(), issue: "" };
+    let init = Stroke { words: mask.blank(tool.drawing.grid), previous: drawing.absent(), tip: drawing.absent(), issue: "" };
     let path = foldl(tool.points, init, fn(p) => fn(old) =>
         if old.issue != "" { old } else { join_point(tool, guard, p, old) });
     let traced = emit(tool, guard, path.tip, path);
+    if traced.issue != "" { return Err(traced.issue); }
+    return Ok(traced.words.freeze());
+}
+
+fn paint_mask(tool: Tool, guard: Guard) -> Result<List<u32>, String> {
+    if tool.kind == "fill" { return fill(tool, guard); }
+    if tool.kind != "shape" { return stroke(tool, guard); }
+    let coverage = shape.coverage(tool.drawing, tool.geometry)?;
+    let init = Stroke { words: mask.blank(tool.drawing.grid), previous: drawing.absent(), tip: drawing.absent(), issue: "" };
+    let traced = foldl(mask.indices(coverage), init, fn(p) => fn(out) => plot(guard, tool.slot, p, out));
     if traced.issue != "" { return Err(traced.issue); }
     return Ok(traced.words.freeze());
 }
@@ -210,7 +144,7 @@ fn seed_status(seeds: List<u32>, guard: Guard) -> Bool {
 }
 
 fn fill(tool: Tool, guard: Guard) -> Result<List<u32>, String> {
-    let seeds = copies(tool.drawing, tool.points.at_or(0, absent()));
+    let seeds = drawing.copies(tool.drawing, tool.points.at_or(0, drawing.absent()));
     if !seed_status(seeds, guard) { return Err("Paint tool cannot change this pixel"); }
     let grid = tool.drawing.grid;
     return Ok(foldl(seeds, mask.blank(grid).freeze(), fn(seed) => fn(old) => fill_seed(tool, guard, seed, old)));
@@ -422,12 +356,12 @@ fn number(n: u32) -> String {
 }
 
 fn local_run(g: mask.Grid, p: frame.Placement, span: Vec3<u32>) -> Result<Vec3<u32>, String> {
-    let x = signed(span.y) - p.x;
-    let y = signed(span.x) - p.y;
-    if x < 0 || y < 0 || x + signed(span.z) > signed(g.width) || y >= signed(g.height) {
+    let x = drawing.signed(span.y) - p.x;
+    let y = drawing.signed(span.x) - p.y;
+    if x < 0 || y < 0 || x + drawing.signed(span.z) > drawing.signed(g.width) || y >= drawing.signed(g.height) {
         return Err("Edit lies outside the shifted cel grid");
     }
-    return Ok(vec3(unsigned(y), unsigned(x), span.z));
+    return Ok(vec3(drawing.unsigned(y), drawing.unsigned(x), span.z));
 }
 
 fn is_valid_run(span: Result<Vec3<u32>, String>) -> Bool {
@@ -532,11 +466,12 @@ fn paint_target(source: json.Json, art: frame.Artwork, named: selection.Named, s
     let issue = gap_issue(art.grid, active, drawn.pixels);
     if issue != "" { return Err(issue); }
     let guard = Guard { drawn: drawn, protected: locked_pixels(art.grid, active), selected: limit };
-    let delta: Result<List<u32>, String> = if tool.kind == "fill" { fill(tool, guard) } else { stroke(tool, guard) };
+    let delta = paint_mask(tool, guard);
     let changed = delta?;
     let sites = mask.indices(changed);
     let report = Report { frame: scope.frame, layer: scope.layer, cel: choose_cel(art, scope), tool: tool.kind,
-        pixelCount: length(sites), runs: runs(art.grid, sites), pixelPerfect: tool.perfect, selection: tool.selection };
+        pixelCount: length(sites), runs: runs(art.grid, sites), pixelPerfect: tool.perfect, selection: tool.selection,
+        shape: if tool.kind == "shape" { Some(shape.kind(tool.geometry)) } else { None } };
     if report.pixelCount == 0 {
         return Ok(Edit { document: json.null(), artwork: frame.empty_artwork(), report: report, scope: cached,
             image: selection.Image { rgba: [], palette: mask.no_palette() } });

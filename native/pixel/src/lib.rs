@@ -511,6 +511,8 @@ pub struct RasterPaintReport {
     #[serde(skip_serializing_if = "is_false")]
     pub pixel_perfect: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub selection: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drawing: Option<serde_json::Value>,
@@ -595,6 +597,7 @@ impl PixelEditor {
             pixel_count: report.l_pixelCount,
             runs: report.l_runs,
             pixel_perfect: report.l_pixelPerfect,
+            shape: report.l_shape,
             selection: report.l_selection,
             drawing,
         })

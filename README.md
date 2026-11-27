@@ -78,7 +78,9 @@ cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- artwork.
 
 Use `{ type: 'recall', id }` to resolve a document's saved selection. An unscoped top-level recall selects its saved frame. Recalls within a composed query use the active frame.
 
-`editor.paint(operation, { frame, cel })` applies pencil, eraser and fill operations to the open document and returns the changed runs. Pass the layer in the operation or select a cel in the scope. Operations support the original named selection constraints, pixel-perfect pencil paths, mirror axes and wrapping. `editor.snapshot()` returns the edited pixel document and preserves author order in saved masks. The native library supports `PixelEditor::paint` and `snapshot`. Its `paint-document` command takes `document`, `operation`, and optional `frame` and `cel`, and returns the target report and updated document.
+`editor.paint(operation, { frame, cel })` applies pencil, eraser, fill and shape operations to the open document and returns the changed runs. Pass the layer in the operation or select a cel in the scope. Operations support the original named selection constraints, pixel-perfect pencil paths, mirror axes and wrapping. `editor.snapshot()` returns the edited pixel document and preserves author order in saved masks. The native library supports `PixelEditor::paint` and `snapshot`. Its `paint-document` command takes `document`, `operation`, and optional `frame` and `cel`, and returns the target report and updated document.
+
+Set `tool: 'shape'` and pass `shape: { type, ...geometry }` for lines, quadratic or cubic curves, rectangles, ellipses, polygons, bitmap text and staircases. Filled shapes and outline widths follow the native pixel grid. Text supports individual scale, tracking, leading, alignment and column wrapping. Shapes honor the same named selections, protection, clipping, mirror axes and wrapping as other raster tools.
 
 `raster` and `select-document` are the native equivalents. Their JSON request contains `document` and optional `frame`, `layer` or `cel`. Add `query` for `select-document`.
 

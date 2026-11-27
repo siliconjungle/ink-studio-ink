@@ -54,10 +54,11 @@ export function createPixelEditor(source) {
   }
   function paint(operation, { frame, cel } = {}) {
     const result = unwrap(draw(codec.fromJS(operation), option(frame), option(cel)));
-    const { pixelPerfect, selection, ...target } = result;
+    const { pixelPerfect, selection, shape, ...target } = result;
     const drawing = ownData(operation, 'drawing');
     return { destination: 'raster', kind: 'raster', ...target,
-      ...(pixelPerfect && { pixelPerfect }), ...(Object.hasOwn(selection, 'Some') && { selection: selection.Some }),
+      ...(pixelPerfect && { pixelPerfect }), ...(Object.hasOwn(shape, 'Some') && { shape: shape.Some }),
+      ...(Object.hasOwn(selection, 'Some') && { selection: selection.Some }),
       ...(drawing !== undefined && { drawing: structuredClone(drawing) }) };
   }
   function snapshot() {
