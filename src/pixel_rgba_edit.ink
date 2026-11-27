@@ -4,13 +4,14 @@ import "pixel_brush.ink" as brush;
 import "pixel_brush_paint.ink" as brush_paint;
 import "pixel_drawing_grid.ink" as grid;
 import "pixel_frame.ink" as frame;
+import "pixel_fault.ink" as fault;
 import "pixel_mask.ink" as mask;
 
 record Write { pixel: u32, slot: i32, alpha: u32, }
 record ResultWrites { writes: List<Write>, added: List<brush.Swatch>, }
 record Palette { rows: List<brush.Swatch>, by_rgb: Map<u32, i32>, added: List<brush.Swatch>, }
 record Target { g: mask.Grid, view: frame.PaintView, protected: List<u32>, }
-record Work { visited: Buffer<u32>, writes: Buffer<Write>, palette: Palette, issue: String, }
+record Work { visited: Buffer<u32>, writes: Buffer<Write>, palette: Palette, issue: String, hit: u32, }
 record Swatch { slot: i32, palette: Palette, issue: String, }
 
 fn new_palette(art: frame.Artwork) -> Palette {
@@ -69,7 +70,7 @@ fn apply_write(target: Target, p: u32, slot: i32, alpha: u32, old: Work) -> Work
     let prior = target.view.captured.slots.at_or(p, -1);
     let byte = target.view.captured.alpha.at_or(p, 255);
     if slot == prior && (slot < 0 || alpha == byte) { return old; }
-    if !frame.can_paint(target.view, target.protected, p) { return Work { ..old, issue: "RGBA edit cannot change this pixel" }; }
+    if !frame.can_paint(target.view, target.protected, p) { return Work { ..old, issue: "RGBA edit cannot change this pixel", hit: p }; }
     return Work { ..old, writes: old.writes.push(Write { pixel: p, slot: slot, alpha: alpha }) };
 }
 
@@ -91,13 +92,16 @@ fn visit(target: Target, encoded: u32, rgba: u32, name: u32, names: List<String>
     return apply_write(target, p, next.slot, word_and(rgba, 255), staged);
 }
 
-fn plan(art: frame.Artwork, view: frame.PaintView, protected: List<u32>, rows: List<u32>, names: List<String>) -> Result<ResultWrites, String> {
+fn plan(art: frame.Artwork, view: frame.PaintView, protected: List<u32>, rows: List<u32>, names: List<String>, layer: String) -> Result<ResultWrites, fault.Fault> {
     let target = Target { g: art.grid, view: view, protected: protected };
-    let initial = Work { visited: mask.blank(target.g), writes: Buffer.empty(), palette: new_palette(art), issue: "" };
+    let initial = Work { visited: mask.blank(target.g), writes: Buffer.empty(), palette: new_palette(art), issue: "", hit: 4294967295 };
     let visited = repeat_until(quot_or(length(rows), 3, 0), initial, fn(out) => out.issue != "",
         fn(i) => fn(out) => visit(target, rows.at_or(i * 3, 4294967295), rows.at_or(i * 3 + 1, 0),
             rows.at_or(i * 3 + 2, 4294967295), names, out));
-    if visited.issue != "" { return Err(visited.issue); }
+    if visited.hit != 4294967295 {
+        return Err(fault.blocked(art.grid, view, protected, layer, visited.hit, visited.issue));
+    }
+    if visited.issue != "" { return Err(fault.invalid(visited.issue)); }
     return Ok(ResultWrites { writes: visited.writes.freeze(), added: visited.palette.added });
 }
 

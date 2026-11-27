@@ -6,8 +6,10 @@ import "pixel_mask.ink" as mask;
 import "pixel_labels.ink" as labels;
 import "pixel_frame.ink" as frame_raster;
 import "pixel_paint.ink" as paint;
+import "pixel_fault.ink" as fault;
 import "pixel_brush_capture.ink" as brushes;
 import "pixel_transform.ink" as transforms;
+import "pixel_history.ink" as history;
 
 record Layer { id: String, kind: String, parent: String, }
 record Cel { id: String, hold: String, }
@@ -274,13 +276,6 @@ fn frame_structure(frame: json.Json, layers: List<Layer>) -> Result<Frame, Strin
     return Ok(Frame { id: id, duration: ms, cels: cels });
 }
 
-// The hash selects a bucket. Exact names decide identity, including on collision.
-fn id_hash(name: String) -> u64 {
-    let size = string_byte_len(name);
-    return repeat_until(size, 14695981039346656037, fn(hash) => false, fn(i) => fn(hash) =>
-        (hash ^ word_widen_u32_to_u64(byte(name, i))) * 1099511628211);
-}
-
 fn find_slot(bucket: List<Identifier>, name: String) -> u32 {
     return foldl(bucket, 0, fn(row) => fn(slot) => if row.name == name { row.slot } else { slot });
 }
@@ -291,7 +286,7 @@ fn index_names(names: List<String>) -> NameIndex {
     var slot: u32 = 1;
     for name in names {
         if duplicate == "" {
-            let key = id_hash(name);
+            let key = labels.id_hash(name);
             let bucket = buckets.get_or(key, []);
             if find_slot(bucket, name) != 0 { duplicate = name; }
             else { buckets = buckets.set(key, bucket.concat([Identifier { name: name, slot: slot }])); }
@@ -327,7 +322,7 @@ fn validate_holds(cels: List<Cel>) -> Result<Unit, String> {
     if index.duplicate != "" { return Err(string_concat("Duplicate pixel cel ID ", index.duplicate)); }
     var targets: Buffer<u32> = Buffer.empty();
     for cel in cels {
-        let found = if cel.hold == "" { 0 } else { find_slot(index.buckets.get_or(id_hash(cel.hold), []), cel.hold) };
+        let found = if cel.hold == "" { 0 } else { find_slot(index.buckets.get_or(labels.id_hash(cel.hold), []), cel.hold) };
         let slot = if cel.hold != "" && found == 0 { 4294967295 } else { found };
         targets = targets.push(slot);
     }
@@ -433,7 +428,8 @@ record NamedPixels { seen: Buffer<u32>, indices: Buffer<u32>, packed: Bool, issu
 state EditorArtwork: frame_raster.Artwork = frame_raster.empty_artwork();
 state EditorNamed: selection.Named = selection.no_named();
 state EditorScope: frame_raster.Scope = frame_raster.Scope { frame: "", layer: "" };
-state EditorImage: selection.Image = empty_editor_image();
+state EditorImage: Option<selection.Image> = None;
+state EditorPaint: paint.CachedView = paint.empty_cache();
 state EditorSource: json.Json = json.null();
 state EditorPositions: List<List<u32>> = [];
 
@@ -472,7 +468,7 @@ fn add_named(raw: json.Json, positions: List<u32>, g: mask.Grid, frames: List<St
         (has(items, "frame") && !frame_raster.known_frame(frames, frame)) {
         return NamedBuild { ..old, issue: error };
     }
-    let key = id_hash(name);
+    let key = labels.id_hash(name);
     let bucket = old.seen.get_or(key, []);
     if selection.named_slot(bucket, name) != 4294967295 { return NamedBuild { ..old, issue: error }; }
     let points: Result<List<json.Json>, String> = json.elements(field(items, "pixels")).fold(fn(values) => Ok(values), fn(reason) => Err(error));
@@ -561,13 +557,14 @@ fn editor_selection(g: mask.Grid, scope: frame_raster.Scope, image: selection.Im
 fn first_query(query: List<json.Json>) -> json.Json { return query.at_or(0, json.null()); }
 
 change load_pixel_editor(document: json.Json, positions: List<List<u32>>) -> Result<mask.Grid, String>
-    writes(EditorArtwork, EditorNamed, EditorScope, EditorImage, EditorSource, EditorPositions) {
+    writes(EditorArtwork, EditorNamed, EditorScope, EditorImage, EditorPaint, EditorSource, EditorPositions) {
     let prepared = prepare_editor(document, positions)?;
     let grid = prepared.artwork.grid;
     EditorArtwork = prepared.artwork;
     EditorNamed = prepared.named;
     EditorScope = frame_raster.Scope { frame: "", layer: "" };
-    EditorImage = empty_editor_image();
+    EditorImage = None;
+    EditorPaint = paint.empty_cache();
     EditorSource = prepared.source;
     EditorPositions = positions;
     return Ok(grid);
@@ -578,17 +575,17 @@ query snapshot_pixel_editor() -> EditorSnapshot reads(EditorSource, EditorArtwor
     return EditorSnapshot { document: snapshot.source, positions: EditorPositions, edits: snapshot.edits };
 }
 
-change paint_pixel_editor(operation: json.Json, slots: List<i32>, alpha: List<u32>, pixels: List<u32>, names: List<String>, frame: Option<String>, cel: Option<String>) -> Result<paint.Report, String>
-    reads(EditorSource, EditorArtwork, EditorNamed, EditorScope, EditorPositions)
-    writes(EditorSource, EditorArtwork, EditorScope, EditorImage, EditorNamed, EditorPositions) {
+change paint_pixel_editor(operation: json.Json, slots: List<i32>, alpha: List<u32>, pixels: List<u32>, names: List<String>, frame: Option<String>, cel: Option<String>) -> Result<paint.Report, fault.Fault>
+    reads(EditorSource, EditorArtwork, EditorNamed, EditorPositions, EditorPaint)
+    writes(EditorSource, EditorArtwork, EditorImage, EditorNamed, EditorPositions, EditorPaint) {
     let rgba = paint.RgbaInput { pixels: pixels, names: names };
     let clipboard = transforms.PackedClip { slots: slots, alpha: alpha };
-    let edit = paint.paint(EditorSource, EditorArtwork, EditorNamed, operation, clipboard, rgba, frame, cel, EditorScope)?;
+    let edit = paint.paint(EditorSource, EditorArtwork, EditorNamed, operation, clipboard, rgba, frame, cel, EditorPositions, EditorPaint)?;
     let grid = frame_raster.artwork_grid(EditorArtwork);
     if edit.report.pixelCount != 0 {
         EditorArtwork = edit.artwork;
-        EditorScope = edit.scope;
-        EditorImage = edit.image;
+        EditorImage = None;
+        EditorPaint = edit.cache;
     }
     let mask_id = edit.result_mask.fold(fn(row) => row.id, fn(unit) => "");
     if edit.document != json.null() { EditorSource = edit.document; }
@@ -604,16 +601,27 @@ change paint_pixel_editor(operation: json.Json, slots: List<i32>, alpha: List<u3
     return Ok(edit.report);
 }
 
+fn select_cached(g: mask.Grid, scope: frame_raster.Scope, image: Option<selection.Image>,
+    named: selection.Named, query: List<json.Json>, saved: json.Json, runs: List<List<u32>>) -> Result<EditorSelection, String> {
+    return image.fold(fn(found) => editor_selection(g, scope, found, named, query, saved, runs),
+        fn(unit) => Err("Missing the active pixel selection raster"));
+}
+
+fn image_ready(image: Option<selection.Image>) -> Bool {
+    return image.fold(fn(row) => true, fn(unit) => false);
+}
+
 change select_pixel_editor(query: List<json.Json>, saved: json.Json, runs: List<List<u32>>,
     frame: Option<String>, layer: Option<String>, cel: Option<String>) -> Result<EditorSelection, String>
-    reads(EditorArtwork, EditorNamed, EditorScope, EditorImage) writes(EditorScope, EditorImage) {
+    reads(EditorArtwork, EditorNamed, EditorScope, EditorImage, EditorPaint) writes(EditorScope, EditorImage) {
     let scope = resolve_editor_scope(EditorArtwork, EditorNamed, first_query(query), saved, frame, layer, cel)?;
-    if scope != EditorScope {
-        let raster = frame_raster.raster(EditorArtwork, scope)?;
+    if scope != EditorScope || !image_ready(EditorImage) {
+        let selected = paint.selection_image(EditorArtwork, EditorPaint, scope)?;
         EditorScope = scope;
-        EditorImage = raster.image;
+        EditorImage = Some(selected);
     }
-    return editor_selection(frame_raster.artwork_grid(EditorArtwork), scope, EditorImage, EditorNamed, query, saved, runs);
+    return select_cached(frame_raster.artwork_grid(EditorArtwork), scope, EditorImage,
+        EditorNamed, query, saved, runs);
 }
 
 query capture_pixel_editor_brush(options: json.Json, pixels: List<u32>) -> Result<brushes.Capture, String> reads(EditorArtwork, EditorNamed) {
@@ -667,14 +675,15 @@ fn save_mask_options(raw: json.Json) -> Result<List<json.Member>, String> {
 
 change save_pixel_editor_selection(operation: json.Json, query: List<json.Json>, runs: List<List<u32>>,
     frame: Option<String>) -> Result<SavedSelectionReport, String>
-    reads(EditorArtwork, EditorNamed, EditorScope, EditorImage, EditorSource, EditorPositions)
+    reads(EditorArtwork, EditorNamed, EditorScope, EditorImage, EditorPaint, EditorSource, EditorPositions)
     writes(EditorNamed, EditorSource, EditorPositions) {
     let spec = save_mask_options(operation)?;
     let layer = json.lookup(spec, "layer").fold(fn(raw) => Some(recall_label(raw)), fn(unit) => None);
     let cel = json.lookup(spec, "cel").fold(fn(raw) => Some(recall_label(raw)), fn(unit) => None);
     let scope = frame_raster.resolve(EditorArtwork, frame, layer, cel)?;
-    let prepared: Result<selection.Image, String> = if scope == EditorScope { Ok(EditorImage) }
-        else { frame_raster.raster(EditorArtwork, scope).fold(fn(result) => Ok(result.image), fn(issue) => Err(issue)) };
+    let prepared: Result<selection.Image, String> = if scope == EditorScope && image_ready(EditorImage) {
+        Ok(EditorImage.unwrap_or(empty_editor_image()))
+    } else { paint.selection_image(EditorArtwork, EditorPaint, scope) };
     let image = prepared?;
     let g = frame_raster.artwork_grid(EditorArtwork);
     let chosen = editor_selection(g, scope, image, EditorNamed, query, json.object([]), runs)?;
@@ -689,4 +698,132 @@ change save_pixel_editor_selection(operation: json.Json, query: List<json.Json>,
     EditorNamed = saved.named;
     EditorPositions = saved.positions;
     return Ok(saved.report);
+}
+
+
+state JournalCursor: history.Cursor = history.empty_cursor();
+state JournalDraft: history.Entry = history.empty_entry();
+state JournalPast: List<history.Entry> = [];
+state JournalFuture: List<history.Entry> = [];
+state JournalLimit: u32 = 100;
+state JournalSerial: u32 = 0;
+state JournalEditCels: List<frame_raster.Cel> = [];
+state JournalVersions: Table<u32, history.Edition> = Table.empty();
+
+change start_pixel_journal(revision: String, legacy: String, limit: u32) -> Result<Unit, String>
+    reads(JournalCursor) writes(JournalCursor, JournalLimit) {
+    if JournalCursor.revision != "" { return Err("Pixel edit history is already initialized"); }
+    JournalCursor = history.Cursor { revision: revision, legacy: legacy, receipt: 0 };
+    JournalLimit = limit;
+    return Ok(());
+}
+
+query pixel_journal() -> history.View reads(JournalCursor, JournalDraft, JournalPast, JournalFuture) {
+    return history.view(JournalCursor, JournalDraft, JournalPast, JournalFuture);
+}
+
+change begin_pixel_edit(label: String) -> Result<Unit, String>
+    reads(JournalCursor, JournalDraft, JournalSerial, EditorSource, EditorArtwork, EditorNamed, EditorPositions)
+    writes(JournalDraft, JournalSerial, JournalVersions) {
+    if JournalDraft.id != 0 { return Err("A document transaction is already active"); }
+    if JournalSerial == 4294967295 { return Err("Pixel edit history has reached its version limit"); }
+    let id = JournalSerial + 1;
+    let saved = history.Edition { authored: EditorSource, art: EditorArtwork, named: EditorNamed,
+        positions: EditorPositions, cursor: JournalCursor };
+    JournalVersions.put(id, saved);
+    JournalDraft = history.Entry { id: id, label: if label == "" { "Edit" } else { label },
+        receipt: JournalCursor.receipt };
+    JournalSerial = id;
+    return Ok(());
+}
+
+query resolve_pixel_edit(patch: json.Json) -> history.Command reads(EditorSource, EditorArtwork, JournalCursor) {
+    return history.resolve(EditorSource, EditorArtwork, JournalCursor, patch);
+}
+
+change observe_pixel_edit() -> Unit reads(EditorArtwork) writes(JournalEditCels) {
+    JournalEditCels = history.affected_cels(EditorArtwork);
+    return ();
+}
+
+query pixel_edit_links() -> Option<history.Links> reads(JournalEditCels, EditorArtwork) {
+    return history.links(JournalEditCels, EditorArtwork.cels);
+}
+
+change accept_pixel_edit(revision: String, receipt: u32) -> Result<Unit, String>
+    reads(JournalDraft, JournalCursor) writes(JournalCursor, JournalEditCels) {
+    if JournalDraft.id == 0 { return Err("No active transaction"); }
+    if receipt <= JournalCursor.receipt { return Err("Pixel edit receipt needs a new identity"); }
+    JournalCursor = history.Cursor { revision: revision, legacy: "", receipt: receipt };
+    JournalEditCels = [];
+    return Ok(());
+}
+
+change commit_pixel_edit() -> Result<Bool, String>
+    reads(JournalDraft, JournalCursor, JournalPast, JournalFuture, JournalLimit)
+    writes(JournalDraft, JournalPast, JournalFuture, JournalVersions) {
+    let draft = JournalDraft;
+    if draft.id == 0 { return Err("No active transaction"); }
+    JournalDraft = history.empty_entry();
+    if draft.receipt == JournalCursor.receipt {
+        JournalVersions.remove(draft.id);
+        return Ok(false);
+    }
+    let rows = JournalPast.concat([draft]);
+    let retain = mask.min(history.entry_count(rows), JournalLimit);
+    let prune = history.entry_count(rows) - retain;
+    JournalVersions.remove_many(history.retired(rows, prune, JournalFuture));
+    JournalPast = history.kept(rows, prune);
+    JournalFuture = [];
+    return Ok(true);
+}
+
+change cancel_pixel_edit() -> Result<Bool, String>
+    reads(JournalDraft, JournalVersions)
+    writes(JournalDraft, JournalVersions, JournalCursor, EditorSource, EditorArtwork, EditorNamed, EditorPositions, EditorScope, EditorImage, EditorPaint) {
+    let draft = JournalDraft;
+    if draft.id == 0 { return Ok(false); }
+    let prior = JournalVersions.remove(draft.id).ok_or("Missing pixel edit transaction")?;
+    JournalCursor = prior.cursor;
+    EditorSource = prior.authored;
+    EditorArtwork = prior.art;
+    EditorNamed = prior.named;
+    EditorPositions = prior.positions;
+    EditorScope = frame_raster.Scope { frame: "", layer: "" };
+    EditorImage = None;
+    EditorPaint = paint.empty_cache();
+    JournalDraft = history.empty_entry();
+    return Ok(true);
+}
+
+change travel_pixel_history(redo: Bool) -> Result<Bool, String>
+    reads(JournalDraft, JournalPast, JournalFuture, JournalVersions, JournalCursor, EditorSource, EditorArtwork, EditorNamed, EditorPositions)
+    writes(JournalPast, JournalFuture, JournalVersions, JournalCursor, EditorSource, EditorArtwork, EditorNamed, EditorPositions, EditorScope, EditorImage, EditorPaint) {
+    if JournalDraft.id != 0 {
+        return Err(if redo { "Finish the active transaction before redo" } else { "Finish the active transaction before undo" });
+    }
+    let rows = if redo { JournalFuture } else { JournalPast };
+    if history.entry_count(rows) == 0 { return Ok(false); }
+    let target = history.last(rows);
+    let current = history.Edition { authored: EditorSource, art: EditorArtwork, named: EditorNamed,
+        positions: EditorPositions, cursor: JournalCursor };
+    let prior = JournalVersions.get(target.id).ok_or("Missing pixel edit history version")?;
+    JournalVersions.put(target.id, current);
+    let replacement = history.Entry { ..target, receipt: JournalCursor.receipt };
+    if redo {
+        JournalFuture = history.prefix(rows, history.entry_count(rows) - 1);
+        JournalPast = JournalPast.concat([replacement]);
+    } else {
+        JournalPast = history.prefix(rows, history.entry_count(rows) - 1);
+        JournalFuture = JournalFuture.concat([replacement]);
+    }
+    JournalCursor = prior.cursor;
+    EditorSource = prior.authored;
+    EditorArtwork = prior.art;
+    EditorNamed = prior.named;
+    EditorPositions = prior.positions;
+    EditorScope = frame_raster.Scope { frame: "", layer: "" };
+    EditorImage = None;
+    EditorPaint = paint.empty_cache();
+    return Ok(true);
 }

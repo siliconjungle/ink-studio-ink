@@ -6,6 +6,7 @@ import "pixel_brush_motion.ink" as motion;
 import "pixel_brush_paint.ink" as brush_paint;
 import "pixel_drawing_grid.ink" as drawing;
 import "pixel_frame.ink" as frame;
+import "pixel_fault.ink" as fault;
 import "pixel_mask.ink" as mask;
 import "pixel_raster.ink" as raster;
 import "pixel_rgba_edit.ink" as rgba;
@@ -19,9 +20,10 @@ record Tool { kind: String, slot: i32, perfect: Bool, selection: Option<String>,
     saved_brush: json.Json, samples: Option<json.Json>, shading: Option<json.Json>, }
 record Constraint { limited: Bool, words: List<u32>, }
 record Guard { drawn: frame.PaintView, protected: List<u32>, selected: Constraint, }
+record CachedView { scope: frame.Scope, view: frame.PaintView, }
 record EditContext { guard: Guard, details: List<Detail>, active: List<Detail>, }
 record RgbaInput { pixels: List<u32>, names: List<String>, }
-record Stroke { words: Buffer<u32>, previous: drawing.Point, tip: drawing.Point, issue: String, }
+record Stroke { words: Buffer<u32>, previous: drawing.Point, tip: drawing.Point, blocked: u32, }
 record Segment { pen: drawing.Pen, stroke: Stroke, }
 record Runs { spans: Buffer<Vec3<u32>>, y: u32, x: u32, length: u32, }
 record Report { frame: String, layer: String, cel: String, tool: String, pixelCount: u32,
@@ -42,7 +44,7 @@ record SnapshotMark { swatch: Option<String>, knockout: Bool, alpha: Option<u32>
 record SnapshotCel { frame: String, layer: String, marks: List<SnapshotMark>, }
 record RasterSnapshot { source: json.Json, edits: List<SnapshotCel>, }
 record Edit { document: json.Json, artwork: frame.Artwork, report: Report,
-    scope: frame.Scope, image: selection.Image, result_mask: Option<ResultMask>, }
+    cache: CachedView, result_mask: Option<ResultMask>, }
 
 fn decode(g: mask.Grid, ids: List<String>, items: List<json.Member>) -> Result<Tool, String> {
     let kind = value.text(value.get(items, "tool"));
@@ -99,6 +101,10 @@ fn read_points(grid: drawing.Drawing, single: Bool, items: List<json.Member>) ->
 
 fn selected(p: u32, limit: Constraint) -> Bool { return !limit.limited || mask.selected(limit.words, p); }
 
+fn guard_fault(g: mask.Grid, guard: Guard, layer: String, p: u32) -> fault.Fault {
+    return fault.blocked(g, guard.drawn, guard.protected, layer, p, "Paint tool cannot change this pixel");
+}
+
 fn writable(guard: Guard, p: u32) -> Bool {
     return frame.can_paint(guard.drawn, guard.protected, p);
 }
@@ -114,8 +120,8 @@ fn emit(tool: Tool, guard: Guard, p: drawing.Point, old: Stroke) -> Stroke {
 }
 
 fn plot(guard: Guard, slot: i32, p: u32, stroke: Stroke) -> Stroke {
-    if stroke.issue != "" || !selected(p, guard.selected) { return stroke; }
-    if !writable(guard, p) { return Stroke { ..stroke, issue: "Paint tool cannot change this pixel" }; }
+    if stroke.blocked != 4294967295 || !selected(p, guard.selected) { return stroke; }
+    if !writable(guard, p) { return Stroke { ..stroke, blocked: p }; }
     if guard.drawn.captured.slots.at_or(p, -1) == slot { return stroke; }
     return Stroke { ..stroke, words: mask.mark(stroke.words, p) };
 }
@@ -136,7 +142,7 @@ fn join_point(tool: Tool, guard: Guard, next: drawing.Point, stroke: Stroke) -> 
     let pen = drawing.segment(previous, next);
     let start = Segment { pen: pen, stroke: stroke };
     let steps = drawing.steps(previous, next);
-    return repeat_until(steps, start, fn(state) => state.stroke.issue != "", fn(i) => fn(state) =>
+    return repeat_until(steps, start, fn(state) => state.stroke.blocked != 4294967295, fn(i) => fn(state) =>
         step_pen(tool, guard, state)).stroke;
 }
 
@@ -149,27 +155,27 @@ fn step_pen(tool: Tool, guard: Guard, state: Segment) -> Segment {
     return Segment { pen: pen, stroke: Stroke { ..advanced, tip: next } };
 }
 
-fn stroke(tool: Tool, guard: Guard) -> Result<List<u32>, String> {
-    let init = Stroke { words: mask.blank(tool.drawing.grid), previous: drawing.absent(), tip: drawing.absent(), issue: "" };
+fn stroke(tool: Tool, guard: Guard, layer: String) -> Result<List<u32>, fault.Fault> {
+    let init = Stroke { words: mask.blank(tool.drawing.grid), previous: drawing.absent(), tip: drawing.absent(), blocked: 4294967295 };
     let path = foldl(tool.points, init, fn(p) => fn(old) =>
-        if old.issue != "" { old } else { join_point(tool, guard, p, old) });
+        if old.blocked != 4294967295 { old } else { join_point(tool, guard, p, old) });
     let traced = emit(tool, guard, path.tip, path);
-    if traced.issue != "" { return Err(traced.issue); }
+    if traced.blocked != 4294967295 { return Err(guard_fault(tool.drawing.grid, guard, layer, traced.blocked)); }
     return Ok(traced.words.freeze());
 }
 
-fn paint_mask(tool: Tool, guard: Guard) -> Result<List<u32>, String> {
-    if tool.kind == "fill" { return fill(tool, guard); }
-    if tool.kind != "shape" { return stroke(tool, guard); }
-    let coverage = shape.coverage(tool.drawing, tool.geometry)?;
-    let init = Stroke { words: mask.blank(tool.drawing.grid), previous: drawing.absent(), tip: drawing.absent(), issue: "" };
+fn paint_mask(tool: Tool, guard: Guard, layer: String) -> Result<List<u32>, fault.Fault> {
+    if tool.kind == "fill" { return fill(tool, guard, layer); }
+    if tool.kind != "shape" { return stroke(tool, guard, layer); }
+    let coverage = shape.coverage(tool.drawing, tool.geometry).map_err(fn(issue) => fault.invalid(issue))?;
+    let init = Stroke { words: mask.blank(tool.drawing.grid), previous: drawing.absent(), tip: drawing.absent(), blocked: 4294967295 };
     let traced = foldl(mask.indices(coverage), init, fn(p) => fn(out) => plot(guard, tool.slot, p, out));
-    if traced.issue != "" { return Err(traced.issue); }
+    if traced.blocked != 4294967295 { return Err(guard_fault(tool.drawing.grid, guard, layer, traced.blocked)); }
     return Ok(traced.words.freeze());
 }
 
-fn basic_changes(tool: Tool, guard: Guard) -> Result<Changes, String> {
-    let changed = paint_mask(tool, guard)?;
+fn basic_changes(tool: Tool, guard: Guard, layer: String) -> Result<Changes, fault.Fault> {
+    let changed = paint_mask(tool, guard, layer)?;
     let sites = mask.indices(changed);
     let marks: List<raster.RunMark> = if length(sites) == 0 { [] } else {
         [raster.RunMark { slot: tool.slot, alpha: None, spans: runs(tool.drawing.grid, sites) }]
@@ -177,20 +183,22 @@ fn basic_changes(tool: Tool, guard: Guard) -> Result<Changes, String> {
     return Ok(Changes { sites: sites, marks: marks, added: [], shading: brush_paint.unshaded() });
 }
 
-fn brushed(source: json.Json, art: frame.Artwork, tool: Tool, guard: Guard, slots: List<i32>) -> Result<Changes, String> {
-    let b = brush.decode(tool.saved_brush, slots)?;
+fn brushed(source: json.Json, art: frame.Artwork, tool: Tool, guard: Guard, slots: List<i32>, layer: String) -> Result<Changes, fault.Fault> {
+    let b = brush.decode(tool.saved_brush, slots).map_err(fn(issue) => fault.invalid(issue))?;
     let traced = tool.samples.fold(fn(raw) => motion.trace(tool.drawing, b, raw),
         fn(unit) => brush.static_path(tool.drawing, b, tool.points));
-    let stamps = traced?;
+    let stamps = traced.map_err(fn(issue) => fault.invalid(issue))?;
     let parsed: Result<brush_paint.Shading, String> = tool.shading.fold(fn(raw) => brush_paint.read_shading(source, art.ids, raw),
         fn(unit) => Ok(brush_paint.unshaded()));
-    let shade = parsed?;
+    let shade = parsed.map_err(fn(issue) => fault.invalid(issue))?;
     let aimed = stamps.filter(fn(row) => selected(row.pixel, guard.selected)).map(fn(row) =>
         brush_paint.shaded(row, guard.drawn.captured, shade)).filter(fn(row) => row.slot >= 0);
-    if length(aimed.filter(fn(row) => !writable(guard, row.pixel))) != 0 {
-        return Err("Paint tool cannot change this pixel");
+    let denied: u32 = foldl(aimed, 4294967295, fn(row) => fn(found) =>
+        if found == 4294967295 && !writable(guard, row.pixel) { row.pixel } else { found });
+    if denied != 4294967295 {
+        return Err(guard_fault(art.grid, guard, layer, denied));
     }
-    return brush_changes(art, tool.slot, b, shade, aimed, guard.drawn.captured);
+    return brush_changes(art, tool.slot, b, shade, aimed, guard.drawn.captured).map_err(fn(issue) => fault.invalid(issue));
 }
 
 fn brush_changes(art: frame.Artwork, override: i32, b: brush.Brush, shade: brush_paint.Shading,
@@ -250,14 +258,12 @@ fn group_visit(g: mask.Grid, slots: List<u32>, opacity: Bool, i: u32, p: u32, ol
 }
 
 
-fn seed_status(seeds: List<u32>, guard: Guard) -> Bool {
-    return foldl(seeds, true, fn(p) => fn(ok) => ok && (!selected(p, guard.selected) || writable(guard, p)));
-}
-
-fn fill(tool: Tool, guard: Guard) -> Result<List<u32>, String> {
+fn fill(tool: Tool, guard: Guard, layer: String) -> Result<List<u32>, fault.Fault> {
     let seeds = drawing.copies(tool.drawing, tool.points.at_or(0, drawing.absent()));
-    if !seed_status(seeds, guard) { return Err("Paint tool cannot change this pixel"); }
+    let denied: u32 = foldl(seeds, 4294967295, fn(p) => fn(found) =>
+        if found == 4294967295 && selected(p, guard.selected) && !writable(guard, p) { p } else { found });
     let grid = tool.drawing.grid;
+    if denied != 4294967295 { return Err(guard_fault(grid, guard, layer, denied)); }
     return Ok(foldl(seeds, mask.blank(grid).freeze(), fn(seed) => fn(old) => fill_seed(tool, guard, seed, old)));
 }
 
@@ -305,15 +311,15 @@ fn locked_layer(layers: List<frame.Layer>, row: frame.Layer) -> Bool {
     return owner.locked;
 }
 
-fn target(art: frame.Artwork, spec: List<json.Member>, frame_id: Option<String>, cel: Option<String>) -> Result<frame.Scope, String> {
+fn target(art: frame.Artwork, spec: List<json.Member>, frame_id: Option<String>, cel: Option<String>) -> Result<frame.Scope, fault.Fault> {
     let layer = value.text(value.get(spec, "layer"));
     let by_cel = cel.fold(fn(id) => true, fn(unit) => false);
     let invalid = "Choose an existing raster layer or cel for the paint tool";
-    if (by_cel && value.has(spec, "layer")) || (!by_cel && layer == "") { return Err(invalid); }
-    let scope = frame.resolve(art, frame_id, frame.optional_scope(layer), cel)?;
+    if (by_cel && value.has(spec, "layer")) || (!by_cel && layer == "") { return Err(fault.invalid(invalid)); }
+    let scope = frame.resolve(art, frame_id, frame.optional_scope(layer), cel).map_err(fn(issue) => fault.invalid(issue))?;
     let row = find_layer(art.layers, scope.layer);
-    if row.id == "" { return Err(invalid); }
-    if locked_layer(art.layers, row) { return Err(string_concat("Layer ", string_concat(row.id, " does not accept pixel edits"))); }
+    if row.id == "" { return Err(fault.invalid(invalid)); }
+    if locked_layer(art.layers, row) { return Err(fault.locked(row.id)); }
     return Ok(scope);
 }
 
@@ -426,39 +432,43 @@ fn visible_site(pixels: List<frame.Pixel>, p: u32, otherwise: u32) -> u32 {
     return if cell.slot >= 0 && cell.alpha > 0 { p } else { otherwise };
 }
 
-fn compare_details(g: mask.Grid, details: List<Detail>, before: List<frame.Pixel>, after: List<frame.Pixel>) -> String {
-    return foldl(details, "", fn(row) => fn(issue) =>
-        if issue != "" { issue } else { compare_detail(g, row, before, after) });
+record DetailChange { detail: String, pixel: u32, }
+
+fn no_detail_change() -> DetailChange { return DetailChange { detail: "", pixel: 4294967295 }; }
+
+fn compare_details(details: List<Detail>, before: List<frame.Pixel>, after: List<frame.Pixel>) -> DetailChange {
+    return foldl(details, no_detail_change(), fn(row) => fn(issue) =>
+        if issue.detail != "" { issue } else { compare_detail(row, before, after) });
 }
 
-fn compare_detail(g: mask.Grid, row: Detail, before: List<frame.Pixel>, after: List<frame.Pixel>) -> String {
+fn compare_detail(row: Detail, before: List<frame.Pixel>, after: List<frame.Pixel>) -> DetailChange {
     let p: u32 = repeat_until(length(row.sites), 4294967295, fn(found) => found != 4294967295,
         fn(i) => fn(found) => changed_site(row.sites.at_or(i, 0), before, after, found));
-    if p == 4294967295 { return ""; }
-    return string_concat("Edit would change protected detail ", string_concat(row.id, string_concat(" at ", issue_at(g, p))));
+    return if p == 4294967295 { no_detail_change() } else { DetailChange { detail: row.id, pixel: p } };
 }
 
 fn changed_site(p: u32, before: List<frame.Pixel>, after: List<frame.Pixel>, fallback: u32) -> u32 {
     return if pigment_diff(before.at_or(p, frame.blank()), after.at_or(p, frame.blank())) { p } else { fallback };
 }
 
-fn check_dependent_frames(prior: frame.Artwork, next: frame.Artwork, details: List<Detail>, skip: String) -> Result<Unit, String> {
+fn check_dependent_frames(prior: frame.Artwork, next: frame.Artwork, details: List<Detail>,
+    skip: String) -> Result<Unit, fault.Fault> {
     if length(details) == 0 || length(prior.cels.filter(fn(cel) => value.has(cel.fields, "hold"))) == 0 { return Ok(()); }
-    let result = repeat_until(length(prior.frames), "", fn(issue) => issue != "",
-        fn(i) => fn(issue) => if prior.frames.at_or(i, "") == skip { "" } else {
-            compare_frame(prior, next, i, active_details(details, i)).fold(fn(unit) => "", fn(problem) => problem)
+    let initial: Option<fault.Fault> = None;
+    let result = repeat_until(length(prior.frames), initial, fn(issue) => issue.fold(fn(failed) => true, fn(unit) => false),
+        fn(i) => fn(issue) => if prior.frames.at_or(i, "") == skip { None } else {
+            compare_frame(prior, next, i, active_details(details, i)).fold(fn(unit) => None, fn(problem) => Some(problem))
         });
-    if result != "" { return Err(result); }
-    return Ok(());
+    return result.fold(fn(issue) => Err(issue), fn(unit) => Ok(()));
 }
 
-fn compare_frame(prior: frame.Artwork, next: frame.Artwork, index: u32, details: List<Detail>) -> Result<Unit, String> {
+fn compare_frame(prior: frame.Artwork, next: frame.Artwork, index: u32, details: List<Detail>) -> Result<Unit, fault.Fault> {
     if length(details) == 0 { return Ok(()); }
     let scope = frame.Scope { frame: prior.frames.at_or(index, ""), layer: "" };
-    let before = frame.paint_view(prior, scope)?;
-    let after = frame.paint_view(next, scope)?;
-    let issue = compare_details(prior.grid, details, before.pixels, after.pixels);
-    if issue != "" { return Err(issue); }
+    let before = frame.paint_view(prior, scope).map_err(fn(issue) => fault.invalid(issue))?;
+    let after = frame.paint_view(next, scope).map_err(fn(issue) => fault.invalid(issue))?;
+    let issue = compare_details(details, before.pixels, after.pixels);
+    if issue.detail != "" { return Err(fault.dependent(prior.grid, scope.frame, issue.detail, issue.pixel)); }
     return Ok(());
 }
 
@@ -591,11 +601,30 @@ fn attach(art: frame.Artwork, scope: frame.Scope, id: String, added: Appended) -
         locations: art.locations.concat([frame.Location { id: id, frame: scope.frame, layer: scope.layer }]) };
 }
 
+fn empty_cache() -> CachedView {
+    return CachedView { scope: frame.Scope { frame: "", layer: "" },
+        view: frame.PaintView { captured: frame.no_capture(), pixels: [] } };
+}
+
+fn render_after_edit(art: frame.Artwork, scope: frame.Scope) -> Result<CachedView, fault.Fault> {
+    let view = frame.paint_view(art, scope).map_err(fn(issue) => fault.invalid(issue))?;
+    return Ok(CachedView { scope: scope, view: view });
+}
+
+fn selection_image(art: frame.Artwork, cache: CachedView, scope: frame.Scope) -> Result<selection.Image, String> {
+    let saved = cache.scope.frame == scope.frame && (scope.layer == "" || scope.layer == cache.scope.layer);
+    if !saved { return frame.raster(art, scope).map(fn(found) => found.image); }
+    let view = if scope.layer == "" { frame.PaintView { ..cache.view, captured: frame.no_capture() } }
+        else { cache.view };
+    return frame.finish_view(art, view, scope).map(fn(found) => found.image);
+}
+
 fn begin_edit(source: json.Json, art: frame.Artwork, named: selection.Named, scope: frame.Scope,
-    wanted: Option<String>) -> Result<EditContext, String> {
+    wanted: Option<String>, cache: CachedView) -> Result<EditContext, String> {
     let details = protections(source, art)?;
     let limit = constraint(art.grid, named, scope.frame, wanted)?;
-    let drawn = frame.paint_view(art, scope)?;
+    let current: Result<frame.PaintView, String> = if scope == cache.scope { Ok(cache.view) } else { frame.paint_view(art, scope) };
+    let drawn = current?;
     let active = active_details(details, selection.named_slot(art.frames, scope.frame));
     let issue = gap_issue(art.grid, active, drawn.pixels);
     if issue != "" { return Err(issue); }
@@ -604,33 +633,34 @@ fn begin_edit(source: json.Json, art: frame.Artwork, named: selection.Named, sco
 }
 
 fn apply_color(source: json.Json, art: frame.Artwork, named: selection.Named, spec: List<json.Member>,
-    input: RgbaInput, frame_id: Option<String>, cel: Option<String>, cached: frame.Scope, kind: String) -> Result<Edit, String> {
+    input: RgbaInput, frame_id: Option<String>, cel: Option<String>, kind: String, authored: List<List<u32>>, cache: CachedView) -> Result<Edit, fault.Fault> {
     if kind == "rgba" {
         if !value.only(spec, ["tool", "layer", "pixels"]) || length(input.pixels) == 0 ||
             rem_or(length(input.pixels), 3, 0) != 0 || length(input.pixels) > mask.size(art.grid) * 3 {
-            return Err("An RGBA edit needs a layer or cel and native pixels");
+            return Err(fault.invalid("An RGBA edit needs a layer or cel and native pixels"));
         }
         let scope = target(art, spec, frame_id, cel)?;
-        let ctx = begin_edit(source, art, named, scope, None)?;
-        let changes = rgba_changes(art, ctx.guard, input)?;
+        let ctx = begin_edit(source, art, named, scope, None, cache).map_err(fn(issue) => fault.invalid(issue))?;
+        let changes = rgba_changes(art, ctx.guard, input, scope.layer)?;
         let report = color_report(art, scope, kind, changes);
-        return finish_edit(source, art, scope, changes, report, ctx, cached);
+        return finish_edit(source, art, scope, changes, report, ctx);
     }
     let name = value.text(value.get(spec, "selection"));
     if !value.only(spec, ["tool", "layer", "selection", "from", "to"]) || !brush.stable_id(name) {
-        return Err("Swatch replacement needs a layer or cel and a saved selection");
+        return Err(fault.invalid("Swatch replacement needs a layer or cel and a saved selection"));
     }
     let from = value.text(value.get(spec, "from"));
     let to = value.text(value.get(spec, "to"));
     let prior = selection.find_swatch(art.ids, from);
     let next = selection.find_swatch(art.ids, to);
-    if prior < 0 || next < 0 || prior == next { return Err("Choose two distinct existing swatch IDs"); }
+    if prior < 0 || next < 0 || prior == next { return Err(fault.invalid("Choose two distinct existing swatch IDs")); }
     let scope = target(art, spec, frame_id, cel)?;
-    let ctx = begin_edit(source, art, named, scope, Some(name))?;
-    let changes = replace_changes(art.grid, ctx.guard, prior, next)?;
+    let ctx = begin_edit(source, art, named, scope, Some(name), cache).map_err(fn(issue) => fault.invalid(issue))?;
+    let order = authored.at_or(selection.named_slot(named.ids, name), []);
+    let changes = replace_changes(art.grid, ctx.guard, prior, next, scope.layer, order)?;
     let base = color_report(art, scope, kind, changes);
     let report = Report { ..base, selection: Some(name), from: Some(from), to: Some(to) };
-    return finish_edit(source, art, scope, changes, report, ctx, cached);
+    return finish_edit(source, art, scope, changes, report, ctx);
 }
 
 fn color_report(art: frame.Artwork, scope: frame.Scope, tool: String, changes: Changes) -> Report {
@@ -664,32 +694,34 @@ fn transform_options(spec: List<json.Member>, paste: Bool) -> Result<TransformSp
 }
 
 fn apply_transform(source: json.Json, art: frame.Artwork, named: selection.Named, spec: List<json.Member>,
-    packed: transforms.PackedClip, frame_id: Option<String>, cel: Option<String>, cached: frame.Scope, paste: Bool) -> Result<Edit, String> {
-    let decoded = transform_options(spec, paste)?;
+    packed: transforms.PackedClip, frame_id: Option<String>, cel: Option<String>, paste: Bool, cache: CachedView) -> Result<Edit, fault.Fault> {
+    let decoded = transform_options(spec, paste).map_err(fn(issue) => fault.invalid(issue))?;
     let scope = target(art, spec, frame_id, cel)?;
     let wanted: Result<Option<String>, String> = if paste { Ok(None) }
         else { transforms.selection_name(spec).fold(fn(id) => Ok(Some(id)), fn(issue) => Err(issue)) };
-    let name = wanted?;
+    let name = wanted.map_err(fn(issue) => fault.invalid(issue))?;
     let options = TransformSpec { ..decoded, selection: name };
-    let ctx = begin_edit(source, art, named, scope, options.selection)?;
+    let ctx = begin_edit(source, art, named, scope, options.selection, cache).map_err(fn(issue) => fault.invalid(issue))?;
     let captured = ctx.guard.drawn.captured;
     let input: Result<transforms.Clip, String> = if paste { transforms.clipboard(options.raw, packed) }
         else { transforms.capture(art, captured, ctx.guard.selected.words) };
-    let clip = input?;
-    let plan = transforms.stage(art, captured, clip, options.settings, !paste && options.mode == "move")?;
+    let clip = input.map_err(fn(issue) => fault.invalid(issue))?;
+    let plan = transforms.stage(art, captured, clip, options.settings, !paste && options.mode == "move").map_err(fn(issue) => fault.invalid(issue))?;
     let carry = if options.carrying { plan_carry(art.grid, scope.frame, ctx.active, ctx.guard.selected.words, plan.hits) }
         else { Ok(no_carry()) };
-    let moved = carry?;
-    return commit_transform(source, art, scope, ctx, cached, options, plan, moved);
+    let moved = carry.map_err(fn(issue) => fault.invalid(issue))?;
+    return commit_transform(source, art, scope, ctx, options, plan, moved);
 }
 
-fn commit_transform(source: json.Json, art: frame.Artwork, scope: frame.Scope, ctx: EditContext, cached: frame.Scope,
-    options: TransformSpec, plan: transforms.Plan, moved: Carry) -> Result<Edit, String> {
+fn commit_transform(source: json.Json, art: frame.Artwork, scope: frame.Scope, ctx: EditContext,
+    options: TransformSpec, plan: transforms.Plan, moved: Carry) -> Result<Edit, fault.Fault> {
     let locked = if length(moved.rows) == 0 { ctx.guard.protected }
         else { locked_pixels(art.grid, ctx.active.filter(fn(row) => !contains_moved(moved, row.id))) };
-    let denied = repeat_until(length(plan.writes), false, fn(found) => found, fn(i) => fn(found) =>
-        !frame.can_paint(ctx.guard.drawn, locked, plan.writes.at_or(i, rgba.Write { pixel: 0, slot: -1, alpha: 255 }).pixel));
-    if denied { return Err("Transform cannot change this pixel"); }
+    let denied: u32 = foldl(plan.writes, 4294967295, fn(row) => fn(found) =>
+        if found == 4294967295 && !frame.can_paint(ctx.guard.drawn, locked, row.pixel) { row.pixel } else { found });
+    if denied != 4294967295 {
+        return Err(fault.blocked(art.grid, ctx.guard.drawn, locked, scope.layer, denied, "Transform cannot change this pixel"));
+    }
     let changes = write_changes(art.grid, ctx.guard.drawn.captured, plan.writes, plan.added, true);
     let tool = if options.paste { "paste" } else { "transform" };
     let base = color_report(art, scope, tool, changes);
@@ -700,8 +732,8 @@ fn commit_transform(source: json.Json, art: frame.Artwork, scope: frame.Scope, c
         selectionRuns: if result_id == "" { [] } else { runs(art.grid, mask.indices(plan.mask)) },
         carriedProtection: moved.reports };
     let report = Report { ..base, selection: options.selection, transform: Some(placement) };
-    let pending = if length(moved.rows) == 0 { finish_edit(source, art, scope, changes, report, ctx, cached) }
-        else { finish_carried(source, art, scope, changes, report, ctx, cached, moved) };
+    let pending = if length(moved.rows) == 0 { finish_edit(source, art, scope, changes, report, ctx) }
+        else { finish_carried(source, art, scope, changes, report, ctx, moved) };
     let edit = pending?;
     return Ok(Edit { ..edit, result_mask: result });
 }
@@ -762,24 +794,25 @@ fn carry_site(sources: SourceIndex, p: u32, old: Destinations) -> Destinations {
     return Destinations { words: recent.words, missing: false };
 }
 
-fn moved_site_changed(sources: SourceIndex, p: u32, prior: List<frame.Pixel>, next: List<frame.Pixel>) -> Bool {
+fn moved_site_changed(sources: SourceIndex, p: u32, prior: List<frame.Pixel>, next: List<frame.Pixel>) -> u32 {
     let invalid: u32 = 4294967295;
-    let start: Vec2<u32> = vec2(sources.heads.at_or(p, invalid), 0);
+    let start: Vec2<u32> = vec2(sources.heads.at_or(p, invalid), invalid);
     let pigment = prior.at_or(p, frame.blank());
-    let issue = repeat_until(length(sources.links), start, fn(out) => out.x == invalid || out.y != 0, fn(i) => fn(out) =>
-        vec2(sources.links.at_or(out.x, invalid), if pigment_diff(pigment, next.at_or(out.x, frame.blank())) { 1 } else { 0 }));
-    return issue.y != 0;
+    let issue = repeat_until(length(sources.links), start, fn(out) => out.x == invalid, fn(i) => fn(out) =>
+        vec2(sources.links.at_or(out.x, invalid),
+            if pigment_diff(pigment, next.at_or(out.x, frame.blank())) { mask.min(out.x, out.y) } else { out.y }));
+    return issue.y;
 }
 
-fn carried_issue(moved: Carry, prior: List<frame.Pixel>, next: List<frame.Pixel>) -> String {
-    return foldl(moved.rows, "", fn(row) => fn(issue) =>
-        if issue != "" { issue } else { carried_row_issue(row.before, moved.sources, prior, next) });
+fn carried_issue(moved: Carry, prior: List<frame.Pixel>, next: List<frame.Pixel>) -> DetailChange {
+    return foldl(moved.rows, no_detail_change(), fn(row) => fn(issue) =>
+        if issue.detail != "" { issue } else { carried_row_issue(row.before, moved.sources, prior, next) });
 }
 
-fn carried_row_issue(row: Detail, sources: SourceIndex, prior: List<frame.Pixel>, next: List<frame.Pixel>) -> String {
-    let changed = repeat_until(length(row.sites), false, fn(found) => found, fn(i) => fn(found) =>
-        moved_site_changed(sources, row.sites.at_or(i, 0), prior, next));
-    return if changed { string_concat("Transform would change protected detail ", row.id) } else { "" };
+fn carried_row_issue(row: Detail, sources: SourceIndex, prior: List<frame.Pixel>, next: List<frame.Pixel>) -> DetailChange {
+    let p: u32 = repeat_until(length(row.sites), 4294967295, fn(found) => found != 4294967295,
+        fn(i) => fn(found) => moved_site_changed(sources, row.sites.at_or(i, 0), prior, next));
+    return DetailChange { detail: if p == 4294967295 { "" } else { row.id }, pixel: p };
 }
 
 fn revise_protection(source: json.Json, moved: Carry) -> json.Json {
@@ -801,36 +834,43 @@ fn moved_row(raw: json.Json, reports: List<CarriedReport>) -> json.Json {
 }
 
 fn finish_carried(source: json.Json, art: frame.Artwork, scope: frame.Scope, changes: Changes, report: Report,
-    ctx: EditContext, cached: frame.Scope, moved: Carry) -> Result<Edit, String> {
-    let retained = if cached.frame == scope.frame { cached } else { frame.Scope { frame: scope.frame, layer: "" } };
+    ctx: EditContext, moved: Carry) -> Result<Edit, fault.Fault> {
     let edited: Result<frame.Artwork, String> = if report.pixelCount == 0 { Ok(art) }
         else { stage_artwork(art, scope, changes, report.cel) };
-    let next = edited?;
+    let next = edited.map_err(fn(issue) => fault.invalid(issue))?;
     if report.pixelCount != 0 { let checked: Unit = check_dependent_frames(art, next, ctx.details, scope.frame)?; }
-    let canvas = frame.paint_view(next, retained)?;
-    let issue = carried_issue(moved, ctx.guard.drawn.pixels, canvas.pixels);
-    if issue != "" { return Err(issue); }
+    let rendered = render_after_edit(next, scope)?;
+    let issue = carried_issue(moved, ctx.guard.drawn.pixels, rendered.view.pixels);
+    if issue.detail != "" { return Err(fault.moved(art.grid, scope.layer, issue.detail, issue.pixel)); }
     let active = ctx.active.filter(fn(row) => !contains_moved(moved, row.id)).concat(moved.rows.map(fn(row) => row.after));
-    let gap = gap_issue(art.grid, active, canvas.pixels);
-    if gap != "" { return Err(gap); }
+    let gap = gap_issue(art.grid, active, rendered.view.pixels);
+    if gap != "" { return Err(fault.invalid(gap)); }
     let metadata = revised_palette(source, changes.added);
-    let updated = frame.finish_view(next, canvas, retained)?;
     return Ok(Edit { document: revise_protection(if metadata == json.null() { source } else { metadata }, moved),
-        artwork: next, report: report, scope: retained, image: updated.image, result_mask: None });
+        artwork: next, report: report, cache: rendered, result_mask: None });
 }
 
-fn replace_changes(g: mask.Grid, guard: Guard, from: i32, to: i32) -> Result<Changes, String> {
+fn replace_changes(g: mask.Grid, guard: Guard, from: i32, to: i32, layer: String, authored: List<u32>) -> Result<Changes, fault.Fault> {
     let pixels = mask.indices(guard.selected.words).filter(fn(p) => guard.drawn.captured.slots.at_or(p, -1) == from);
-    let denied = repeat_until(length(pixels), false, fn(found) => found, fn(i) => fn(found) =>
-        !writable(guard, pixels.at_or(i, 0)));
-    if denied { return Err("Swatch replacement cannot change this pixel"); }
+    let denied: u32 = foldl(pixels, 4294967295, fn(p) => fn(found) =>
+        if found == 4294967295 && !writable(guard, p) { p } else { found });
+    if denied != 4294967295 {
+        let first: u32 = repeat_until(length(authored), 4294967295, fn(found) => found != 4294967295,
+            fn(i) => fn(found) => denied_swatch_site(guard, from, authored.at_or(i, 0)));
+        let p = if first == 4294967295 { denied } else { first };
+        return Err(fault.blocked(g, guard.drawn, guard.protected, layer, p, "Swatch replacement cannot change this pixel"));
+    }
     let marks: List<raster.RunMark> = if length(pixels) == 0 { [] }
         else { [raster.RunMark { slot: to, alpha: None, spans: runs(g, pixels) }] };
     return Ok(Changes { sites: pixels, marks: marks, added: [], shading: brush_paint.unshaded() });
 }
 
-fn rgba_changes(art: frame.Artwork, guard: Guard, input: RgbaInput) -> Result<Changes, String> {
-    let plan = rgba.plan(art, guard.drawn, guard.protected, input.pixels, input.names)?;
+fn denied_swatch_site(guard: Guard, from: i32, p: u32) -> u32 {
+    return if guard.drawn.captured.slots.at_or(p, -1) == from && !writable(guard, p) { p } else { 4294967295 };
+}
+
+fn rgba_changes(art: frame.Artwork, guard: Guard, input: RgbaInput, layer: String) -> Result<Changes, fault.Fault> {
+    let plan = rgba.plan(art, guard.drawn, guard.protected, input.pixels, input.names, layer)?;
     return Ok(write_changes(art.grid, guard.drawn.captured, plan.writes, plan.added, false));
 }
 
@@ -855,59 +895,57 @@ fn opacity_changed(previous: frame.Captured, row: rgba.Write) -> Bool {
 
 
 fn paint(source: json.Json, art: frame.Artwork, named: selection.Named, operation: json.Json,
-    packed: transforms.PackedClip, input: RgbaInput, frame_id: Option<String>, cel: Option<String>, cached: frame.Scope) -> Result<Edit, String> {
+    packed: transforms.PackedClip, input: RgbaInput, frame_id: Option<String>, cel: Option<String>, authored: List<List<u32>>, cache: CachedView) -> Result<Edit, fault.Fault> {
     let error = "A raster tool needs a layer or cel and a pencil, eraser, fill, shape or brush operation";
-    let parsed: Result<List<json.Member>, String> = json.members(operation).fold(fn(rows) => Ok(rows), fn(issue) => Err(error));
+    let parsed: Result<List<json.Member>, fault.Fault> = json.members(operation).fold(fn(rows) => Ok(rows), fn(issue) => Err(fault.invalid(error)));
     let spec = parsed?;
     let kind = value.text(value.get(spec, "tool"));
     if kind == "transform" || kind == "paste" {
-        return apply_transform(source, art, named, spec, packed, frame_id, cel, cached, kind == "paste");
+        return apply_transform(source, art, named, spec, packed, frame_id, cel, kind == "paste", cache);
     }
     if kind == "rgba" || kind == "replace-swatch" {
-        return apply_color(source, art, named, spec, input, frame_id, cel, cached, kind);
+        return apply_color(source, art, named, spec, input, frame_id, cel, kind, authored, cache);
     }
     if !value.only(spec, ["tool", "layer", "at", "points", "samples", "swatch", "pixelPerfect", "shape",
-        "brush", "shading", "drawing", "selection"]) { return Err(error); }
+        "brush", "shading", "drawing", "selection"]) { return Err(fault.invalid(error)); }
     let scope = target(art, spec, frame_id, cel)?;
-    let tool = decode(art.grid, art.ids, spec)?;
-    return paint_target(source, art, named, scope, tool, packed.slots, cached);
+    let tool = decode(art.grid, art.ids, spec).map_err(fn(issue) => fault.invalid(issue))?;
+    return paint_target(source, art, named, scope, tool, packed.slots, cache);
 }
 
-fn paint_target(source: json.Json, art: frame.Artwork, named: selection.Named, scope: frame.Scope, tool: Tool, slots: List<i32>, cached: frame.Scope) -> Result<Edit, String> {
-    let ctx = begin_edit(source, art, named, scope, tool.selection)?;
-    let delta: Result<Changes, String> = if tool.kind == "brush" { brushed(source, art, tool, ctx.guard, slots) }
-        else { basic_changes(tool, ctx.guard) };
+fn paint_target(source: json.Json, art: frame.Artwork, named: selection.Named, scope: frame.Scope, tool: Tool, slots: List<i32>, cache: CachedView) -> Result<Edit, fault.Fault> {
+    let ctx = begin_edit(source, art, named, scope, tool.selection, cache).map_err(fn(issue) => fault.invalid(issue))?;
+    let delta: Result<Changes, fault.Fault> = if tool.kind == "brush" { brushed(source, art, tool, ctx.guard, slots, scope.layer) }
+        else { basic_changes(tool, ctx.guard, scope.layer) };
     let changes = delta?;
     let report = Report { frame: scope.frame, layer: scope.layer, cel: choose_cel(art, scope), tool: tool.kind,
         pixelCount: length(changes.sites), runs: runs(art.grid, changes.sites), pixelPerfect: tool.perfect, selection: tool.selection,
         shape: if tool.kind == "shape" { Some(shape.kind(tool.geometry)) } else { None },
         shading: optional_text(changes.shading.mode), ramp: optional_text(changes.shading.named),
         addedSwatches: changes.added.map(fn(row) => row.id), from: None, to: None, transform: None };
-    return finish_edit(source, art, scope, changes, report, ctx, cached);
+    return finish_edit(source, art, scope, changes, report, ctx);
 }
 
 fn finish_edit(source: json.Json, art: frame.Artwork, scope: frame.Scope, changes: Changes, report: Report,
-    ctx: EditContext, cached: frame.Scope) -> Result<Edit, String> {
+    ctx: EditContext) -> Result<Edit, fault.Fault> {
     if report.pixelCount == 0 {
-        return Ok(Edit { document: json.null(), artwork: frame.empty_artwork(), report: report, scope: cached,
-            image: selection.Image { rgba: [], palette: mask.no_palette() }, result_mask: None });
+        return Ok(Edit { document: json.null(), artwork: frame.empty_artwork(), report: report,
+            cache: empty_cache(), result_mask: None });
     }
-    let retained = if cached.frame == scope.frame { cached } else { frame.Scope { frame: scope.frame, layer: "" } };
-    return commit_paint(source, art, scope, changes, report, ctx.details, ctx.active, retained);
+    return commit_paint(source, art, scope, changes, report, ctx.details, ctx.active);
 }
 
 fn optional_text(text: String) -> Option<String> { return if text == "" { None } else { Some(text) }; }
 
 fn commit_paint(source: json.Json, art: frame.Artwork, scope: frame.Scope, changes: Changes, report: Report,
-    details: List<Detail>, active: List<Detail>, retained: frame.Scope) -> Result<Edit, String> {
-    let next = stage_artwork(art, scope, changes, report.cel)?;
+    details: List<Detail>, active: List<Detail>) -> Result<Edit, fault.Fault> {
+    let next = stage_artwork(art, scope, changes, report.cel).map_err(fn(issue) => fault.invalid(issue))?;
     let checked: Unit = check_dependent_frames(art, next, details, "")?;
-    let canvas = frame.paint_view(next, retained)?;
-    let issue = gap_issue(art.grid, active, canvas.pixels);
-    if issue != "" { return Err(issue); }
-    let updated = frame.finish_view(next, canvas, retained)?;
-    return Ok(Edit { document: revised_palette(source, changes.added), artwork: next, report: report, scope: retained,
-        image: updated.image, result_mask: None });
+    let rendered = render_after_edit(next, scope)?;
+    let issue = gap_issue(art.grid, active, rendered.view.pixels);
+    if issue != "" { return Err(fault.invalid(issue)); }
+    return Ok(Edit { document: revised_palette(source, changes.added), artwork: next, report: report,
+        cache: rendered, result_mask: None });
 }
 
 fn stage_artwork(art: frame.Artwork, scope: frame.Scope, changes: Changes, id: String) -> Result<frame.Artwork, String> {

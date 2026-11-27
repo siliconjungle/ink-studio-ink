@@ -1,3 +1,6 @@
+mod journal;
+pub use journal::{EditHistory, PixelCommandEditor, PixelEditError, StagedPixelEdit};
+
 use compiled_state::{State, ValueWireLimits, Wire};
 use indexmap::IndexMap;
 use ink_abi::{
@@ -360,55 +363,134 @@ fn pack_named_pixels(input: &mut Json) -> Vec<Vec<u32>> {
         .collect()
 }
 
-fn snapshot_cel_marks<'a>(
-    document: &'a mut Json,
-    frame_id: &str,
-    layer: &str,
-) -> Option<&'a mut Vec<Json>> {
-    let Json::Array(frames) = member_mut(document, "frames")? else {
-        return None;
-    };
-    let frame = frames.iter_mut().find(|frame| {
-        matches!(frame, Json::Object(fields) if fields.iter().any(|(key, value)| {
-            key == "id" && matches!(value, Json::Text(id) if id == frame_id)
-        }))
-    })?;
-    let cel = member_mut(member_mut(frame, "cels")?, layer)?;
-    let Json::Array(marks) = member_mut(cel, "marks")? else {
-        return None;
-    };
-    Some(marks)
-}
-
-fn snapshot_mark(
+struct SnapshotMark {
     swatch: Option<String>,
     knockout: bool,
     alpha: Option<u32>,
     runs: Vec<[u32; 3]>,
-) -> Json {
-    let pigment = if let Some(alpha) = alpha {
-        ("alpha", Json::Number(alpha.to_string()))
-    } else if let Some(swatch) = swatch {
-        ("swatch", Json::Text(swatch))
-    } else if knockout {
-        ("swatch", Json::Null)
+}
+type SnapshotEdits = IndexMap<String, IndexMap<String, Vec<SnapshotMark>>>;
+
+fn append_snapshot_mark(out: &mut String, mark: &SnapshotMark) -> Result<(), String> {
+    use std::fmt::Write;
+    if let Some(alpha) = mark.alpha {
+        write!(out, "{{\"alpha\":{alpha}").map_err(|error| error.to_string())?;
+    } else if let Some(swatch) = &mark.swatch {
+        out.push_str("{\"swatch\":");
+        out.push_str(&serde_json::to_string(swatch).map_err(|error| error.to_string())?);
+    } else if mark.knockout {
+        out.push_str("{\"swatch\":null");
     } else {
-        ("clear", Json::Boolean(true))
+        out.push_str("{\"clear\":true");
+    }
+    out.push_str(",\"runs\":[");
+    for (i, [y, x, length]) in mark.runs.iter().enumerate() {
+        if i != 0 {
+            out.push(',');
+        }
+        write!(out, "[{y},{x},{length}]").map_err(|error| error.to_string())?;
+    }
+    out.push_str("]}");
+    Ok(())
+}
+
+fn append_snapshot_marks(
+    out: &mut String,
+    authored: &[Json],
+    retained: &[SnapshotMark],
+    limits: Limits,
+) -> Result<(), String> {
+    out.push('[');
+    for (i, mark) in authored.iter().enumerate() {
+        if i != 0 {
+            out.push(',');
+        }
+        out.push_str(&mark.stringify(limits)?);
+    }
+    for (i, mark) in retained.iter().enumerate() {
+        if i != 0 || !authored.is_empty() {
+            out.push(',');
+        }
+        append_snapshot_mark(out, mark)?;
+    }
+    out.push(']');
+    Ok(())
+}
+
+fn append_snapshot_cel(
+    out: &mut String,
+    cel: &Json,
+    marks: &[SnapshotMark],
+    limits: Limits,
+) -> Result<(), String> {
+    let Json::Object(fields) = cel else {
+        return Err("Missing retained raster cel in the snapshot".into());
     };
-    let spans = runs
-        .into_iter()
-        .map(|run| {
-            Json::Array(
-                run.into_iter()
-                    .map(|n| Json::Number(n.to_string()))
-                    .collect(),
-            )
-        })
-        .collect();
-    Json::Object(vec![
-        (pigment.0.into(), pigment.1),
-        ("runs".into(), Json::Array(spans)),
-    ])
+    if !fields
+        .iter()
+        .any(|(key, part)| key == "marks" && matches!(part, Json::Array(_)))
+    {
+        return Err("Missing retained raster marks in the snapshot".into());
+    }
+    append_json_members(out, fields, |out, key, part| {
+        if let ("marks", Json::Array(rows)) = (key, part) {
+            append_snapshot_marks(out, rows, marks, limits)
+        } else {
+            out.push_str(&part.stringify(limits)?);
+            Ok(())
+        }
+    })
+}
+
+fn append_snapshot_frames(
+    out: &mut String,
+    frames: &[Json],
+    edits: &SnapshotEdits,
+    limits: Limits,
+) -> Result<(), String> {
+    let mut remaining = edits.len();
+    out.push('[');
+    for (i, frame) in frames.iter().enumerate() {
+        if i != 0 {
+            out.push(',');
+        }
+        if let Json::Object(fields) = frame
+            && let Some(Json::Text(id)) = fields
+                .iter()
+                .find(|(key, _)| key == "id")
+                .map(|(_, part)| part)
+            && let Some(layers) = edits.get(id)
+        {
+            let mut changed = 0;
+            append_json_members(out, fields, |out, key, part| {
+                if let ("cels", Json::Object(cels)) = (key, part) {
+                    append_json_members(out, cels, |out, layer, cel| {
+                        if let Some(marks) = layers.get(layer) {
+                            changed += 1;
+                            append_snapshot_cel(out, cel, marks, limits)
+                        } else {
+                            out.push_str(&cel.stringify(limits)?);
+                            Ok(())
+                        }
+                    })
+                } else {
+                    out.push_str(&part.stringify(limits)?);
+                    Ok(())
+                }
+            })?;
+            if changed != layers.len() {
+                return Err("Missing retained raster cel in the snapshot".into());
+            }
+            remaining -= 1;
+        } else {
+            out.push_str(&frame.stringify(limits)?);
+        }
+    }
+    if remaining != 0 {
+        return Err("Missing retained raster frame in the snapshot".into());
+    }
+    out.push(']');
+    Ok(())
 }
 
 fn append_json_members(
@@ -473,21 +555,26 @@ fn snapshot_json(
     document: &Json,
     width: u32,
     positions: &[Vec<u32>],
+    edits: &SnapshotEdits,
     limits: Limits,
 ) -> Result<String, String> {
     let Json::Object(fields) = document else {
         return document.stringify(limits);
     };
-    if positions.iter().all(Vec::is_empty) {
+    if positions.iter().all(Vec::is_empty) && edits.is_empty() {
         return document.stringify(limits);
     }
     // The metadata is still bounded by the JSON codec. Saved coordinates
     // already crossed the typed boundary and serialize straight to the file.
     let mut output = String::new();
-    append_json_members(&mut output, fields, |out, key, value| {
-        if let ("selections", Json::Array(rows)) = (key, value) {
+    append_json_members(&mut output, fields, |out, key, value| match (key, value) {
+        ("selections", Json::Array(rows)) => {
             append_snapshot_selections(out, rows, width, positions, limits)
-        } else {
+        }
+        ("frames", Json::Array(frames)) if !edits.is_empty() => {
+            append_snapshot_frames(out, frames, edits, limits)
+        }
+        _ => {
             out.push_str(&value.stringify(limits)?);
             Ok(())
         }
@@ -903,6 +990,33 @@ impl PasteTransform<'_> {
     }
 }
 
+#[derive(serde::Serialize)]
+struct RasterFailure {
+    code: String,
+    message: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    layer: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    detail: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    frame: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    at: Option<[u32; 2]>,
+}
+
+impl From<String> for RasterFailure {
+    fn from(message: String) -> Self {
+        Self {
+            code: "invalid-edit".into(),
+            message,
+            layer: String::new(),
+            detail: String::new(),
+            frame: String::new(),
+            at: None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct PaintInputs {
     slots: Vec<i32>,
@@ -954,17 +1068,24 @@ pub struct PixelEditor {
 
 impl PixelEditor {
     pub fn new(source: &str) -> Result<Self, String> {
-        let mut editor = Self {
-            program: State::new(),
-            grid: [0, 0],
-        };
+        let mut editor = Self::empty();
         editor.replace_document(source)?;
         Ok(editor)
     }
 
+    fn empty() -> Self {
+        Self {
+            program: State::new(),
+            grid: [0, 0],
+        }
+    }
+
     pub fn replace_document(&mut self, source: &str) -> Result<(), String> {
-        let OrderedJson(mut input) =
-            serde_json::from_str(source).map_err(|error| error.to_string())?;
+        let OrderedJson(input) = serde_json::from_str(source).map_err(|error| error.to_string())?;
+        self.replace_document_data(input)
+    }
+
+    fn replace_document_data(&mut self, mut input: Json) -> Result<(), String> {
         let build = |kind, scalar, flag, values, keys| {
             self.program
                 .function_l_pixel_json_value(kind, scalar, flag, values, keys)
@@ -985,8 +1106,18 @@ impl PixelEditor {
         frame: Option<&str>,
         cel: Option<&str>,
     ) -> Result<RasterPaintReport, String> {
-        let OrderedJson(mut operation) =
+        let OrderedJson(operation) =
             serde_json::from_str(operation).map_err(|error| error.to_string())?;
+        self.paint_data(operation, frame, cel)
+            .map_err(|issue| issue.message)
+    }
+
+    fn paint_data(
+        &mut self,
+        mut operation: Json,
+        frame: Option<&str>,
+        cel: Option<&str>,
+    ) -> Result<RasterPaintReport, RasterFailure> {
         let (slots, alpha) = if matches!(member_mut(&mut operation, "tool"), Some(Json::Text(tool)) if tool == "paste")
         {
             pack_clipboard(&mut operation)
@@ -1036,6 +1167,7 @@ impl PixelEditor {
             ..PaintInputs::default()
         };
         self.paint_inputs(Json::Object(fields), inputs, frame, cel)
+            .map_err(|issue| issue.message)
     }
 
     fn paint_inputs(
@@ -1044,7 +1176,7 @@ impl PixelEditor {
         input: PaintInputs,
         frame: Option<&str>,
         cel: Option<&str>,
-    ) -> Result<RasterPaintReport, String> {
+    ) -> Result<RasterPaintReport, RasterFailure> {
         let drawing = member_mut(&mut operation, "drawing")
             .map(|value| {
                 serde_json::from_str(&value.stringify(Limits::default())?)
@@ -1066,7 +1198,15 @@ impl PixelEditor {
                 frame.map(str::to_owned),
                 cel.map(str::to_owned),
             )?
-            .result?;
+            .result
+            .map_err(|issue| RasterFailure {
+                code: issue.l_code,
+                message: issue.l_message,
+                layer: issue.l_layer,
+                detail: issue.l_detail,
+                frame: issue.l_frame_id,
+                at: issue.l_at,
+            })?;
         Ok(RasterPaintReport {
             destination: "raster",
             kind: "raster",
@@ -1113,8 +1253,16 @@ impl PixelEditor {
         operation: &str,
         frame: Option<&str>,
     ) -> Result<SavedSelectionReport, String> {
-        let OrderedJson(mut operation) =
+        let OrderedJson(operation) =
             serde_json::from_str(operation).map_err(|error| error.to_string())?;
+        self.save_selection_data(operation, frame)
+    }
+
+    fn save_selection_data(
+        &mut self,
+        mut operation: Json,
+        frame: Option<&str>,
+    ) -> Result<SavedSelectionReport, String> {
         let query = member_mut(&mut operation, "query")
             .map_or(Json::Null, |value| std::mem::replace(value, Json::Null));
         let build = |kind, scalar, flag, values, keys| {
@@ -1226,15 +1374,27 @@ impl PixelEditor {
     pub fn snapshot(&mut self) -> Result<String, String> {
         let snapshot = self.program.invoke_view_l_snapshot_pixel_editor()?.result;
         let limits = Limits::default();
-        let mut document = Json::from_ink(&snapshot.l_document.to_json(), limits)?;
+        let document = Json::from_ink(&snapshot.l_document.to_json(), limits)?;
+        let mut edits = SnapshotEdits::new();
         for edit in snapshot.l_edits {
-            let marks = snapshot_cel_marks(&mut document, &edit.l_frame, &edit.l_layer)
-                .ok_or("Missing retained raster cel in the snapshot")?;
-            marks.extend(edit.l_marks.into_iter().map(|mark| {
-                snapshot_mark(mark.l_swatch, mark.l_knockout, mark.l_alpha, mark.l_runs)
-            }));
+            let layers = edits.entry(edit.l_frame).or_default();
+            layers
+                .entry(edit.l_layer)
+                .or_default()
+                .extend(edit.l_marks.into_iter().map(|mark| SnapshotMark {
+                    swatch: mark.l_swatch,
+                    knockout: mark.l_knockout,
+                    alpha: mark.l_alpha,
+                    runs: mark.l_runs,
+                }));
         }
-        snapshot_json(&document, self.grid[0], &snapshot.l_positions, limits)
+        snapshot_json(
+            &document,
+            self.grid[0],
+            &snapshot.l_positions,
+            &edits,
+            limits,
+        )
     }
 
     pub fn select(

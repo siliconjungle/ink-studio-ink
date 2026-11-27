@@ -1,4 +1,5 @@
 import { call, callOwned, compiledValues, createState, JsonCodec } from '../build/pixel_document.mjs';
+import { openPixelJournal } from './pixel-journal.mjs';
 
 const codec = new JsonCodec(compiledValues.open_pixel_document.params[0]);
 const utf8 = new TextEncoder();
@@ -34,6 +35,19 @@ export function selectPixelFrame(source, query, { saved, ...scope } = {}) {
 }
 
 export function createPixelEditor(source) {
+  return createPixelEditorCore(source).editor;
+}
+
+export async function createPixelCommandEditor(source, { historyLimit = 100 } = {}) {
+  if (!Number.isInteger(historyLimit) || historyLimit < 0 || historyLimit > 0xffffffff) {
+    throw new Error('historyLimit must be a non-negative integer within the pixel journal capacity');
+  }
+  const input = typeof source === 'string' ? JSON.parse(source) : source;
+  const core = createPixelEditorCore(input);
+  return openPixelJournal({ ...core, codec, revision }, input, historyLimit);
+}
+
+function createPixelEditorCore(source) {
   const state = createState();
   // JSON's typed representation has multiple schema levels per authored level.
   const load = state.bind('load_pixel_editor', { resultOnly: true, inputLimits: { depth: 512, nodes: 8000000 } });
@@ -58,7 +72,14 @@ export function createPixelEditor(source) {
   function paint(operation, { frame, cel } = {}) {
     const packed = ownData(operation, 'tool') === 'paste' ? packClipboard(operation) : packBrushSlots(operation);
     const { metadata, rows, names } = packRgba(packed.metadata, grid);
-    const result = unwrap(draw(codec.fromJS(metadata), packed.slots, packed.alpha ?? [], rows, names, option(frame), option(cel)));
+    const drawn = draw(codec.fromJS(metadata), packed.slots, packed.alpha ?? [], rows, names, option(frame), option(cel));
+    if (Object.hasOwn(drawn, 'Err')) {
+      const { code, message, layer, detail, at, frame_id } = drawn.Err;
+      const conflict = { code, message, ...(layer && { layer }), ...(detail && { detail }), ...(frame_id && { frame: frame_id }),
+        ...(Object.hasOwn(at, 'Some') && { at: at.Some }) };
+      throw Object.assign(new Error(message), { conflict });
+    }
+    const result = drawn.Ok;
     const { pixelPerfect, selection, shape, shading, ramp, addedSwatches, from, to, transform, ...target } = result;
     const placement = transform.Some;
     const drawing = ownData(operation, 'drawing');
@@ -129,7 +150,7 @@ export function createPixelEditor(source) {
     return document;
   }
   replaceDocument(source);
-  return Object.freeze({ replaceDocument, select, saveSelection, paint, captureBrush, copySelection, snapshot });
+  return { state, editor: Object.freeze({ replaceDocument, select, saveSelection, paint, captureBrush, copySelection, snapshot }) };
 }
 
 function ownData(value, key) {

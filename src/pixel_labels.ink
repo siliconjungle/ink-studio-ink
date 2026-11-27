@@ -30,3 +30,10 @@ fn present(value: String) -> Bool {
     return repeat_until(size, Scan { offset: 0, visible: false },
         fn(old) => old.visible || old.offset >= size, fn(i) => fn(old) => step(value, old)).visible;
 }
+
+// The hash selects a bucket. Exact names decide identity, including on collision.
+fn id_hash(name: String) -> u64 {
+    let size = string_byte_len(name);
+    return repeat_until(size, 14695981039346656037, fn(hash) => false, fn(i) => fn(hash) =>
+        (hash ^ word_widen_u32_to_u64(byte(name, i))) * 1099511628211);
+}

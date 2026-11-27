@@ -328,3 +328,47 @@ fn selection_transform_carries_protection_and_paste_preserves_knockout_after_rel
         serde_json::json!([[3, 1]])
     );
 }
+
+#[test]
+fn raster_edits_keep_raw_and_composite_views_correct_when_the_scope_changes() {
+    let mut design = document(2, 5);
+    design["palette"]["blue"] = serde_json::json!("#213b71");
+    design["layers"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"id": "above"}));
+    let mut editor = PixelEditor::new(&design.to_string()).unwrap();
+    let rust = r#"{"type":"swatch","id":"rust"}"#;
+    let blue = r#"{"type":"swatch","id":"blue"}"#;
+    let find = |editor: &mut PixelEditor, query, layer| {
+        editor
+            .select(query, None, layer, None, "{}")
+            .unwrap()
+            .pixels
+    };
+
+    let lower = r#"{"tool":"pencil","layer":"ink","swatch":"rust","points":[[1,1]]}"#;
+    editor.paint(lower, None, None).unwrap();
+    assert!(find(&mut editor, rust, Some("above")).is_empty());
+    let lower_again = r#"{"tool":"pencil","layer":"ink","swatch":"rust","points":[[3,1]]}"#;
+    editor.paint(lower_again, None, None).unwrap();
+    assert!(find(&mut editor, rust, Some("above")).is_empty());
+
+    let upper = r#"{"tool":"pencil","layer":"above","swatch":"blue","points":[[2,1]]}"#;
+    editor.paint(upper, None, None).unwrap();
+    assert_eq!(find(&mut editor, blue, Some("above")), [[2, 1]]);
+    assert_eq!(find(&mut editor, rust, None), [[1, 1], [3, 1]]);
+    assert_eq!(
+        find(&mut editor, rust, Some("ink")),
+        [[1, 1], [2, 1], [3, 1]]
+    );
+    let saved = editor.snapshot().unwrap();
+    let mut cold = PixelEditor::new(&saved).unwrap();
+    let erase = r#"{"tool":"eraser","layer":"above","points":[[2,1]]}"#;
+    assert_eq!(
+        editor.paint(erase, None, None).unwrap(),
+        cold.paint(erase, None, None).unwrap()
+    );
+    assert_eq!(editor.snapshot().unwrap(), cold.snapshot().unwrap());
+    assert_eq!(find(&mut editor, rust, None), [[1, 1], [2, 1], [3, 1]]);
+}

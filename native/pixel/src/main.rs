@@ -1,3 +1,5 @@
+mod journal_cli;
+
 use ink_studio_pixel::{
     IndexedSelectionRaster, PixelEditor, mask_pixels, open_pixel_document, rasterize_pixel_frame,
     select_pixel_mask_with_raster,
@@ -140,7 +142,7 @@ fn select(path: std::ffi::OsString, packed: bool) -> Result<(), String> {
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel select|select-mask|raster|select-document|paint-document|save-selection-document|capture-brush-document|copy-selection-document REQUEST";
+    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel select|select-mask|raster|select-document|paint-document|save-selection-document|capture-brush-document|copy-selection-document|journal-document REQUEST";
     let path = args.next().ok_or(usage)?;
     if let Some(request) = args.next() {
         if args.next().is_some() {
@@ -157,6 +159,9 @@ fn run() -> Result<(), String> {
         }
         if path == "capture-brush-document" || path == "copy-selection-document" {
             return capture(request, path == "copy-selection-document");
+        }
+        if path == "journal-document" {
+            return journal_cli::run(request);
         }
         return Err(usage.into());
     }
