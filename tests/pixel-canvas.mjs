@@ -171,6 +171,95 @@ export function canvasCases(original) {
     assert.equal(run(command('export')).data.sceneBindings[0].canvas, undefined);
   });
 
+  const fractional = structuredClone(bound);
+  fractional.sceneBindings[0].canvas = { size: [37, 29], offset: [0.1, 1e-7], scale: [0.3, 3e-22] };
+  scenario('fractional scene registration survives edits, receipts and undo', fractional, (run, edit, preview) => {
+    const withSource = operation => ({ ...operation, bindingPolicy: 'preserve' });
+    const cropFirst = withSource(crop);
+    assert.ok(edit(cropFirst));
+    const resample = withSource({ type: 'resample', size: [7, 5] });
+    const expected = preview(resample);
+    const receipt = edit(resample);
+    assert.deepEqual(receipt.affectedTargets, expected.targets);
+    const beforePad = run(command('export')).data;
+    assert.deepEqual(beforePad.sceneBindings[0].canvas, {
+      size: [37, 29], offset: [0.1 + 2 * 0.3, 1e-7 + 3e-22],
+      scale: [0.3 * (4 / 7), 3e-22 * (3 / 5)],
+    });
+    const padded = edit(withSource(pad));
+    assert.ok(padded);
+    assert.equal(run(command('export')).data.sceneBindings[0].canvas.offset[0],
+      beforePad.sceneBindings[0].canvas.offset[0] - beforePad.sceneBindings[0].canvas.scale[0]);
+    run(command('undo'));
+    assert.deepEqual(run(command('export')).data, beforePad);
+    assert.deepEqual(run(command('replay', { receipt: padded })), padded);
+    assert.ok(edit({ type: 'resize', size: [8, 6], bindingPolicy: 'reframe' }));
+    assert.equal(run(command('export')).data.sceneBindings[0].canvas, undefined);
+  });
+
+  scenario('inverse canvas translations remove the identity registration', bound, (run, edit) => {
+    assert.ok(edit({ ...pad, bindingPolicy: 'preserve' }));
+    assert.ok(edit({ type: 'crop', rect: [1, 1, 8, 6], bindingPolicy: 'preserve' }));
+    assert.deepEqual(run(command('export')).data.sceneBindings, bound.sceneBindings);
+  });
+
+  const limits = structuredClone(fractional);
+  limits.sceneBindings[0].canvas.scale = [Number.MAX_VALUE, Number.MIN_VALUE];
+  scenario('registration rejects overflow or underflow without changing the document', limits, (run, edit, preview) => {
+    const overflowing = { ...crop, bindingPolicy: 'preserve' };
+    const underflowing = { type: 'resample', size: [17, 13], bindingPolicy: 'preserve' };
+    for (const operation of [overflowing, underflowing]) {
+      assert.match(preview(operation).conflicts[0].message, /registration is outside the numeric range/);
+      edit(operation);
+    }
+    assert.deepEqual(run(command('export')).data, limits);
+  });
+
+  const directional = { ...design, directional: {
+    version: 1, viewBlend: 'depth-reprojected', approvedSwatches: ['rust', 'blue'],
+    partAnchors: [{ id: 'tip', part: 'blade', point: [1, 2.3, 0.5] }],
+    views: [
+      { frame: 'front', pose: 2, yaw: 0, pitch: 0.1, pivot: [2.3, 1.1], unitsPerPixel: 0.037,
+        anchors: { tip: [3.71, 1.005] }, handoff: 'exact' },
+      { frame: 'rear', pose: 2, yaw: Math.PI, pitch: 0.1, pivot: [7.1, 5.03], unitsPerPixel: 0.13 },
+    ],
+  } };
+  scenario('directional pivots, anchors and units follow uniform resampling', directional, (run, edit, preview) => {
+    const report = preview({ type: 'resample', size: [8, 7] });
+    assert.match(report.conflicts[0].message, /needs uniform canvas resampling/);
+    assert.ok(edit(crop));
+    const cropped = run(command('export')).data;
+    assert.deepEqual(cropped.directional.views[0].pivot, [2.3 - 2, 1.1 - 1]);
+    assert.deepEqual(cropped.directional.partAnchors, directional.directional.partAnchors);
+    const uniform = { type: 'resample', size: [12, 9] };
+    assert.equal(preview(uniform).valid, true);
+    const receipt = edit(uniform);
+    const resized = run(command('export')).data;
+    const view = resized.directional.views[0];
+    assert.deepEqual(view.anchors.tip, [(3.71 - 2) / (1 / 3), (1.005 - 1) / (1 / 3)]);
+    assert.equal(view.unitsPerPixel, 0.037 * (1 / 3));
+    run(command('undo'));
+    assert.deepEqual(run(command('export')).data, cropped);
+    assert.deepEqual(run(command('replay', { receipt })), receipt);
+    assert.ok(edit(pad));
+    run(command('export'));
+  });
+
+  const border = structuredClone(directional);
+  border.directional.views[0].pivot = [1000000, 0];
+  const minimum = structuredClone(directional);
+  minimum.directional.views[0].unitsPerPixel = 0.000001;
+  for (const [label, document, operation] of [
+    ['out-of-range directional pivot', border, pad],
+    ['subminimum directional units', minimum, { type: 'resample', size: [16, 12] }],
+  ]) {
+    scenario('directional rejection: ' + label, document, (run, edit, preview) => {
+      assert.match(preview(operation).conflicts[0].message, /registered angles, scale and valid anchors/);
+      edit(operation);
+      assert.deepEqual(run(command('export')).data, document);
+    });
+  }
+
   scenario('empty trim and malformed geometry', { ...indexed, frames: [{ id: 'front', durationMs: 120, cels: {} }] },
     (run, edit, preview) => {
       assert.ok(edit({ type: 'trim' }));

@@ -842,13 +842,9 @@ impl PixelCommandEditor {
                 .map_err(invalid)?
                 .result
                 .map_err(invalid)?;
-            let mut data = Json::from_ink(&target.l_data.to_json(), Limits::default())
+            return Json::from_ink(&target.to_json(), Limits::default())
                 .and_then(|row| json_value(&row))
-                .map_err(invalid)?;
-            let scale = [target.l_sx, target.l_sy]
-                .map(|factor| Json::Number(ryu_js::Buffer::new().format_finite(factor).into()));
-            data["scale"] = json_value(&Json::Array(scale.into())).map_err(invalid)?;
-            return Ok(data);
+                .map_err(invalid);
         } else if kind == "palette" {
             let encoded = compiled_json(operation, &|kind, scalar, flag, values, keys| {
                 self.editor.program.function_l_pixel_json_value(kind, scalar, flag, values, keys)

@@ -279,8 +279,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
 
   function applyCanvas(patch) {
     const scoped = ['frame', 'cel', 'edits'].some(key => Object.hasOwn(patch, key));
-    const { data, sx, sy } = unwrap(canvasEdit(codec.fromJS(patch.operation ?? null), scoped));
-    return { ...codec.toJS(data), scale: [sx, sy] };
+    return codec.toJS(unwrap(canvasEdit(codec.fromJS(patch.operation ?? null), scoped)));
   }
 
   async function attempt(patch, { dryRun = false, expected, preview, options: editOptions } = {}) {

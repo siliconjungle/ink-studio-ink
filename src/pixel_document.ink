@@ -661,7 +661,7 @@ query extract_pixel_editor_palette(options: json.Json) -> Result<json.Json, Stri
     return extract_palette.document(EditorSource, EditorArtwork, options);
 }
 
-change edit_pixel_editor_canvas(operation: json.Json, scoped: Bool) -> Result<canvas_edits.Target, String>
+change edit_pixel_editor_canvas(operation: json.Json, scoped: Bool) -> Result<json.Json, String>
     reads(EditorSource, EditorArtwork, EditorPositions)
     writes(EditorSource, EditorArtwork, EditorPositions, EditorNamed, EditorScope, EditorImage, EditorPaint) {
     let edited = canvas_edits.apply(EditorSource, EditorArtwork, EditorPositions, operation, scoped)?;

@@ -2,6 +2,7 @@ module StudioPixelCanvasEdit;
 
 import "std:json" as json;
 import "pixel_canvas.ink" as canvas;
+import "pixel_canvas_registration.ink" as registration;
 import "pixel_drawing_grid.ink" as drawing;
 import "pixel_frame.ink" as frame;
 import "pixel_mask.ink" as mask;
@@ -9,9 +10,8 @@ import "pixel_paint.ink" as paint;
 import "pixel_png_import.ink" as colors;
 import "pixel_values.ink" as value;
 
-record Target { data: json.Json, sx: f64, sy: f64, }
 record Edited { source: json.Json, positions: List<List<u32>>, slots: List<frame.SlotPlane>, runs: List<frame.RunPlane>,
-    target: Target, changed: Bool, }
+    target: json.Json, changed: Bool, }
 record Built { rows: List<json.Json>, slots: List<frame.SlotPlane>, runs: List<frame.RunPlane>, }
 record Cel { row: json.Member, slots: frame.SlotPlane, runs: frame.RunPlane, }
 record Frame { row: json.Json, slots: List<frame.SlotPlane>, runs: List<frame.RunPlane>, }
@@ -361,26 +361,30 @@ fn optional_rows(fields: List<json.Member>, key: String, rows: List<json.Json>) 
 
 fn remapped_metadata(map: canvas.Canvas, source: List<json.Member>, layers: List<json.Json>, rows: List<json.Json>, routed: List<Detail>)
     -> Result<List<json.Member>, String> {
-    if value.has(source, "directional") {
-        if map.sx != map.sy { return Err("Directional view registration needs uniform canvas resampling"); }
-        return Err("Canvas edits for directional views are not implemented");
-    }
     let sized = paint.replace(paint.replace(source, "width", number(map.grid.width)), "height", number(map.grid.height));
     let base = paint.replace(paint.replace(sized, "layers", json.array(layers)), "frames", json.array(rows));
+    let views = if value.has(source, "directional") {
+        registration.directional(map, value.get(source, "directional"))
+    } else { Ok(json.null()) };
+    let directional = views?;
     let guides = value.items(value.get(source, "guides")).map(fn(row) => guide(map, row));
     let slices = collect(value.items(value.get(source, "slices")).map(fn(row) => transform_slice(map, row)))?;
     let selections = value.items(value.get(source, "selections")).map(fn(row) => rewritten_detail(value.fields(row), map.grid, []));
-    return Ok(optional_rows(optional_rows(optional_rows(optional_rows(base, "guides", guides), "slices", slices),
-        "selections", selections), "protectedDetails", routed.map(fn(row) => row.row)));
+    let metadata = optional_rows(optional_rows(optional_rows(optional_rows(base, "guides", guides), "slices", slices),
+        "selections", selections), "protectedDetails", routed.map(fn(row) => row.row));
+    return Ok(if directional == json.null() { metadata } else { paint.replace(metadata, "directional", directional) });
 }
 
 fn reframe_binding(map: canvas.Canvas, inverse: Registers, raw: json.Json) -> json.Json {
     let fields = value.fields(raw);
     let stale = stale_sites(map.before, value.items(value.get(fields, "stale")));
-    let mapped = points(map, stale, inverse);
     let unbound = fields.filter(fn(row) => row.key != "canvas" && row.key != "stale");
-    if length(mapped.pixels) == 0 { return json.object(unbound); }
-    let spans = paint.runs(map.grid, mapped.pixels).map(fn(span) => json.array([number(span.x), number(span.y), number(span.z)]));
+    if length(stale) == 0 { return json.object(unbound); }
+    let sites = if canvas.changed(map) { points(map, stale, inverse).pixels } else {
+        mask.indices(foldl(stale, mask.blank(map.grid), fn(p) => fn(out) => mask.mark(out, p)).freeze())
+    };
+    if length(sites) == 0 { return json.object(unbound); }
+    let spans = paint.runs(map.grid, sites).map(fn(span) => json.array([number(span.x), number(span.y), number(span.z)]));
     return json.object(paint.replace(unbound, "stale", json.array(spans)));
 }
 
@@ -398,29 +402,6 @@ fn stale_run(g: mask.Grid, fields: List<json.Json>) -> List<u32> {
     return repeat_until(n, empty, fn(out) => false, fn(i) => fn(out) => out.push(y * g.width + x + i)).freeze();
 }
 
-fn registration(map: canvas.Canvas, before: json.Json) -> Result<json.Json, String> {
-    let fields = value.fields(before);
-    let prior_scale = if before == json.null() { json.array([number(1), number(1)]) } else { value.get(fields, "scale") };
-    let prior_offset = value.items(value.get(fields, "offset"));
-    let size = if before == json.null() { grid_json(map.before) } else { value.get(fields, "size") };
-    let old_scale = value.items(prior_scale);
-    if map.sx != 1.0f64 || map.sy != 1.0f64 || value.number(old_scale.at_or(0, number(1))) != 1.0f64
-        || value.number(old_scale.at_or(1, number(1))) != 1.0f64 {
-        if !canvas.changed(map) { return Ok(before); }
-        return Err("Resampled canvas registrations are not implemented");
-    }
-    let x = value.number(prior_offset.at_or(0, number(0))) + offset(map, 0);
-    let y = value.number(prior_offset.at_or(1, number(0))) + offset(map, 1);
-    if x == 0.0f64 && y == 0.0f64 && size == grid_json(map.grid) { return Ok(json.null()); }
-    if x == 0.5f64 * floor(x * 2.0f64) && y == 0.5f64 * floor(y * 2.0f64)
-        && x >= -1000000.0f64 && x <= 1000000.0f64 && y >= -1000000.0f64 && y <= 1000000.0f64 {
-        return Ok(json.object([paint.member("size", size),
-            paint.member("offset", json.array([half_number(x), half_number(y)])), paint.member("scale", prior_scale)]));
-    }
-    if !canvas.changed(map) { return Ok(before); }
-    return Err("Canvas registrations with fractional offsets are not implemented");
-}
-
 record Bindings { rows: List<json.Json>, reports: List<json.Json>, }
 
 fn bindings(map: canvas.Canvas, inverse: Registers, rows: List<json.Json>, policy: String) -> Result<Bindings, String> {
@@ -432,10 +413,9 @@ fn bind(map: canvas.Canvas, inverse: Registers, raw: json.Json, policy: String, 
     let old = progress?;
     let row = value.fields(raw);
     let before = value.get(row, "canvas");
-    let requested = if policy == "preserve" { registration(map, before) } else { Ok(json.null()) };
+    let requested = if policy == "preserve" { registration.preserve(map, before, grid_json(map.before), grid_json(map.grid)) } else { Ok(json.null()) };
     let after = requested?;
-    let reframed = if canvas.changed(map) { reframe_binding(map, inverse, raw) }
-        else { json.object(row.filter(fn(item) => item.key != "canvas")) };
+    let reframed = reframe_binding(map, inverse, raw);
     let final = if after == json.null() { reframed } else { json.object(paint.replace(value.fields(reframed), "canvas", after)) };
     let report = json.object([paint.member("id", value.get(row, "id")), paint.member("policy", json.text(policy)),
         paint.member("before", before), paint.member("after", after)]);
@@ -447,17 +427,18 @@ fn dropped_details(rows: List<Detail>) -> List<json.Json> {
         paint.member("id", value.get(value.fields(row.row), "id")), paint.member("pixels", number(row.dropped))]));
 }
 
-fn report(map: canvas.Canvas, tool: String, bound: Bindings, rows: List<Detail>, before: List<json.Member>, after: List<json.Member>) -> Target {
+fn report(map: canvas.Canvas, tool: String, bound: Bindings, rows: List<Detail>, before: List<json.Member>, after: List<json.Member>) -> json.Json {
     let main = [paint.member("destination", json.text("canvas")), paint.member("kind", json.text("canvas")),
         paint.member("tool", json.text(tool)), paint.member("beforeGrid", grid_json(map.before)),
         paint.member("grid", grid_json(map.grid)), paint.member("offset", json.array([signed(map.offset.x), signed(map.offset.y)])),
-        paint.member("filter", json.text(map.filter)), paint.member("bindings", json.array(bound.reports)),
+        paint.member("scale", registration.scale(map)), paint.member("filter", json.text(map.filter)),
+        paint.member("bindings", json.array(bound.reports)),
         paint.member("droppedProtected", json.array(dropped_details(rows)))];
     let slices = value.get(before, "slices");
     let extra: List<json.Member> = if canvas.changed(map) && length(value.items(slices)) != 0 {
         [paint.member("slices", json.object([paint.member("before", slices), paint.member("after", value.get(after, "slices"))]))]
     } else { [] };
-    return Target { data: json.object(main.concat(extra)), sx: map.sx, sy: map.sy };
+    return json.object(main.concat(extra));
 }
 
 fn apply(source: json.Json, art: frame.Artwork, stored: List<List<u32>>, raw: json.Json, scoped: Bool) -> Result<Edited, String> {
@@ -481,8 +462,9 @@ fn apply(source: json.Json, art: frame.Artwork, stored: List<List<u32>>, raw: js
 fn apply_plan(map: canvas.Canvas, before: List<json.Member>, art: frame.Artwork, stored: List<List<u32>>,
     rules: List<paint.Detail>, policy: String, tool: String) -> Result<Edited, String> {
     let inverse = registers(map);
-    let bound = bindings(map, inverse, value.items(value.get(before, "sceneBindings")), policy)?;
+    let registered = value.items(value.get(before, "sceneBindings"));
     if !canvas.changed(map) {
+        let bound = bindings(map, inverse, registered, policy)?;
         let after = optional_rows(before, "sceneBindings", bound.rows);
         let data = report(map, tool, bound, [], before, after);
         return Ok(Edited { source: json.object(after), positions: stored, slots: [], runs: [], target: data, changed: false });
@@ -492,6 +474,7 @@ fn apply_plan(map: canvas.Canvas, before: List<json.Member>, art: frame.Artwork,
     let layers = value.items(value.get(before, "layers")).map(fn(row) =>
         json.object(value.fields(row).filter(fn(field) => field.key != "offset")));
     let revised = remapped_metadata(map, before, layers, ready.rows, rows)?;
+    let bound = bindings(map, inverse, registered, policy)?;
     let after = optional_rows(revised, "sceneBindings", bound.rows);
     let data = report(map, tool, bound, rows, before, after);
     let positions = named_positions(map, inverse, value.items(value.get(before, "selections")), stored);
