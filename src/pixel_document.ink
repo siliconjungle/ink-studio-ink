@@ -23,6 +23,9 @@ import "pixel_png_input.ink" as png_input;
 import "pixel_png_import.ink" as png_import;
 import "pixel_guarded_edit.ink" as guarded;
 import "pixel_inspect.ink" as inspection;
+import "pixel_guides.ink" as guides;
+import "pixel_sample.ink" as sample;
+import "pixel_timeline.ink" as timeline;
 
 record Layer { id: String, kind: String, parent: String, }
 record Cel { id: String, hold: String, }
@@ -412,7 +415,8 @@ fn upgrade_legacy(items: List<json.Member>, layers: List<json.Json>) -> json.Jso
 fn validate_frames(items: List<json.Member>, known: List<Layer>) -> Result<Unit, String> {
     let frames = pair(field(items, "frames"));
     if length(frames) == 0 { return Err("Pixel documents need at least one frame"); }
-    return validate_timeline(frames, known);
+    let validated = validate_timeline(frames, known)?;
+    return guides.validate(items, frames.map(fn(row) => frame_raster.frame_name(row)));
 }
 
 pub fn open_pixel_document(document: json.Json) -> Result<Opened, String> {
@@ -965,6 +969,20 @@ query describe_pixel_command_document() -> Result<json.Json, String> reads(Edito
 query inspect_pixel_command(at: json.Json, options: json.Json) -> Result<inspection.Report, String>
     reads(EditorSource, EditorArtwork, JournalCursor) {
     return inspection.inspect(EditorSource, EditorArtwork, JournalCursor.revision, at, options);
+}
+
+query sample_pixel_editor(at: json.Json, options: json.Json) -> Result<json.Json, String>
+    reads(EditorSource, EditorArtwork, JournalCursor) {
+    return sample.sample(EditorSource, EditorArtwork, JournalCursor.revision, at, options);
+}
+
+query snap_pixel_editor(at: json.Json, options: json.Json) -> Result<json.Json, String>
+    reads(EditorSource, EditorArtwork, JournalCursor) {
+    return guides.snap(EditorSource, EditorArtwork, JournalCursor.revision, at, options);
+}
+
+query timeline_pixel_editor() -> Result<json.Json, String> reads(EditorSource, EditorArtwork, JournalCursor) {
+    return timeline.describe(EditorSource, EditorArtwork, JournalCursor.revision);
 }
 
 query export_pixel_command_stamp(options: json.Json) -> Result<assets.Stamp, String> reads(EditorSource, EditorArtwork, EditorPositions) {

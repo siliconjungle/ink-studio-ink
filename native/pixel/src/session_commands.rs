@@ -1,5 +1,5 @@
 use super::{
-    cli_flags::{read_preview_options, reference, shot_frame},
+    cli_flags::{cli_number, read_preview_options, reference, shot_frame},
     file_output::{absolute_normalized, output, output_bytes, resolved},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -33,6 +33,9 @@ pub(crate) enum Request {
     Execute(String),
     Preview(PixelPreviewOptions),
     Copy(String),
+    Sample { point: Value, settings: Map<String, Value> },
+    Snap { point: Value, settings: Map<String, Value> },
+    Timeline,
 }
 
 impl Request {
@@ -47,6 +50,9 @@ impl Request {
                 let reply = editor.copy_selection(&options)?;
                 serde_json::to_string(&reply).map_err(|error| error.to_string().into())
             }
+            Self::Sample { point, settings } => editor.sample(&point.to_string(), &Value::Object(settings).to_string()),
+            Self::Snap { point, settings } => editor.snap(&point.to_string(), &Value::Object(settings).to_string()),
+            Self::Timeline => editor.timeline(),
         }
     }
 }
@@ -96,6 +102,14 @@ fn inspect_destinations(options: &Map<String, Value>) -> Result<Option<Value>, S
             Ok(json!(names))
         })
         .transpose()
+}
+
+fn decimal_pair(raw: &Value, message: &str) -> Result<Value, String> {
+    let parts: Vec<_> = raw.as_str().ok_or(message)?.split(',').map(str::trim).collect();
+    if parts.len() != 2 || parts.contains(&"") {
+        return Err(message.into());
+    }
+    Ok(Value::Array(parts.into_iter().map(|part| json!(cli_number(part))).collect()))
 }
 
 fn require_local(action: &str, options: &Map<String, Value>) -> Result<(), String> {
@@ -203,6 +217,26 @@ pub(crate) fn request(
                 settings.extend(selected(options, &[("selection", "selection")]));
                 return Ok(Request::Copy(Value::Object(settings).to_string()));
             }
+            "sample" => {
+                let point = options.get("at").map(|v| decimal_pair(v, "Use --at with two numbers"))
+                    .transpose()?.unwrap_or(Value::Null);
+                settings = selected(options, &scope);
+                settings.extend(selected(options, &[("mode", "mode"), ("destination", "destination")]));
+                if let Some(uv) = options.get("uv") {
+                    settings.insert("uv".into(), decimal_pair(uv, "Use --uv with two numbers")?);
+                }
+                return Ok(Request::Sample { point, settings });
+            }
+            "snap" => {
+                let message = "Use --at x,y for guide snapping";
+                let point = decimal_pair(options.get("at").ok_or(message)?, message)?;
+                settings = selected(options, &[("frame", "frame")]);
+                if let Some(radius) = options.get("radius") {
+                    settings.insert("radius".into(), json!(reference(radius).and_then(cli_number)));
+                }
+                return Ok(Request::Snap { point, settings });
+            }
+            "timeline" => return Ok(Request::Timeline),
             "export" => return Ok(Request::Execute(export_command(options)?)),
             _ => {}
         }

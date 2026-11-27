@@ -130,6 +130,9 @@ pub fn run(mut args: impl Iterator<Item = OsString>) -> Result<(), String> {
                 | "validate"
                 | "inspect"
                 | "copy"
+                | "sample"
+                | "snap"
+                | "timeline"
                 | "export"
         );
     if !valid || paths.len() != usize::from(needs_input) + 1 {

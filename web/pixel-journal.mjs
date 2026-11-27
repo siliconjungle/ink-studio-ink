@@ -194,6 +194,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
   const canvasEdit = bind('edit_pixel_editor_canvas');
   const plan = bind('plan_pixel_command'), describe = bind('describe_pixel_command_document');
   const inspect = bind('inspect_pixel_command');
+  const sample = bind('sample_pixel_editor'), snap = bind('snap_pixel_editor'), timeline = bind('timeline_pixel_editor');
   const stamp = bind('export_pixel_command_stamp'), deck = bind('export_pixel_command_layer_deck');
   const png = bind('export_pixel_command_png');
   const observe = bind('observe_pixel_edit'), links = bind('pixel_edit_links');
@@ -714,6 +715,15 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
     },
     captureBrush: options => enqueue(() => editor.captureBrush(options)),
     copySelection: options => enqueue(() => editor.copySelection(options)),
+    sample(at, options = {}) {
+      const point = capture(at), settings = capture(options);
+      return enqueue(() => codec.toJS(unwrap(sample(codec.fromJS(point), codec.fromJS(settings)))));
+    },
+    snap(at, options = {}) {
+      const point = capture(at), settings = capture(options);
+      return enqueue(() => codec.toJS(unwrap(snap(codec.fromJS(point), codec.fromJS(settings)))));
+    },
+    timeline: () => enqueue(() => codec.toJS(unwrap(timeline()))),
     begin: (label = '') => enqueue(() => unwrap(begin(label)), true),
     preview: () => enqueue(() => {
       if (!read().pending) throw new Error('No active transaction');

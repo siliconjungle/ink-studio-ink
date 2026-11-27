@@ -42,7 +42,7 @@ record Raster { width: u32, height: u32, frame: String, image: selection.Image, 
 record PaintView { captured: Captured, pixels: List<Pixel>, }
 record PreviewView { pixels: List<Pixel>, trace: List<u32>, uses_alpha: Bool, sources: List<RawLayer>, }
 record ExportView { pixels: List<Pixel>, uses_alpha: Bool, raw: Captured, sources: List<RawLayer>, }
-record Inspected { view: PreviewView, sample: u32, observations: List<Observation>, }
+record Inspected { view: PreviewView, sample: u32, observations: List<Observation>, raw: Captured, }
 
 fn palette_color(raw: json.Json) -> u32 {
     let s = json.as_text(raw).fold(fn(color) => color, fn(issue) => value.text(value.get(value.fields(raw), "color")));
@@ -486,7 +486,7 @@ fn inspect_view(art: Artwork, scope: Scope, references: Bool, point: u32, check_
     if scene.issue != "" { return Err(scene.issue); }
     return Ok(Inspected { view: PreviewView { pixels: scene.canvas.pixels.freeze(), trace: scene.canvas.trace.freeze(),
         uses_alpha: scene.canvas.uses_alpha, sources: [] },
-        sample: if sample_only { 0 } else { point }, observations: scene.observations.freeze() });
+        sample: if sample_only { 0 } else { point }, observations: scene.observations.freeze(), raw: scene.capture });
 }
 
 fn frame_name(row: json.Json) -> String { return value.text(value.get(value.fields(row), "id")); }

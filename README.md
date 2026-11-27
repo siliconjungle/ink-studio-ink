@@ -145,6 +145,11 @@ ink-studio-pixel session export work-drawing --artifact png --out final.png
 ```
 
 Use `session select`, `inspect`, `copy`, or `validate` to read the current draft.
+Use `session sample DIRECTORY --at x,y` to sample the composite, or pass
+`--mode layer --layer ID` (or `--cel ID`) to read an authored pixel.
+Use `session snap DIRECTORY --at x,y [--frame ID] [--radius N]` to snap a
+possibly fractional point to active guides. Use `session timeline DIRECTORY`
+to report frame timings, cel holds, and playback tags.
 Use the `draw`, `mask`, `recolor`, and `transform` aliases with patch files.
 `session run DIRECTORY COMMAND --out result.json` saves a command's reply.
 A rejected edit still saves the rollback of its open draft. Session output
@@ -159,6 +164,8 @@ portable checkpoint in browser storage, pass `{ sessionName }` to
 `openPixelCommandSession(checkpoint, { sessionName })`. The browser stores names
 per origin in IndexedDB, and `exportSession()` returns a checkpoint the native
 editor can open.
+The browser editor exposes the same local queries as `sample([x, y], options)`,
+`snap([x, y], options)`, and `timeline()`.
 
 `raster` and `select-document` are the native equivalents. Their JSON request contains `document` and optional `frame`, `layer` or `cel`. Add `query` for `select-document`.
 

@@ -802,6 +802,40 @@ impl PixelCommandEditor {
         )
     }
 
+    pub fn sample(&mut self, point: &str, options: &str) -> Result<String, PixelEditError> {
+        self.pixel_location_report(point, options, false)
+    }
+
+    pub fn snap(&mut self, point: &str, options: &str) -> Result<String, PixelEditError> {
+        self.pixel_location_report(point, options, true)
+    }
+
+    pub fn timeline(&mut self) -> Result<String, PixelEditError> {
+        let report = self.editor.program.invoke_view_l_timeline_pixel_editor()?.result?;
+        let limits = Limits::default();
+        Ok(Json::from_ink(&report.to_json(), limits)?.stringify(limits)?)
+    }
+
+    fn pixel_location_report(
+        &mut self,
+        point: &str,
+        options: &str,
+        snap: bool,
+    ) -> Result<String, PixelEditError> {
+        let make = |kind, scalar, flag, values, keys| {
+            self.editor.program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
+        };
+        let at = compiled_json(parse_json(point)?, &make);
+        let settings = compiled_json(parse_json(options)?, &make);
+        let report = if snap {
+            self.editor.program.invoke_view_l_snap_pixel_editor(at, settings)?.result?
+        } else {
+            self.editor.program.invoke_view_l_sample_pixel_editor(at, settings)?.result?
+        };
+        let limits = Limits::default();
+        Ok(Json::from_ink(&report.to_json(), limits)?.stringify(limits)?)
+    }
+
     fn command_inspection(
         &mut self,
         coordinate: Json,
