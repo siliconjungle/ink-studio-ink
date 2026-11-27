@@ -1,5 +1,5 @@
 use ink_gpu_program::{Backend, Engine};
-use ink_studio_wgpu::{ContourSettings, GaussianRenderer, WorldOrder};
+use ink_studio_wgpu::{Bone, Camera, ContourSettings, GaussianRenderer, RigLight, WorldOrder};
 use serde_json::json;
 
 #[test]
@@ -178,6 +178,20 @@ fn uploads_only_changed_rig_transforms() {
     for (pose, bytes) in [(&bones, 4 + 3 * 48 + 24), (&changed, 48 + 24), (&signed_zero, 48 + 24), (&signed_zero, 24)] {
         assert_eq!(renderer.update_skin_camera(&device, &camera, pose, &light).unwrap(), bytes);
     }
+    let typed_bone = Bone {
+        axis_x: [1.0, 0.0, 0.0], axis_y: [0.0, 1.0, 0.0], axis_z: [0.0, 0.0, 1.0], offset: [0.0; 3],
+    };
+    let typed_light = RigLight { sun: [0.0, 1.0, 0.0], ambient: 1.0, diffuse: 0.0, blink: 1.0 };
+    let typed_camera = Camera {
+        eye: [0.0; 3], right: typed_bone.axis_x, up: typed_bone.axis_y, back: typed_bone.axis_z,
+        half_viewport: [32.0; 2], focal: 1.0, near_clip: 0.1, far_clip: 10.0, variance: 0.0,
+        perspective: false,
+    };
+    let mut rigid_pose = [typed_bone; 3];
+    rigid_pose[1].offset = [4.0, -0.0, 0.0];
+    assert_eq!(renderer.update_packed_skin_camera(&device, typed_camera, rigid_pose, typed_light).unwrap(), 24);
+    rigid_pose[1].offset[1] = 0.0;
+    assert_eq!(renderer.update_packed_skin_camera(&device, typed_camera, rigid_pose, typed_light).unwrap(), 48 + 24);
 
     let mut engine = Engine::with_device(device, queue);
     let plan = json!({
@@ -200,4 +214,26 @@ fn uploads_only_changed_rig_transforms() {
     engine.step(session, 1).unwrap();
     let output = engine.read(session, &json!({"outputs": ["posed"]})).unwrap();
     assert_eq!(output["values"]["posed"][0]["position"], json!([4.0, 0.0, -2.0]));
+
+    let skin = engine.manifest()["functions"].as_array().unwrap().iter()
+        .find(|function| function["name"] == "skin_world").unwrap();
+    let layout = skin["params"][1]["type"].clone();
+    let mut wrong = layout.clone();
+    wrong["element"]["fields"].as_array_mut().unwrap().swap(0, 1);
+    assert!(engine.packed_input(session, "bones", &wrong).is_err());
+    let input = engine.packed_input(session, "bones", &layout).unwrap();
+    let words = |offset: f32| {
+        [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, offset, 0.0, 0.0].map(f32::to_bits).to_vec()
+    };
+    assert!(engine.write_ranges_packed(&input, vec![(1, words(6.0)), (1, words(8.0))]).is_err());
+    assert!(engine.write_ranges_packed(&input, vec![(1, vec![0; 11])]).is_err());
+    engine.step(session, 1).unwrap();
+    let unchanged = engine.read(session, &json!({"outputs": ["posed"]})).unwrap();
+    assert_eq!(unchanged["values"]["posed"], output["values"]["posed"]);
+    assert_eq!(engine.write_ranges_packed(&input, vec![(1, words(6.0))]).unwrap()["counters"]["upload_bytes"], 48);
+    engine.step(session, 1).unwrap();
+    let output = engine.read(session, &json!({"outputs": ["posed"]})).unwrap();
+    assert_eq!(output["values"]["posed"][0]["position"], json!([6.0, 0.0, -2.0]));
+    engine.close(session).unwrap();
+    assert!(engine.write_packed(&input, words(0.0)).is_err());
 }

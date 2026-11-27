@@ -3,11 +3,14 @@ use serde_json::{Value, json};
 use wgpu::util::DeviceExt;
 
 mod contours;
+mod packed_inputs;
 mod present;
 #[path = "../../build/contour-render/render.rs"]
 mod render;
 pub use contours::ContourSettings;
 use contours::ContourRaster;
+pub use packed_inputs::{Bone, Camera, ContourLight, RigLight, WorldSplat};
+use packed_inputs::{GpuWords, PackedInputs, binding};
 pub use present::PixelPresenter;
 
 pub struct GaussianRenderer {
@@ -21,6 +24,7 @@ pub struct GaussianRenderer {
     count: u32,
     skin_rows: u32,
     directional: bool,
+    packed_inputs: PackedInputs,
 }
 
 enum Raster {
@@ -260,6 +264,7 @@ impl GaussianRenderer {
             count,
             skin_rows,
             directional,
+            packed_inputs: PackedInputs::default(),
         };
         renderer.project(device)?;
         Ok(renderer)
@@ -297,6 +302,13 @@ impl GaussianRenderer {
 
     pub fn stage_ranges(&mut self, ranges: &[(usize, Value)]) -> Result<Value, String> {
         self.engine.write_ranges(self.session, "splats", ranges)
+    }
+
+    /// Stage world-space rows encoded by `WorldSplat::pack`.
+    pub fn stage_world_ranges(&mut self, ranges: Vec<(usize, Vec<u32>)>) -> Result<u64, String> {
+        let input = binding(&mut self.packed_inputs.splats, &self.engine, self.session,
+            "splats", packed_inputs::list::<WorldSplat>)?;
+        upload_bytes(&self.engine.write_ranges_packed(input, ranges)?)
     }
 
     /// Replaces the display colors, or restores the original grade with `None`.
@@ -348,6 +360,55 @@ impl GaussianRenderer {
         self.project(device)
     }
 
+    /// Pass camera words straight into the resident projection.
+    pub fn update_packed_camera(&mut self, device: &wgpu::Device, camera: Camera) -> Result<Value, String> {
+        self.write_packed_camera(camera)?;
+        self.project(device)
+    }
+
+    fn write_packed_camera(&mut self, mut camera: Camera) -> Result<(), String> {
+        camera.half_viewport = self.half_viewport;
+        let input = binding(&mut self.packed_inputs.camera, &self.engine, self.session, "camera", Camera::layout)?;
+        self.engine.write_packed(input, camera.words())?;
+        Ok(())
+    }
+
+    pub fn stage_packed_contour_lighting(&mut self, light: Option<ContourLight>) -> Result<(), String> {
+        let Raster::Contours(contour) = &self.raster else {
+            return Err("Enable directional Colored Contours first".into());
+        };
+        if !self.directional {
+            return Err("Enable directional Colored Contours first".into());
+        }
+        let light = light.unwrap_or(ContourLight::OFF);
+        if light.ambient.iter().chain(&light.key).any(|value| !value.is_finite()) {
+            return Err("Invalid contour light".into());
+        }
+        let input = binding(&mut self.packed_inputs.contour_light, &self.engine, self.session,
+            "contourLight", ContourLight::layout)?;
+        self.engine.write_packed(input, light.words())?;
+        contour.set_lighting(light.ambient, light.key, light.enabled);
+        Ok(())
+    }
+
+    /// Update a native skinned frame without building a JSON rig or camera.
+    pub fn update_packed_skin_camera(
+        &mut self, device: &wgpu::Device, camera: Camera,
+        bones: impl IntoIterator<Item = Bone>, light: RigLight,
+    ) -> Result<u64, String> {
+        let bones = bones.into_iter();
+        let mut words = Vec::with_capacity(bones.size_hint().0.saturating_mul(12));
+        for bone in bones { bone.append(&mut words); }
+        let input = binding(&mut self.packed_inputs.bones, &self.engine, self.session,
+            "bones", packed_inputs::list::<Bone>)?;
+        let bone_bytes = upload_bytes(&self.engine.write_changed_packed(input, words)?)?;
+        let input = binding(&mut self.packed_inputs.rig_light, &self.engine, self.session, "light", RigLight::layout)?;
+        let light_bytes = upload_bytes(&self.engine.write_packed(input, light.words())?)?;
+        self.write_packed_camera(camera)?;
+        self.project(device)?;
+        Ok(bone_bytes + light_bytes)
+    }
+
     pub fn update_actor_camera(
         &mut self,
         device: &wgpu::Device,
@@ -370,11 +431,6 @@ impl GaussianRenderer {
         let light_write = self.engine.write(self.session, "light", light)?;
         self.engine.write(self.session, "camera", &camera)?;
         self.project(device)?;
-        let upload_bytes = |result: &Value| {
-            result["counters"]["upload_bytes"]
-                .as_u64()
-                .ok_or("Missing rig upload count")
-        };
         Ok(upload_bytes(&bone_write)? + upload_bytes(&light_write)?)
     }
 
@@ -412,6 +468,10 @@ impl GaussianRenderer {
         pass.set_bind_group(0, bindings, &[]);
         draw.raster(&mut pass);
     }
+}
+
+fn upload_bytes(result: &Value) -> Result<u64, String> {
+    result["counters"]["upload_bytes"].as_u64().ok_or("Missing input upload count".into())
 }
 
 fn buffer_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {

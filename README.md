@@ -12,6 +12,8 @@ Use `with_directional_contours` in Rust or `directional: true` in the browser co
 
 Both hosts can stage changes to disjoint row ranges and project them on the next camera update or explicit `project` call. The `wide-green` scene uses this path to retain the original field cells as the view moves. `import_builder_splats` reads position, covariance, pigment and opacity from the Studio builder’s sixteen-float rows. Native clients can present an art-resolution texture with `PixelPresenter`, which uses centered nearest-neighbor scaling and supports sRGB surfaces.
 
+Rust callers can stage packed world splat ranges and use typed camera, bone, rig light, and contour light updates. Studio checks the ordered field layout against the compiled GPU session before its first packed write. Rebirth uses these methods for live frame updates.
+
 A world view can reserve its final splat range for one moving actor. Ink applies the actor's yaw and translation to the centers and rotates their covariances on the GPU. Actor and scene rows share the same stable depth sort. Moving the actor updates its placement without replacing its pose rows. Rust exposes the mode through `WorldOrder::Actor` and `update_actor_camera`, and JavaScript accepts `actor` when creating the renderer and updating its camera.
 
 The skinned path uploads a character's bind splats once. `src/walker.ink` evaluates a biped's gait, lean and nod springs, landing squash, and cloth joints at each simulation tick. It also provides seeded gaze and blink timing for character rigs. `skin_world` blends the joint transforms, applies them to splat centers and covariances, and shades the transformed normals. The GPU projects and compacts terrain and character splats before the shared stable depth sort. Rust exposes this through `WorldOrder::Skinned` and `update_skin_camera`. The browser renderer takes a `skin` option and exposes `updateSkinCamera`. After the first pose update, both hosts keep unchanged leading and trailing joint transforms resident and upload only the span between changed joints. A repeated pose uploads the light alone.
@@ -62,7 +64,7 @@ Lathe profiles can ripple as they taper, including the phase-shifted power profi
 
 ## Build and check
 
-Use [Ink Lang commit `578e00b`](https://github.com/siliconjungle/ink-lang/commit/578e00baaf48ed8e824065bd25e838295bfabf4b) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for the bake's immutable geometry inputs, including optional geometry. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
+Use [Ink Lang commit `b9ff90f`](https://github.com/siliconjungle/ink-lang/commit/b9ff90fc7e3a82de14dab5130b465ce4c04097a3) with its pinned submodules. Set `INK` to the absolute path of its built `ink` executable, or put it on `PATH`. The build asks Ink to select checked Rust borrows for the bake's immutable geometry inputs, including optional geometry. The GPU build requires Cargo and the `wasm32-unknown-unknown` Rust target.
 
 ```sh
 ./scripts/build.sh --gpu
