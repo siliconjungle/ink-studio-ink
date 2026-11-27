@@ -8,9 +8,12 @@ fn computes_and_draws_from_the_same_device_buffer() {
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
             .expect("native GPU adapter");
-    let (device, queue) =
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-            .expect("native GPU device");
+    // A 64px output fits both separate grids on this device. The combined
+    // attachment requires 192px of height, so this also exercises fallback.
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_limits: wgpu::Limits { max_texture_dimension_2d: 128, ..Default::default() },
+        ..Default::default()
+    })).expect("native GPU device");
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let size = wgpu::Extent3d {
         width: 64,

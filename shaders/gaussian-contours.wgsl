@@ -24,14 +24,14 @@ fn nearest(c: vec3f, solid: bool) -> u32 {
   }
   return best;
 }
-fn pixelAt(p: vec2i) -> vec2i {
-  return clamp(p, vec2i(0), vec2i(textureDimensions(depth)) - 1);
+fn pixelAt(p: vec2i, size: vec2i, offset: vec2i) -> vec2i {
+  return clamp(p, vec2i(0), size - 1) + offset;
 }
-fn pixelDepth(p: vec2i) -> f32 {
+fn pixelDepth(p: vec2i, size: vec2i, offset: vec2i) -> f32 {
   var result = 1.0;
   for (var i = 0i; i < 4; i++) {
     // Sample bottom first to preserve WebGL's ordering when votes tie.
-    result = min(result,textureLoad(depth,pixelAt(p*2+vec2i(i&1,1-(i>>1))),0).r);
+    result = min(result,textureLoad(depth,pixelAt(p*2+vec2i(i&1,1-(i>>1)), size, offset),0).r);
   }
   return result;
 }
@@ -47,18 +47,23 @@ fn light_color(color: vec3f, signal: vec2f) -> vec3f {
   let corner = vec2f(f32((id << 1u) & 2u),f32(id & 2u));
   return vec4f(corner*2.0-1.0,0.0,1.0);
 }
-@fragment fn fragment(@builtin(position) xy: vec4f) -> @location(0) vec4f {
+fn compose(xy: vec4f, atlas: bool) -> vec4f {
+  // Keep the hard native grid at the origin. Moving it can shift edge
+  // coverage by a raster subpixel on some devices.
+  let native_size = select(vec2i(textureDimensions(native)), vec2i(textureDimensions(depth)) / vec2i(2, 3), atlas);
+  let high_offset = vec2i(0, select(0, native_size.y, atlas));
+  let high_size = native_size * 2;
   let p = vec2i(xy.xy);
   var mask = 0u;
   for (var i = 0i; i < 4; i++) {
-    if (textureLoad(depth,pixelAt(p*2+vec2i(i&1,1-(i>>1))),0).r < .995) { mask |= 1u << u32(i); }
+    if (textureLoad(depth,pixelAt(p*2+vec2i(i&1,1-(i>>1)), high_size, high_offset),0).r < .995) { mask |= 1u << u32(i); }
   }
-  if (mask != 0u && (mask != 15u || max(max(pixelDepth(p-vec2i(1,0)),pixelDepth(p+vec2i(1,0))),
-    max(pixelDepth(p-vec2i(0,1)),pixelDepth(p+vec2i(0,1)))) >= .995)) {
+  if (mask != 0u && (mask != 15u || max(max(pixelDepth(p-vec2i(1,0), high_size, high_offset),pixelDepth(p+vec2i(1,0), high_size, high_offset)),
+    max(pixelDepth(p-vec2i(0,1), high_size, high_offset),pixelDepth(p+vec2i(0,1), high_size, high_offset))) >= .995)) {
     var labels = array<i32,4>(-1,-1,-1,-1);
     for (var i = 0; i < 4; i++) {
       if ((mask & (1u << u32(i))) != 0u) {
-        labels[i] = i32(nearest(textureLoad(high,pixelAt(p*2+vec2i(i&1,1-(i>>1))),0).rgb,true));
+        labels[i] = i32(nearest(textureLoad(high,pixelAt(p*2+vec2i(i&1,1-(i>>1)), high_size, high_offset),0).rgb,true));
       }
     }
     var best = 0i; var score = 0i;
@@ -73,7 +78,7 @@ fn light_color(color: vec3f, signal: vec2f) -> vec3f {
       var signal = vec2f(0);
       for (var i = 0; i < 4; i++) {
         if labels[i] == best {
-          signal += textureLoad(depth,pixelAt(p*2+vec2i(i&1,1-(i>>1))),0).gb;
+          signal += textureLoad(depth,pixelAt(p*2+vec2i(i&1,1-(i>>1)), high_size, high_offset),0).gb;
         }
       }
       body = light_color(body, signal / f32(score));
@@ -82,13 +87,13 @@ fn light_color(color: vec3f, signal: vec2f) -> vec3f {
     let ink = min(vec3f(1),raw * max(1.0,.12 / max(dot(raw,weights),.001)));
     return vec4f(mix(pal.mapped[0].xyz,mix(body,ink,.65),f32(countOneBits(mask))*.25),1);
   }
-  let bottomUp = i32(textureDimensions(native).y) - 1 - p.y;
+  let bottomUp = native_size.y - 1 - p.y;
   let noise = ((bayer[(p.x&3) + ((bottomUp&3)<<2)] + .5) / 16.0 - .5) * pal.settings.y;
   var color = textureLoad(native,p,0).rgb;
   if (pal.settings.z > 0.0) {
     let offsets = array<vec2i,8>(vec2i(2,0),vec2i(-2,0),vec2i(0,2),vec2i(0,-2),
       vec2i(1,1),vec2i(-1,1),vec2i(1,-1),vec2i(-1,-1));
-    let size = vec2i(textureDimensions(nativeDepth))-1;
+    let size = native_size-1;
     let center = textureLoad(nativeDepth,p,0).r;
     var occlusion = 0.0;
     for (var i = 0u; i < 8u; i++) {
@@ -104,6 +109,14 @@ fn light_color(color: vec3f, signal: vec2f) -> vec3f {
     return vec4f(light_color(body, textureLoad(nativeDepth,p,0).gb),1);
   }
   return vec4f(body,1);
+}
+
+@fragment fn fragment(@builtin(position) xy: vec4f) -> @location(0) vec4f {
+  return compose(xy, true);
+}
+
+@fragment fn separate_fragment(@builtin(position) xy: vec4f) -> @location(0) vec4f {
+  return compose(xy, false);
 }
 
 // One sorted 13-word row drives both color and depth grids. Projected positions

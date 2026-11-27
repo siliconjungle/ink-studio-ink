@@ -62,6 +62,13 @@ pub enum WorldOrder {
     },
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct ContourOptions {
+    pub directional: bool,
+    /// Select after measuring the renderer's scene and device.
+    pub parallel_u64_merge: bool,
+}
+
 impl GaussianRenderer {
     pub fn new(
         device: &wgpu::Device,
@@ -70,7 +77,7 @@ impl GaussianRenderer {
         size: [u32; 2],
         splats: &Value,
     ) -> Result<Self, String> {
-        Self::create(device, queue, format, size, splats, None, None, false)
+        Self::create(device, queue, format, size, splats, None, None, ContourOptions::default())
     }
 
     pub fn with_camera(
@@ -90,7 +97,7 @@ impl GaussianRenderer {
             splats,
             Some((camera, ordering)),
             None,
-            false,
+            ContourOptions::default(),
         )
     }
 
@@ -104,7 +111,7 @@ impl GaussianRenderer {
         ordering: WorldOrder,
         settings: ContourSettings<'_>,
     ) -> Result<Self, String> {
-        Self::with_contour_mode(device, queue, format, size, splats, camera, ordering, settings, false)
+        Self::with_contour_options(device, queue, format, size, splats, camera, ordering, settings, ContourOptions::default())
     }
 
     pub fn with_directional_contours(
@@ -117,10 +124,11 @@ impl GaussianRenderer {
         ordering: WorldOrder,
         settings: ContourSettings<'_>,
     ) -> Result<Self, String> {
-        Self::with_contour_mode(device, queue, format, size, splats, camera, ordering, settings, true)
+        Self::with_contour_options(device, queue, format, size, splats, camera, ordering, settings,
+            ContourOptions { directional: true, ..Default::default() })
     }
 
-    fn with_contour_mode(
+    pub fn with_contour_options(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
@@ -129,12 +137,12 @@ impl GaussianRenderer {
         camera: &Value,
         ordering: WorldOrder,
         settings: ContourSettings<'_>,
-        directional: bool,
+        options: ContourOptions,
     ) -> Result<Self, String> {
         if matches!(ordering, WorldOrder::Preordered | WorldOrder::Actor(_)) {
             return Err("Colored Contours requires sorted world or skinned splats".into());
         }
-        Self::create(device, queue, format, size, splats, Some((camera, ordering)), Some(settings), directional)
+        Self::create(device, queue, format, size, splats, Some((camera, ordering)), Some(settings), options)
     }
 
     fn create(
@@ -145,12 +153,13 @@ impl GaussianRenderer {
         splats: &Value,
         camera: Option<(&Value, WorldOrder)>,
         contours: Option<ContourSettings<'_>>,
-        directional: bool,
+        options: ContourOptions,
     ) -> Result<Self, String> {
         if size.contains(&0) {
             return Err("Gaussian render target must have positive dimensions".into());
         }
         let count = splat_count(splats)?;
+        let directional = options.directional;
         let half_viewport = [size[0] as f32 / 2.0, size[1] as f32 / 2.0];
         let constants: Vec<u8> = half_viewport.iter().flat_map(|v| v.to_le_bytes()).collect();
         let viewport = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -196,6 +205,9 @@ impl GaussianRenderer {
         };
         let contour = matches!(raster, Raster::Contours(_));
         let mut engine = Engine::with_device(device.clone(), queue.clone());
+        if options.parallel_u64_merge {
+            engine.prefer_parallel_u64_merge()?;
+        }
         let mut inputs = json!({"splats": splats});
         let mut args = vec![json!({"input": "splats"})];
         let mut steps = Vec::new();
