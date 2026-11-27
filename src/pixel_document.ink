@@ -53,8 +53,13 @@ pub fn rasterize_pixel_frame(document: json.Json, frame: String, layer: String, 
 
 pub fn rasterize_packed_pixel_frame(document: json.Json, planes: List<frame_raster.SlotPlane>, frame: String,
     layer: String, cel: String) -> Result<FrameRaster, String> {
+    return rasterize_compact_pixel_frame(document, planes, [], frame, layer, cel);
+}
+
+pub fn rasterize_compact_pixel_frame(document: json.Json, planes: List<frame_raster.SlotPlane>,
+    runs: List<frame_raster.RunPlane>, frame: String, layer: String, cel: String) -> Result<FrameRaster, String> {
     let opened = open_pixel_document(document)?;
-    let raster = frame_raster.compile(opened.document, planes, frame, layer, cel)?;
+    let raster = frame_raster.compile(opened.document, planes, runs, frame, layer, cel)?;
     let palette = raster.image.palette;
     return Ok(FrameRaster { width: raster.width, height: raster.height, frame: raster.frame,
         slots: palette.slots, alpha: palette.alpha, clipping: palette.clipping, ids: palette.ids, rgba: raster.image.rgba });
@@ -62,6 +67,10 @@ pub fn rasterize_packed_pixel_frame(document: json.Json, planes: List<frame_rast
 
 pub fn pixel_slot_plane(frame: String, layer: String, pixels: List<i32>) -> frame_raster.SlotPlane {
     return frame_raster.SlotPlane { frame: frame, layer: layer, pixels: pixels };
+}
+
+pub fn pixel_run_plane(frame: String, layer: String, marks: List<List<u32>>) -> frame_raster.RunPlane {
+    return frame_raster.RunPlane { frame: frame, layer: layer, marks: marks };
 }
 
 pub fn inspect_pixel_png(words: List<u32>, size: u32) -> Result<png_input.Layout, String> {
@@ -429,7 +438,8 @@ pub fn open_pixel_document(document: json.Json) -> Result<Opened, String> {
 record EditorDocument { source: json.Json, artwork: frame_raster.Artwork, named: selection.Named, }
 record EditorSelection { frame: String, grid: mask.Grid, words: List<u32>, }
 record EditorSnapshot { document: json.Json, positions: List<List<u32>>, edits: List<paint.SnapshotCel>,
-    slot_owners: List<frame_raster.SlotOwner>, slot_planes: List<List<i32>>, }
+    slot_owners: List<frame_raster.SlotOwner>, slot_planes: List<List<i32>>,
+    run_owners: List<frame_raster.SlotOwner>, run_planes: List<List<List<u32>>>, }
 record NamedBuild { ids: Buffer<String>, frames: Buffer<String>, packed: Buffer<Bool>, pixels: Buffer<List<u32>>,
     seen: Map<u64, List<String>>, issue: String, }
 record NamedPixels { seen: Buffer<u32>, indices: Buffer<u32>, packed: Bool, issue: String, }
@@ -446,10 +456,12 @@ fn empty_editor_image() -> selection.Image {
     return selection.Image { rgba: [], palette: mask.no_palette() };
 }
 
-fn prepare_editor(source: json.Json, positions: List<List<u32>>, planes: List<frame_raster.SlotPlane>) -> Result<EditorDocument, String> {
+fn prepare_editor(source: json.Json, positions: List<List<u32>>, planes: List<frame_raster.SlotPlane>,
+    runs: List<frame_raster.RunPlane>) -> Result<EditorDocument, String> {
     let opened = open_pixel_document(source)?;
     let bound = frame_raster.attach_planes(frame_raster.prepare(opened.document), planes)?;
-    let art = frame_raster.plan_runs(bound);
+    let drawing = frame_raster.attach_run_planes(bound, runs)?;
+    let art = frame_raster.plan_runs(drawing);
     let items = object(opened.document, "Expected a normalized pixel-art document")?;
     let named = json.lookup(items, "selections").fold(fn(rows) =>
         read_named(rows, art.grid, art.frames, positions), fn(unit) => Ok(selection.no_named()))?;
@@ -566,9 +578,10 @@ fn editor_selection(g: mask.Grid, scope: frame_raster.Scope, image: selection.Im
 
 fn first_query(query: List<json.Json>) -> json.Json { return query.at_or(0, json.null()); }
 
-change load_pixel_editor(document: json.Json, positions: List<List<u32>>, planes: List<frame_raster.SlotPlane>) -> Result<mask.Grid, String>
+change load_pixel_editor(document: json.Json, positions: List<List<u32>>, planes: List<frame_raster.SlotPlane>,
+    runs: List<frame_raster.RunPlane>) -> Result<mask.Grid, String>
     writes(EditorArtwork, EditorNamed, EditorScope, EditorImage, EditorPaint, EditorSource, EditorPositions) {
-    let prepared = prepare_editor(document, positions, planes)?;
+    let prepared = prepare_editor(document, positions, planes, runs)?;
     let grid = prepared.artwork.grid;
     EditorArtwork = prepared.artwork;
     EditorNamed = prepared.named;
@@ -583,7 +596,8 @@ change load_pixel_editor(document: json.Json, positions: List<List<u32>>, planes
 query snapshot_pixel_editor() -> EditorSnapshot reads(EditorSource, EditorArtwork, EditorPositions) {
     let snapshot = paint.snapshot(EditorSource, EditorArtwork);
     return EditorSnapshot { document: snapshot.source, positions: EditorPositions, edits: snapshot.edits,
-        slot_owners: frame_raster.slot_owners(EditorArtwork), slot_planes: EditorArtwork.planes };
+        slot_owners: frame_raster.slot_owners(EditorArtwork), slot_planes: EditorArtwork.planes,
+        run_owners: frame_raster.run_owners(EditorArtwork), run_planes: EditorArtwork.run_planes };
 }
 
 change paint_pixel_editor(operation: json.Json, slots: List<i32>, alpha: List<u32>, pixels: List<u32>, names: List<String>, frame: Option<String>, cel: Option<String>) -> Result<paint.Report, fault.Fault>

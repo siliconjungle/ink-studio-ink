@@ -1,6 +1,7 @@
 import { call, callOwned, compiledValues, createState, JsonCodec } from '../build/pixel_document.mjs';
 import { openPixelJournal } from './pixel-journal.mjs';
 import { decodePixelPng } from './pixel-png-import.mjs';
+import { packRun, unpackRun } from './pixel-run-words.mjs';
 
 const codec = new JsonCodec(compiledValues.open_pixel_document.params[0]);
 const utf8 = new TextEncoder();
@@ -11,12 +12,14 @@ async function revision(document) {
 }
 
 export async function openPixelDocument(source) {
-  const input = typeof source === 'string' ? JSON.parse(source) : source;
-  const { document: metadata, planes } = packSlotPlanes(input);
+  const fromText = typeof source === 'string';
+  const input = fromText ? JSON.parse(source) : source;
+  const { document: metadata, planes, runs } = packCelPlanes(input, fromText);
   const opened = callOwned('open_pixel_document', [codec.fromJS(metadata)]);
   if (Object.hasOwn(opened, 'Err')) throw new Error(opened.Err);
   const document = codec.toJS(opened.Ok.document);
   if (planes.length) restoreSlotPlanes(document, planes, plane => plane.pixels);
+  if (runs.length) restoreRunPlanes(document, runs, plane => plane.marks);
   const [current, legacy] = await Promise.all([
     revision(document),
     opened.Ok.legacy ? revision(input) : null,
@@ -30,9 +33,10 @@ export async function openPixelPng(bytes) {
 }
 
 export function rasterizePixelFrame(source, { frame = '', layer = '', cel = '' } = {}) {
-  const input = typeof source === 'string' ? JSON.parse(source) : source;
-  const { document, planes } = packSlotPlanes(input);
-  const raster = call('rasterize_packed_pixel_frame', [codec.fromJS(document), planes, frame, layer, cel]);
+  const fromText = typeof source === 'string';
+  const input = fromText ? JSON.parse(source) : source;
+  const { document, planes, runs } = packCelPlanes(input, fromText);
+  const raster = call('rasterize_compact_pixel_frame', [codec.fromJS(document), planes, runs, frame, layer, cel]);
   if (Object.hasOwn(raster, 'Err')) throw new Error(raster.Err);
   const { width, height, frame: active, slots, alpha, clipping, ids, rgba } = raster.Ok;
   return { width, height, frame: active || null, slots: Int32Array.from(slots),
@@ -51,12 +55,13 @@ export async function createPixelCommandEditor(source, { historyLimit = 100 } = 
   if (!Number.isInteger(historyLimit) || historyLimit < 0 || historyLimit > 0xffffffff) {
     throw new Error('historyLimit must be a non-negative integer within the pixel journal capacity');
   }
-  const input = typeof source === 'string' ? JSON.parse(source) : source;
-  const core = createPixelEditorCore(input);
+  const fromText = typeof source === 'string';
+  const input = fromText ? JSON.parse(source) : source;
+  const core = createPixelEditorCore(input, fromText);
   return openPixelJournal({ ...core, codec, revision }, input, historyLimit);
 }
 
-function createPixelEditorCore(source) {
+function createPixelEditorCore(source, fromText = false) {
   const state = createState();
   // JSON's typed representation has multiple schema levels per authored level.
   const load = state.bind('load_pixel_editor', { resultOnly: true, inputLimits: { depth: 512, nodes: 8000000 } });
@@ -67,11 +72,14 @@ function createPixelEditorCore(source) {
   const copy = state.bind('copy_pixel_editor_selection', { resultOnly: true });
   const save = state.bind('save_pixel_editor_selection', { resultOnly: true });
   let grid;
-  function replaceDocument(source) {
-    const input = typeof source === 'string' ? JSON.parse(source) : source;
+  function installDocument(input, fromText) {
     const named = packNamedPixels(input);
-    const { document, planes } = packSlotPlanes(named.document);
-    grid = unwrap(load(codec.fromJS(document), named.positions, planes));
+    const { document, planes, runs } = packCelPlanes(named.document, fromText);
+    grid = unwrap(load(codec.fromJS(document), named.positions, planes, runs));
+  }
+  function replaceDocument(source) {
+    const fromText = typeof source === 'string';
+    installDocument(fromText ? JSON.parse(source) : source, fromText);
   }
   function select(query, { frame, layer, cel, saved = {} } = {}) {
     const { encoded, packedSaved, runs } = prepareSelection(grid.width, grid.height, query, saved);
@@ -145,6 +153,9 @@ function createPixelEditorCore(source) {
     if (saved.slot_owners.length) {
       restoreSlotPlanes(document, saved.slot_owners, owner => saved.slot_planes[owner.plane - 1]);
     }
+    if (saved.run_owners.length) {
+      restoreRunPlanes(document, saved.run_owners, owner => saved.run_planes[owner.plane - 1]);
+    }
     for (const [i, positions] of saved.positions.entries()) {
       if (!positions.length) continue;
       document.selections[i].pixels = positions.map(p => [p % document.width, Math.floor(p / document.width)]);
@@ -165,7 +176,8 @@ function createPixelEditorCore(source) {
     }
     return document;
   }
-  replaceDocument(source);
+  if (fromText) installDocument(source, true);
+  else replaceDocument(source);
   return { state, editor: Object.freeze({ replaceDocument, select, saveSelection, paint, captureBrush, copySelection, snapshot }) };
 }
 
@@ -183,26 +195,56 @@ function restoreSlotPlanes(document, owners, pixels) {
   }
 }
 
+function restoreRunPlanes(document, owners, drawing) {
+  const frames = new Map(document.frames.map(frame => [frame.id, frame]));
+  for (const owner of owners) {
+    const { marks } = frames.get(owner.frame).cels[owner.layer];
+    for (const [i, spans] of drawing(owner).entries()) {
+      if (spans.length) marks[i].runs = Array.from(spans, unpackRun);
+    }
+  }
+}
+
 function packedArray(value) {
   return Array.isArray(value) && Object.getPrototypeOf(value) === Array.prototype &&
     Reflect.ownKeys(value).length === value.length + 1;
 }
 
-function packSlotPlanes(input) {
+function packSpans(source, width, height, fromText) {
+  if (!Array.isArray(source) || source.length === 0 || source.length > width * height || !packedArray(source)) return [];
+  const words = new Uint32Array(source.length);
+  let end = 0;
+  for (let i = 0; i < source.length; i++) {
+    const row = fromText ? source[i] : ownData(source, i);
+    if (!Array.isArray(row) || row.length !== 3 || (!fromText && !packedArray(row))) return [];
+    const y = fromText ? row[0] : ownData(row, 0);
+    const x = fromText ? row[1] : ownData(row, 1);
+    const length = fromText ? row[2] : ownData(row, 2);
+    if (!Number.isInteger(y) || y < 0 || y >= height || !Number.isInteger(x) || x < 0 || x >= width ||
+      !Number.isInteger(length) || length < 1 || length > width - x) return [];
+    const start = y * width + x;
+    if (start < end) return [];
+    words[i] = packRun(y, x, length);
+    end = start + length;
+  }
+  return words;
+}
+
+function packCelPlanes(input, fromText) {
   const version = ownData(input, 'version');
   const width = ownData(input, 'width'), height = ownData(input, 'height');
   const palette = ownData(input, 'palette');
   const planes = [];
+  const runs = [];
   if ((version !== 1 && version !== 2) || !palette || typeof palette !== 'object' || Array.isArray(palette) ||
       ![width, height].every(n => Number.isInteger(n) && n > 0 && n <= 512)) {
-    return { document: input, planes };
+    return { document: input, planes, runs };
   }
   const ids = new Map(Object.keys(palette).map((id, slot) => [id, slot]));
   const count = width * height;
-  function pack(cel, frame, layer) {
+  function packSlots(cel, frame, layer) {
     const slots = ownData(cel, 'slots');
-    if (typeof frame !== 'string' || typeof layer !== 'string' ||
-        !Array.isArray(slots) || slots.length !== count || !packedArray(slots)) return cel;
+    if (!Array.isArray(slots) || slots.length !== count || !packedArray(slots)) return cel;
     const pixels = new Int32Array(count);
     for (let i = 0; i < count; i++) {
       const swatch = ownData(slots, i);
@@ -214,9 +256,28 @@ function packSlotPlanes(input) {
     // Keep the authored field in its original position for snapshot and SHA-256.
     return replacingDataField(cel, 'slots', []);
   }
+  function pack(cel, frame, layer) {
+    if (typeof frame !== 'string' || typeof layer !== 'string') return cel;
+    const next = packSlots(cel, frame, layer);
+    const authored = ownData(cel, 'marks');
+    if (!packedArray(authored)) return next;
+    const marks = [];
+    const metadata = [];
+    let changed = false;
+    for (let i = 0; i < authored.length; i++) {
+      const mark = ownData(authored, i);
+      const spans = packSpans(ownData(mark, 'runs'), width, height, fromText);
+      marks.push(spans);
+      metadata.push(spans.length ? replacingDataField(mark, 'runs', []) : mark);
+      changed ||= spans.length !== 0;
+    }
+    if (!changed) return next;
+    runs.push({ frame, layer, marks });
+    return replacingDataField(next, 'marks', metadata);
+  }
   const key = version === 1 ? 'layers' : 'frames';
   const rows = ownData(input, key);
-  if (!packedArray(rows)) return { document: input, planes };
+  if (!packedArray(rows)) return { document: input, planes, runs };
   const packed = [];
   for (let i = 0; i < rows.length; i++) {
     const row = ownData(rows, i);
@@ -238,7 +299,7 @@ function packSlotPlanes(input) {
     }
     packed.push(updated === cels ? row : replacingDataField(row, 'cels', updated));
   }
-  return { document: planes.length ? replacingDataField(input, key, packed) : input, planes };
+  return { document: planes.length || runs.length ? replacingDataField(input, key, packed) : input, planes, runs };
 }
 
 function documentPoint(width, height, point) {

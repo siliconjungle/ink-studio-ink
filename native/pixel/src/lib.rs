@@ -1,12 +1,16 @@
+mod document_input;
 pub mod edit_preview;
 mod export_assets;
+mod journal;
 mod png;
 mod png_import;
-mod journal;
-pub use journal::{EditHistory, PixelCommandEditor, PixelEditError, PixelPreviewOptions, StagedPixelEdit};
+pub use journal::{
+    EditHistory, PixelCommandEditor, PixelEditError, PixelPreviewOptions, StagedPixelEdit,
+};
 pub use png_import::open_pixel_png;
 
 use compiled_state::{State, ValueWireLimits, Wire};
+use document_input::{CelPlanes, read_document};
 use indexmap::IndexMap;
 use ink_abi::{
     json_value::{Json, JsonCodec},
@@ -49,17 +53,19 @@ pub fn rasterize_pixel_frame(
     layer: Option<&str>,
     cel: Option<&str>,
 ) -> Result<PixelFrameRaster, String> {
-    let OrderedJson(mut input) = serde_json::from_str(source).map_err(|error| error.to_string())?;
+    let (input, CelPlanes { slots, runs }) = read_document(source)?;
     let program = State::new();
     let build = |kind, scalar, flag, values, keys| {
         program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
     };
-    let planes = pack_slot_planes(&mut input);
-    let raster = program.function_l_rasterize_packed_pixel_frame(
+    let raster = program.function_l_rasterize_compact_pixel_frame(
         compiled_json(input, &build),
-        planes
+        slots
             .into_iter()
             .map(|plane| program.function_l_pixel_slot_plane(plane.frame, plane.layer, plane.slots))
+            .collect(),
+        runs.into_iter()
+            .map(|plane| program.function_l_pixel_run_plane(plane.frame, plane.layer, plane.marks))
             .collect(),
         frame.unwrap_or_default().into(),
         layer.unwrap_or_default().into(),
@@ -90,6 +96,7 @@ impl<'de> Deserialize<'de> for OrderedJson {
 }
 
 struct OrderedJsonVisitor;
+const EXACT_JSON_INTEGER: u64 = 1 << 53;
 
 impl<'de> Visitor<'de> for OrderedJsonVisitor {
     type Value = OrderedJson;
@@ -114,10 +121,16 @@ impl<'de> Visitor<'de> for OrderedJsonVisitor {
     }
 
     fn visit_i64<E: de::Error>(self, value: i64) -> Result<OrderedJson, E> {
+        if value.unsigned_abs() <= EXACT_JSON_INTEGER {
+            return Ok(OrderedJson(Json::Number(value.to_string())));
+        }
         self.visit_f64(value as f64)
     }
 
     fn visit_u64<E: de::Error>(self, value: u64) -> Result<OrderedJson, E> {
+        if value <= EXACT_JSON_INTEGER {
+            return Ok(OrderedJson(Json::Number(value.to_string())));
+        }
         self.visit_f64(value as f64)
     }
 
@@ -319,89 +332,8 @@ fn pack_rgba(operation: &mut Json, [width, height]: [u32; 2]) -> (Vec<u32>, Vec<
     (rows, names.into_keys().collect())
 }
 
-struct SlotPlane {
-    frame: String,
-    layer: String,
-    slots: Vec<i32>,
-}
-
-fn pack_slot_planes(input: &mut Json) -> Vec<SlotPlane> {
-    let Json::Object(fields) = input else {
-        return Vec::new();
-    };
-    let field = |name: &str| {
-        fields
-            .iter()
-            .find(|(key, _)| key == name)
-            .map(|(_, value)| value)
-    };
-    let legacy = match field("version") {
-        Some(Json::Number(version)) if version == "1" => true,
-        Some(Json::Number(version)) if version == "2" => false,
-        _ => return Vec::new(),
-    };
-    let dimension = |name| {
-        field(name)
-            .and_then(|value| coordinate(value, 513))
-            .filter(|&n| n != 0)
-    };
-    let Some((width, height)) = dimension("width").zip(dimension("height")) else {
-        return Vec::new();
-    };
-    let Some(Json::Object(entries)) = field("palette") else {
-        return Vec::new();
-    };
-    let palette: IndexMap<_, _> = entries
-        .iter()
-        .enumerate()
-        .map(|(slot, (name, _))| (name.clone(), slot as i32))
-        .collect();
-    let Some(Json::Array(rows)) = member_mut(input, if legacy { "layers" } else { "frames" })
-    else {
-        return Vec::new();
-    };
-    let identity = |row: &mut Json| match member_mut(row, "id") {
-        Some(Json::Text(id)) => Some(id.clone()),
-        _ => None,
-    };
-    let mut planes = Vec::new();
-    let mut pack = |cel: &mut Json, frame: &str, layer: &str| {
-        let Some(Json::Array(values)) = member_mut(cel, "slots") else {
-            return;
-        };
-        if values.len() != (width * height) as usize {
-            return;
-        }
-        let slots: Option<Vec<_>> = values
-            .iter()
-            .map(|value| match value {
-                Json::Null => Some(-1),
-                Json::Text(name) => palette.get(name).copied(),
-                _ => None,
-            })
-            .collect();
-        if let Some(slots) = slots {
-            planes.push(SlotPlane {
-                frame: frame.into(),
-                layer: layer.into(),
-                slots,
-            });
-            *values = Vec::new();
-        }
-    };
-    for row in rows {
-        let Some(id) = identity(row) else {
-            continue;
-        };
-        if legacy {
-            pack(row, "artwork", &id);
-        } else if let Some(Json::Object(cels)) = member_mut(row, "cels") {
-            for (layer, cel) in cels {
-                pack(cel, &id, layer);
-            }
-        }
-    }
-    planes
+fn unpack_run(word: u32) -> [u32; 3] {
+    [word >> 18, (word >> 9) & 511, (word & 511) + 1]
 }
 
 fn pack_named_pixels(input: &mut Json) -> Vec<Vec<u32>> {
@@ -469,6 +401,7 @@ struct SnapshotMark {
 struct SnapshotCel {
     marks: Vec<SnapshotMark>,
     plane: Option<usize>,
+    run_plane: Option<usize>,
 }
 type SnapshotEdits = IndexMap<String, IndexMap<String, SnapshotCel>>;
 
@@ -505,15 +438,23 @@ fn append_snapshot_mark(out: &mut String, mark: &SnapshotMark) -> Result<(), Str
 fn append_snapshot_marks(
     out: &mut String,
     authored: &[Json],
+    packed: &[Vec<u32>],
     retained: &[SnapshotMark],
     limits: Limits,
 ) -> Result<(), String> {
+    if !packed.is_empty() && authored.len() != packed.len() {
+        return Err("Missing authored marks in the snapshot".into());
+    }
     out.push('[');
     for (i, mark) in authored.iter().enumerate() {
         if i != 0 {
             out.push(',');
         }
-        out.push_str(&mark.stringify(limits)?);
+        if let Some(spans) = packed.get(i).filter(|words| !words.is_empty()) {
+            append_packed_mark(out, mark, spans, limits)?;
+        } else {
+            out.push_str(&mark.stringify(limits)?);
+        }
     }
     for (i, mark) in retained.iter().enumerate() {
         if i != 0 || !authored.is_empty() {
@@ -525,17 +466,54 @@ fn append_snapshot_marks(
     Ok(())
 }
 
+fn append_packed_mark(
+    out: &mut String,
+    mark: &Json,
+    spans: &[u32],
+    limits: Limits,
+) -> Result<(), String> {
+    let Json::Object(fields) = mark else {
+        return Err("Missing authored run mark in the snapshot".into());
+    };
+    append_json_members(out, fields, |out, key, part| {
+        if key == "runs" {
+            static NATIVE_COORDINATES: LazyLock<[String; 513]> =
+                LazyLock::new(|| std::array::from_fn(|value| value.to_string()));
+            let numbers = &*NATIVE_COORDINATES;
+            out.reserve(spans.len() * 14);
+            out.push('[');
+            for (i, &word) in spans.iter().enumerate() {
+                if i != 0 {
+                    out.push(',');
+                }
+                let [y, x, n] = unpack_run(word);
+                out.push('[');
+                out.push_str(&numbers[y as usize]);
+                out.push(',');
+                out.push_str(&numbers[x as usize]);
+                out.push(',');
+                out.push_str(&numbers[n as usize]);
+                out.push(']');
+            }
+            out.push(']');
+        } else {
+            out.push_str(&part.stringify(limits)?);
+        }
+        Ok(())
+    })
+}
+
 fn append_snapshot_cel(
     out: &mut String,
     cel: &Json,
     edit: &SnapshotCel,
-    slot_data: &SnapshotSlots<'_>,
+    data: &SnapshotPlanes<'_>,
     limits: Limits,
 ) -> Result<(), String> {
     let Json::Object(fields) = cel else {
         return Err("Missing retained raster cel in the snapshot".into());
     };
-    if !edit.marks.is_empty()
+    if (!edit.marks.is_empty() || edit.run_plane.is_some())
         && !fields
             .iter()
             .any(|(key, part)| key == "marks" && matches!(part, Json::Array(_)))
@@ -543,38 +521,45 @@ fn append_snapshot_cel(
         return Err("Missing retained raster marks in the snapshot".into());
     }
     if edit.plane.is_some()
-        && !fields
-            .iter()
-            .any(|(key, part)| key == "slots" && matches!(part, Json::Array(rows) if rows.is_empty()))
+        && !fields.iter().any(|(key, part)| {
+            key == "slots" && matches!(part, Json::Array(rows) if rows.is_empty())
+        })
     {
         return Err("Missing retained raster slots in the snapshot".into());
     }
-    append_json_members(out, fields, |out, key, part| match (key, part, edit.plane) {
-        ("marks", Json::Array(rows), _) if !edit.marks.is_empty() => {
-            append_snapshot_marks(out, rows, &edit.marks, limits)
-        }
-        ("slots", Json::Array(_), Some(plane)) => {
-            append_snapshot_slots(out, plane, slot_data)
-        }
-        _ => {
-            out.push_str(&part.stringify(limits)?);
-            Ok(())
+    append_json_members(out, fields, |out, key, part| {
+        match (key, part, edit.plane) {
+            ("marks", Json::Array(rows), _)
+                if !edit.marks.is_empty() || edit.run_plane.is_some() =>
+            {
+                let packed = match edit.run_plane {
+                    Some(plane) => *data.runs.get(plane).ok_or("Missing retained run plane")?,
+                    None => &[],
+                };
+                append_snapshot_marks(out, rows, packed, &edit.marks, limits)
+            }
+            ("slots", Json::Array(_), Some(plane)) => append_snapshot_slots(out, plane, data),
+            _ => {
+                out.push_str(&part.stringify(limits)?);
+                Ok(())
+            }
         }
     })
 }
 
-struct SnapshotSlots<'a> {
-    planes: &'a [Vec<i32>],
+struct SnapshotPlanes<'a> {
+    slots: &'a [&'a [i32]],
+    runs: &'a [&'a [Vec<u32>]],
     swatches: Vec<String>,
 }
 
 fn append_snapshot_slots(
     out: &mut String,
     plane: usize,
-    data: &SnapshotSlots<'_>,
+    data: &SnapshotPlanes<'_>,
 ) -> Result<(), String> {
     let slots = data
-        .planes
+        .slots
         .get(plane)
         .ok_or("Missing retained pixel slot plane")?;
     out.push('[');
@@ -600,7 +585,7 @@ fn append_snapshot_frames(
     out: &mut String,
     frames: &[Json],
     edits: &SnapshotEdits,
-    slots: &SnapshotSlots<'_>,
+    planes: &SnapshotPlanes<'_>,
     limits: Limits,
 ) -> Result<(), String> {
     let mut remaining = edits.len();
@@ -622,7 +607,7 @@ fn append_snapshot_frames(
                     append_json_members(out, cels, |out, layer, cel| {
                         if let Some(edit) = layers.get(layer) {
                             changed += 1;
-                            append_snapshot_cel(out, cel, edit, slots, limits)
+                            append_snapshot_cel(out, cel, edit, planes, limits)
                         } else {
                             out.push_str(&cel.stringify(limits)?);
                             Ok(())
@@ -643,6 +628,34 @@ fn append_snapshot_frames(
     }
     if remaining != 0 {
         return Err("Missing retained raster frame in the snapshot".into());
+    }
+    out.push(']');
+    Ok(())
+}
+
+fn append_legacy_layers(
+    out: &mut String,
+    layers: &[Json],
+    edits: &IndexMap<String, SnapshotCel>,
+    planes: &SnapshotPlanes<'_>,
+    limits: Limits,
+) -> Result<(), String> {
+    out.push('[');
+    for (i, layer) in layers.iter().enumerate() {
+        if i != 0 {
+            out.push(',');
+        }
+        if let Json::Object(fields) = layer
+            && let Some(Json::Text(id)) = fields
+                .iter()
+                .find(|(key, _)| key == "id")
+                .map(|(_, part)| part)
+            && let Some(edit) = edits.get(id)
+        {
+            append_snapshot_cel(out, layer, edit, planes, limits)?;
+        } else {
+            out.push_str(&layer.stringify(limits)?);
+        }
     }
     out.push(']');
     Ok(())
@@ -711,7 +724,8 @@ fn snapshot_json(
     width: u32,
     positions: &[Vec<u32>],
     edits: &SnapshotEdits,
-    planes: &[Vec<i32>],
+    slots: &[&[i32]],
+    runs: &[&[Vec<u32>]],
     limits: Limits,
 ) -> Result<String, String> {
     let Json::Object(fields) = document else {
@@ -720,7 +734,7 @@ fn snapshot_json(
     if positions.iter().all(Vec::is_empty) && edits.is_empty() {
         return document.stringify(limits);
     }
-    let swatches = if planes.is_empty() {
+    let swatches = if slots.is_empty() {
         Vec::new()
     } else {
         let Some(Json::Object(palette)) = fields
@@ -736,23 +750,79 @@ fn snapshot_json(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?
     };
-    let slots = SnapshotSlots { planes, swatches };
+    let planes = SnapshotPlanes {
+        slots,
+        runs,
+        swatches,
+    };
+    let legacy_layers = if is_legacy(document) {
+        edits.get("artwork")
+    } else {
+        None
+    };
     // The metadata is still bounded by the JSON codec. Saved coordinates
     // already crossed the typed boundary and serialize straight to the file.
     let mut output = String::new();
-    append_json_members(&mut output, fields, |out, key, value| match (key, value) {
-        ("selections", Json::Array(rows)) => {
-            append_snapshot_selections(out, rows, width, positions, limits)
-        }
-        ("frames", Json::Array(frames)) if !edits.is_empty() => {
-            append_snapshot_frames(out, frames, edits, &slots, limits)
-        }
-        _ => {
-            out.push_str(&value.stringify(limits)?);
-            Ok(())
+    append_json_members(&mut output, fields, |out, key, value| {
+        match (key, value, legacy_layers) {
+            ("selections", Json::Array(rows), _) if !positions.is_empty() => {
+                append_snapshot_selections(out, rows, width, positions, limits)
+            }
+            ("frames", Json::Array(frames), None) if !edits.is_empty() => {
+                append_snapshot_frames(out, frames, edits, &planes, limits)
+            }
+            ("layers", Json::Array(layers), Some(edits)) => {
+                append_legacy_layers(out, layers, edits, &planes, limits)
+            }
+            _ => {
+                out.push_str(&value.stringify(limits)?);
+                Ok(())
+            }
         }
     })?;
     Ok(output)
+}
+
+fn is_legacy(input: &Json) -> bool {
+    matches!(input, Json::Object(rows) if rows.iter().any(|(name, data)|
+        name == "version" && matches!(data, Json::Number(version) if version == "1")))
+}
+
+fn restore_cel_planes(
+    document: &Json,
+    planes: &CelPlanes,
+    limits: Limits,
+) -> Result<String, String> {
+    let mut edits = SnapshotEdits::new();
+    let slots: Vec<_> = planes
+        .slots
+        .iter()
+        .enumerate()
+        .map(|(i, plane)| {
+            edits
+                .entry(plane.frame.clone())
+                .or_default()
+                .entry(plane.layer.clone())
+                .or_default()
+                .plane = Some(i);
+            plane.slots.as_slice()
+        })
+        .collect();
+    let runs: Vec<_> = planes
+        .runs
+        .iter()
+        .enumerate()
+        .map(|(i, plane)| {
+            edits
+                .entry(plane.frame.clone())
+                .or_default()
+                .entry(plane.layer.clone())
+                .or_default()
+                .run_plane = Some(i);
+            plane.marks.as_slice()
+        })
+        .collect();
+    snapshot_json(document, 0, &[], &edits, &slots, &runs, limits)
 }
 
 fn coordinate_runs(canvas: [u32; 2], pixels: Json, limit: u32) -> Vec<u32> {
@@ -1254,27 +1324,40 @@ impl PixelEditor {
     }
 
     pub fn replace_document(&mut self, source: &str) -> Result<(), String> {
-        let OrderedJson(input) = serde_json::from_str(source).map_err(|error| error.to_string())?;
-        self.replace_document_data(input)
+        let (input, planes) = read_document(source)?;
+        self.replace_packed_document(input, planes)
     }
 
-    fn replace_document_data(&mut self, mut input: Json) -> Result<(), String> {
+    fn replace_packed_document(
+        &mut self,
+        mut input: Json,
+        planes: CelPlanes,
+    ) -> Result<(), String> {
         let build = |kind, scalar, flag, values, keys| {
             self.program
                 .function_l_pixel_json_value(kind, scalar, flag, values, keys)
         };
         let positions = pack_named_pixels(&mut input);
-        let planes = pack_slot_planes(&mut input)
+        let slots = planes
+            .slots
             .into_iter()
             .map(|plane| {
                 self.program
                     .function_l_pixel_slot_plane(plane.frame, plane.layer, plane.slots)
             })
             .collect();
+        let runs = planes
+            .runs
+            .into_iter()
+            .map(|plane| {
+                self.program
+                    .function_l_pixel_run_plane(plane.frame, plane.layer, plane.marks)
+            })
+            .collect();
         let document = compiled_json(input, &build);
         let grid = self
             .program
-            .invoke_view_l_load_pixel_editor(document, positions, planes)?
+            .invoke_view_l_load_pixel_editor(document, positions, slots, runs)?
             .result?;
         self.grid = [grid.l_width, grid.l_height];
         Ok(())
@@ -1578,12 +1661,23 @@ impl PixelEditor {
                 .or_default()
                 .plane = Some((owner.l_plane - 1) as usize);
         }
+        for owner in snapshot.l_run_owners {
+            edits
+                .entry(owner.l_frame)
+                .or_default()
+                .entry(owner.l_layer)
+                .or_default()
+                .run_plane = Some((owner.l_plane - 1) as usize);
+        }
+        let slots: Vec<_> = snapshot.l_slot_planes.iter().map(Vec::as_slice).collect();
+        let runs: Vec<_> = snapshot.l_run_planes.iter().map(Vec::as_slice).collect();
         snapshot_json(
             &document,
             self.grid[0],
             &snapshot.l_positions,
             &edits,
-            &snapshot.l_slot_planes,
+            &slots,
+            &runs,
             limits,
         )
     }
@@ -1621,34 +1715,21 @@ impl PixelEditor {
 }
 
 pub fn open_pixel_document(source: &str) -> Result<OpenedDocument, String> {
-    let OrderedJson(mut input) = serde_json::from_str(source).map_err(|error| error.to_string())?;
+    let (input, planes) = read_document(source)?;
     let limits = Limits::default();
-    let legacy_revision = if matches!(member_mut(&mut input, "version"), Some(Json::Number(token)) if token == "1")
-    {
-        Some(revision(&input.stringify(limits)?))
-    } else {
-        None
-    };
-    let planes = pack_slot_planes(&mut input);
-    if !planes.is_empty() {
+    if !planes.slots.is_empty() || !planes.runs.is_empty() {
+        let legacy_revision = if is_legacy(&input) {
+            Some(revision(&restore_cel_planes(&input, &planes, limits)?))
+        } else {
+            None
+        };
         let program = State::new();
         let compact = compiled_json(input, &|kind, scalar, flag, items, keys| {
             program.function_l_pixel_json_value(kind, scalar, flag, items, keys)
         });
         let opened = program.function_l_open_pixel_document(compact)?;
         let document = Json::from_ink(&opened.l_document.to_json(), limits)?;
-        let mut edits = SnapshotEdits::new();
-        let mut pixels = Vec::with_capacity(planes.len());
-        for plane in planes {
-            edits
-                .entry(plane.frame)
-                .or_default()
-                .entry(plane.layer)
-                .or_default()
-                .plane = Some(pixels.len());
-            pixels.push(plane.slots);
-        }
-        let document_json = snapshot_json(&document, 0, &[], &edits, &pixels, limits)?;
+        let document_json = restore_cel_planes(&document, &planes, limits)?;
         return Ok(OpenedDocument {
             revision: revision(&document_json),
             legacy_revision,

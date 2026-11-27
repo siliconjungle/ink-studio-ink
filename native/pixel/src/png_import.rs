@@ -1,6 +1,6 @@
 use super::{
     Json, Limits, OpenedDocument, OrderedJson, SnapshotCel, SnapshotEdits, SnapshotMark,
-    compiled_json, revision, snapshot_json,
+    compiled_json, revision, snapshot_json, unpack_run,
 };
 use compiled_state::{State, Wire};
 use cw_zlib::{Inflater, Progress};
@@ -173,10 +173,7 @@ pub fn open_pixel_png(bytes: &[u8]) -> Result<OpenedDocument, String> {
                 swatch: None,
                 knockout: mark.l_alpha == 255,
                 alpha: (mark.l_alpha != 255).then_some(mark.l_alpha),
-                runs: words
-                    .iter()
-                    .map(|&word| [word >> 18, (word >> 9) & 511, (word & 511) + 1])
-                    .collect(),
+                runs: words.iter().map(|&word| unpack_run(word)).collect(),
                 point: false,
             }
         })
@@ -187,9 +184,11 @@ pub fn open_pixel_png(bytes: &[u8]) -> Result<OpenedDocument, String> {
         SnapshotCel {
             marks,
             plane: Some(0),
+            run_plane: None,
         },
     );
-    let document_json = snapshot_json(&template, 0, &[], &edits, &[imported.l_slots], limits)?;
+    let document_json =
+        snapshot_json(&template, 0, &[], &edits, &[&imported.l_slots], &[], limits)?;
     Ok(OpenedDocument {
         revision: revision(&document_json),
         document_json,

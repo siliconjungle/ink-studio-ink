@@ -126,7 +126,7 @@ function checkCache() {
   const some = id => ({ Some: id });
   const encoded = codec.fromJS(swatch);
   const saved = codec.fromJS({});
-  assert.ok(load(codec.fromJS(editorFixture()), [], []).Ok);
+  assert.ok(load(codec.fromJS(editorFixture()), [], [], []).Ok);
 
   const cold = state.changeToken();
   const first = pick([encoded], saved, [], some('front'), some('ink'), none);

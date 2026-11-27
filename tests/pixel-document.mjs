@@ -35,13 +35,15 @@ export function referenceCases(originalRoot) {
   const raw = JSON.stringify(design).replace('"version":2', '"version":2.0').replace('"width":5', '"width":9,"width":5e0')
     .replace('"opacity":0.75', '"opacity":75e-2').replace('"offset":[-1,0]', '"offset":[-1,-0]')
     .replace('"opacity":128', '"opacity":-0');
+  const numeric = JSON.stringify(legacy).replace(/}$/, `,"numbers":[9007199254740991,9007199254740992,
+    9007199254740993,-9007199254740993,18446744073709551615,1e21,-0]}`);
   const change = (source, edit) => {
     const copy = structuredClone(source);
     edit(copy);
     return JSON.stringify(copy);
   };
   const sources = [
-    relay, JSON.stringify(legacy), JSON.stringify(design), raw,
+    relay, JSON.stringify(legacy), JSON.stringify(design), raw, numeric,
     change(design, d => { d.layers[1].opacity = 1e-7; }),
     change(design, d => { d.layers[1].offset = [-1_000_000, 1_000_000]; }),
     change(design, d => { d.frames[0].durationMs = 9_007_199_254_740_000; }),

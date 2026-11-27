@@ -1,4 +1,5 @@
 import { callOwned } from '../build/pixel_document.mjs';
+import { unpackRun } from './pixel-run-words.mjs';
 
 function unwrap(result) {
   if (Object.hasOwn(result, 'Err')) throw new Error(result.Err);
@@ -93,10 +94,7 @@ export async function decodePixelPng(bytes, codec) {
   cel.slots = Array.from(imported.slots, slot => slot < 0 ? null : ids[slot]);
   cel.marks = imported.marks.map(({ alpha, first, length }) => ({
     ...(alpha === 255 ? { swatch: null } : { alpha }),
-    runs: Array.from({ length }, (_, i) => {
-      const word = imported.spans[first + i];
-      return [word >>> 18, (word >>> 9) & 511, (word & 511) + 1];
-    }),
+    runs: Array.from({ length }, (_, i) => unpackRun(imported.spans[first + i])),
   }));
   return document;
 }

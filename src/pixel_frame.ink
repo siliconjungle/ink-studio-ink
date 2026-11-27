@@ -8,15 +8,17 @@ import "pixel_selection.ink" as selection;
 
 record Location { id: String, frame: String, layer: String, }
 record Cel { id: String, layer: String, frame: String, fields: List<json.Member>, runs: List<paint.RunMark>,
-    prepared: List<paint.RunMark>, plane: u32, }
+    prepared: List<paint.RunMark>, plane: u32, run_plane: u32, }
 record SlotPlane { frame: String, layer: String, pixels: List<i32>, }
+record RunPlane { frame: String, layer: String, marks: List<List<u32>>, }
 record SlotOwner { frame: String, layer: String, plane: u32, }
 record AttachedPlanes { cels: List<Cel>, ordinal: u32, issue: String, }
 record Placement { x: i32, y: i32, opacity: f64, }
 record Layer { id: String, kind: String, parent: String, clip: String, blend: String, protect: Bool,
     locked: Bool, visible: Bool, opacity: f64, }
 record Artwork { grid: mask.Grid, layers: List<Layer>, ids: List<String>, colors: List<u32>,
-    cels: List<Cel>, locations: List<Location>, frames: List<String>, inputs: List<json.Json>, planes: List<List<i32>>, }
+    cels: List<Cel>, locations: List<Location>, frames: List<String>, inputs: List<json.Json>, planes: List<List<i32>>,
+    run_planes: List<List<List<u32>>>, }
 record Scope { frame: String, layer: String, }
 record Captured { found: Bool, slots: List<i32>, alpha: List<u32>, clipping: List<u32>, }
 record Pixel { slot: i32, color: u32, alpha: u32, locked: Bool, }
@@ -53,7 +55,9 @@ fn hex_digit(byte: u32) -> u32 {
     return if byte <= 70 { byte - 55 } else { byte - 87 };
 }
 
-fn no_cel() -> Cel { return Cel { id: "", layer: "", frame: "", fields: [], runs: [], prepared: [], plane: 0 }; }
+fn no_cel() -> Cel {
+    return Cel { id: "", layer: "", frame: "", fields: [], runs: [], prepared: [], plane: 0, run_plane: 0 };
+}
 fn no_capture() -> Captured { return Captured { found: false, slots: [], alpha: [], clipping: [] }; }
 fn blank() -> Pixel { return Pixel { slot: -1, color: 0, alpha: 0, locked: false }; }
 
@@ -61,7 +65,7 @@ fn cel_entry(frame: String, row: json.Member) -> Cel {
     let spec = value.fields(row.value);
     let id = json.lookup(spec, "id").fold(fn(v) => value.text(v), fn(unit) =>
         string_concat(string_concat(frame, "/"), row.key));
-    return Cel { id: id, frame: frame, layer: row.key, fields: spec, runs: [], prepared: [], plane: 0 };
+    return Cel { id: id, frame: frame, layer: row.key, fields: spec, runs: [], prepared: [], plane: 0, run_plane: 0 };
 }
 
 fn all_cels(frames: List<json.Json>) -> List<Cel> {
@@ -433,7 +437,8 @@ fn step(art: Artwork, scope: Scope, scene: Scene) -> Scene {
     let place = placement(art.inputs.at_or(job.ordinal, json.null()), active);
     let source = resolved_cel(art.cels, active);
     let slots: List<i32> = if source.plane == 0 { [] } else { art.planes.at_or(source.plane - 1, []) };
-    let raster = paint.raster(art.grid, art.ids, source.fields, slots, source.prepared, source.runs, old.work);
+    let runs: List<List<u32>> = if source.run_plane == 0 { [] } else { art.run_planes.at_or(source.run_plane - 1, []) };
+    let raster = paint.raster(art.grid, art.ids, source.fields, slots, runs, source.prepared, source.runs, old.work);
     let raw = if old.spec.sample_only { translated_sample(art.grid, raster, place, old.spec.inspect) }
         else { translated(art.grid, raster, place) };
     if raw.issue != "" { return Scene { ..old, issue: raw.issue }; }
@@ -513,7 +518,7 @@ fn finish_view(art: Artwork, view: PaintView, scope: Scope) -> Result<Raster, St
 
 fn empty_artwork() -> Artwork {
     return Artwork { grid: mask.Grid { width: 0, height: 0 }, layers: [], ids: [], colors: [],
-        cels: [], locations: [], frames: [], inputs: [], planes: [] };
+        cels: [], locations: [], frames: [], inputs: [], planes: [], run_planes: [] };
 }
 
 fn artwork_grid(art: Artwork) -> mask.Grid { return art.grid; }
@@ -529,11 +534,13 @@ fn prepare(document: json.Json) -> Artwork {
     return Artwork { grid: g, layers: layers.map(fn(raw) => layer_spec(raw)),
         ids: palette.map(fn(swatch) => swatch.key), colors: palette.map(fn(swatch) => palette_color(swatch.value)),
         cels: cels, locations: cels.map(fn(cel) => Location { id: cel.id, frame: cel.frame, layer: cel.layer }),
-        frames: frames.map(fn(row) => frame_name(row)), inputs: layers, planes: [] };
+        frames: frames.map(fn(row) => frame_name(row)), inputs: layers, planes: [], run_planes: [] };
 }
 
 fn plan_runs(art: Artwork) -> Artwork {
-    let cels = art.cels.map(fn(cel) => Cel { ..cel, prepared: paint.prepare_runs(art.grid, art.ids, cel.fields) });
+    let cels = art.cels.map(fn(cel) => if cel.run_plane != 0 { cel } else {
+        Cel { ..cel, prepared: paint.prepare_runs(art.grid, art.ids, cel.fields) }
+    });
     return Artwork { ..art, cels: cels };
 }
 
@@ -567,6 +574,34 @@ fn attach_plane(out: AttachedPlanes, plane: SlotPlane, count: u32, last: i32) ->
 fn slot_owners(art: Artwork) -> List<SlotOwner> {
     return art.cels.filter(fn(cel) => cel.plane != 0).map(fn(cel) =>
         SlotOwner { frame: cel.frame, layer: cel.layer, plane: cel.plane });
+}
+
+fn attach_run_plane(out: AttachedPlanes, plane: RunPlane, grid: mask.Grid) -> AttachedPlanes {
+    let cel = active_cel(out.cels, plane.frame, plane.layer);
+    let marks = value.items(value.get(cel.fields, "marks"));
+    if cel.id == "" || cel.run_plane != 0 || length(marks) != length(plane.marks) {
+        return AttachedPlanes { ..out, issue: "Packed pixel runs do not match the authored cel" };
+    }
+    let valid = repeat_until(length(marks), true, fn(ok) => !ok, fn(i) => fn(ok) =>
+        paint.valid_run_marker(grid, marks.at_or(i, json.null()), plane.marks.at_or(i, [])));
+    if !valid { return AttachedPlanes { ..out, issue: "Packed pixel runs do not match the authored cel" }; }
+    let ordinal = out.ordinal + 1;
+    let cels = out.cels.map(fn(row) => if row.id == cel.id { Cel { ..row, run_plane: ordinal } } else { row });
+    return AttachedPlanes { cels: cels, ordinal: ordinal, issue: "" };
+}
+
+fn attach_run_planes(art: Artwork, planes: List<RunPlane>) -> Result<Artwork, String> {
+    if length(planes) == 0 { return Ok(art); }
+    let start = AttachedPlanes { cels: art.cels, ordinal: 0, issue: "" };
+    let bound = fold_until(planes, start, fn(plane) => fn(out) => out.issue != "",
+        fn(plane) => fn(out) => if out.issue != "" { out } else { attach_run_plane(out, plane, art.grid) });
+    if bound.issue != "" { return Err(bound.issue); }
+    return Ok(Artwork { ..art, cels: bound.cels, run_planes: planes.map(fn(plane) => plane.marks) });
+}
+
+fn run_owners(art: Artwork) -> List<SlotOwner> {
+    return art.cels.filter(fn(cel) => cel.run_plane != 0).map(fn(cel) =>
+        SlotOwner { frame: cel.frame, layer: cel.layer, plane: cel.run_plane });
 }
 
 fn known_frame(frames: List<String>, frame: String) -> Bool {
@@ -620,8 +655,10 @@ fn paint_view(art: Artwork, scope: Scope) -> Result<PaintView, String> {
     return Ok(PaintView { captured: scene.capture, pixels: scene.canvas.pixels.freeze() });
 }
 
-fn compile(document: json.Json, planes: List<SlotPlane>, frame: String, layer: String, cel: String) -> Result<Raster, String> {
-    let art = attach_planes(prepare(document), planes)?;
+fn compile(document: json.Json, planes: List<SlotPlane>, runs: List<RunPlane>, frame: String, layer: String,
+    cel: String) -> Result<Raster, String> {
+    let slots = attach_planes(prepare(document), planes)?;
+    let art = attach_run_planes(slots, runs)?;
     let scope = resolve(art, optional_scope(frame), optional_scope(layer), optional_scope(cel))?;
     return raster(art, scope);
 }

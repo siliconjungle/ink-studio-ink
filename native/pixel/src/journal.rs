@@ -1,6 +1,7 @@
 use super::edit_preview::{CellChange, Color, Location, PixelEditPreview, Preview, Sample, Site};
 use super::{
-    Json, Limits, OrderedJson, PixelEditor, Wire, compiled_json, coordinate, member_mut, revision,
+    Json, Limits, OrderedJson, PixelEditor, Wire, compiled_json, coordinate, is_legacy, member_mut,
+    read_document, restore_cel_planes, revision,
 };
 use serde_json::{Map, Value, json};
 use std::{
@@ -309,15 +310,14 @@ fn gate_metadata(patch: &Json) -> Json {
 
 impl PixelCommandEditor {
     pub fn new(source: &str, history_limit: u32) -> Result<Self, String> {
-        let input = parse_json(source)?;
-        let legacy = match member(&input, "version") {
-            Some(Json::Number(token)) if token == "1" => {
-                revision(&input.stringify(Limits::default())?)
-            }
-            _ => String::new(),
+        let (input, planes) = read_document(source)?;
+        let legacy = if is_legacy(&input) {
+            revision(&restore_cel_planes(&input, &planes, Limits::default())?)
+        } else {
+            String::new()
         };
         let mut editor = PixelEditor::empty();
-        editor.replace_document_data(input)?;
+        editor.replace_packed_document(input, planes)?;
         let current = revision(&editor.snapshot()?);
         editor
             .program

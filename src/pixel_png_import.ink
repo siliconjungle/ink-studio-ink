@@ -9,6 +9,7 @@ import "pixel_paint.ink" as paint;
 import "pixel_asset_export.ink" as assets;
 import "pixel_png.ink" as png;
 import "pixel_png_input.ink" as input;
+import "pixel_run_words.ink" as run_words;
 
 record Palette { entries: List<json.Member>, colors: List<u32>, ids: List<String>, ramps: List<json.Json>, }
 record Decoded { palette: Palette, slots: List<i32>, alpha: List<u32>, knockouts: List<u32>, }
@@ -193,7 +194,7 @@ fn append_span(width: u32, span: Span, out: Runs) -> Runs {
     if span.length == 0 { return out; }
     let x = rem_or(span.start, width, 0);
     let y = quot_or(span.start, width, 0);
-    let word = wrapping_shl(y, 18) + wrapping_shl(x, 9) + span.length - 1;
+    let word = run_words.pack(y, x, span.length);
     let n = out.counts.at_or(span.key, 0);
     return Runs { ..out, words: out.words.push(word), keys: out.keys.push(span.key),
         order: if n == 0 { out.order.push(span.key) } else { out.order }, counts: out.counts.set(span.key, n + 1) };

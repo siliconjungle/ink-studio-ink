@@ -82,7 +82,7 @@ cargo run --release --locked --manifest-path native/pixel/Cargo.toml -- import-p
 
 Both loaders pass full cel slot arrays to Ink as palette indices. A held cel can share its source's slot plane. Snapshots and document exports restore the original swatch IDs, transparent slots and authored field order, including on 512 × 512 cels.
 
-Retained editors decode valid run-only cels into typed spans when opening a document. Raster queries and held cels reuse those spans, and snapshots still export the authored marks.
+Both loaders also pack native drawing spans into typed words on ingress, including in cels that mix points, shapes and runs. Raster queries and held cels reuse the packed spans. Snapshots restore the authored run arrays in place and append any new marks after them.
 
 `selectPixelFrame(source, query, scope)` runs selection on the resolved raster and returns the frame, grid and selected coordinates. Use `createPixelEditor(source)` for repeated selections. Its `select(query, scope)` method reuses the last raster for the same resolved frame and layer, including when the scope is given as a cel. `replaceDocument(source)` validates and installs a fresh snapshot, then clears the cached raster. Rust provides the same lifecycle through `PixelEditor::new`, `select` and `replace_document`.
 
