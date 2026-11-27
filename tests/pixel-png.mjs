@@ -112,6 +112,30 @@ export function pngCases(root) {
     assert.deepEqual(run(png(settings)), after);
   });
 
+  const runDrawing = plain(6, { ink: '#000000', red: '#c03228' }, [
+    { alpha: 128, runs: [[0, 0, 4]] }, { clear: true, runs: [[0, 0, 1]] },
+    { swatch: null, runs: [[0, 1, 1]] }, { swatch: 'red', runs: [[0, 0, 3]] },
+  ]);
+  runDrawing.frames[0].cels.ink = {
+    ...runDrawing.frames[0].cels.ink, id: 'drawing',
+    slots: ['ink', 'ink', 'ink', null, 'ink', null],
+  };
+  runDrawing.frames.push({ id: 'back', durationMs: 16, cels: { ink: { hold: 'drawing', offset: [1, 0] } } });
+  add('prepared runs retain authored alpha, clears and holds across history', runDrawing, (run, editor) => {
+    const settings = { frame: 'back', layer: 'ink', colorMode: 'rgba' };
+    const before = run(png(settings));
+    const patch = { id: 'detach-runs', frame: 'back', revision: editor.describe().revision,
+      operation: { tool: 'pencil', layer: 'ink', swatch: 'red', points: [[5, 0]] } };
+    assert.equal(run(command('draw', { patch })).status, 'applied');
+    const after = run(png(settings));
+    assert.notEqual(after.data, before.data);
+    assert.ok(run(command('export')));
+    run(command('undo'));
+    assert.deepEqual(run(png(settings)), before);
+    run(command('redo'));
+    assert.deepEqual(run(png(settings)), after);
+  });
+
   add('legacy palette and document upgrade', {
     format: 'ink-studio/pixel-art', version: 1, width: 3, height: 2,
     palette: { line: '#ad4634' }, layers: [{ id: 'ink', marks: [{ swatch: 'line', at: [1, 1] }] }],

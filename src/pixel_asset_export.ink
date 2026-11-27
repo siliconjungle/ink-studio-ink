@@ -85,13 +85,11 @@ fn when_rows(key: String, rows: List<json.Json>) -> List<json.Member> {
     return if length(rows) == 0 { [] } else { [history.member(key, json.array(rows))] };
 }
 
-fn palette_metadata(spec: List<json.Member>) -> List<json.Member> {
-    let palette = value.fields(value.get(spec, "palette"));
+fn palette_metadata(palette: List<json.Member>, ramps: List<json.Json>) -> List<json.Member> {
     let labels = palette.filter(fn(row) => value.has(value.fields(row.value), "label")).map(fn(row) =>
         history.member(row.key, value.get(value.fields(row.value), "label")));
     let locks = palette.filter(fn(row) => value.flag(value.fields(row.value), "locked", false))
         .map(fn(row) => json.text(row.key));
-    let ramps = value.items(value.get(spec, "ramps"));
     let named: List<json.Member> = if length(labels) == 0 { [] } else { [history.member("swatchLabels", json.object(labels))] };
     return named.concat(when_rows("lockedSwatches", locks)).concat(when_rows("ramps", ramps));
 }
@@ -99,7 +97,8 @@ fn palette_metadata(spec: List<json.Member>) -> List<json.Member> {
 fn stamp_info(spec: List<json.Member>, ids: List<String>, palette: List<json.Json>) -> List<json.Member> {
     return [history.member("width", value.get(spec, "width")), history.member("height", value.get(spec, "height")),
         history.member("origin", json.text("top-left")), history.member("palette", json.array(palette)),
-        history.member("swatchIds", json.array(ids.map(fn(id) => json.text(id))))].concat(palette_metadata(spec));
+        history.member("swatchIds", json.array(ids.map(fn(id) => json.text(id))))].concat(
+        palette_metadata(value.fields(value.get(spec, "palette")), value.items(value.get(spec, "ramps"))));
 }
 
 fn scope_arg(spec: List<json.Member>, key: String) -> Result<Option<String>, String> {

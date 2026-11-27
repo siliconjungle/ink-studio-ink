@@ -455,7 +455,8 @@ fn empty_editor_image() -> selection.Image {
 
 fn prepare_editor(source: json.Json, positions: List<List<u32>>, planes: List<frame_raster.SlotPlane>) -> Result<EditorDocument, String> {
     let opened = open_pixel_document(source)?;
-    let art = frame_raster.attach_planes(frame_raster.prepare(opened.document), planes)?;
+    let bound = frame_raster.attach_planes(frame_raster.prepare(opened.document), planes)?;
+    let art = frame_raster.plan_runs(bound);
     let items = object(opened.document, "Expected a normalized pixel-art document")?;
     let named = json.lookup(items, "selections").fold(fn(rows) =>
         read_named(rows, art.grid, art.frames, positions), fn(unit) => Ok(selection.no_named()))?;

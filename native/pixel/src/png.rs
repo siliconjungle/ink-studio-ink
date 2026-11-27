@@ -39,6 +39,27 @@ fn deflate(bytes: &[u8]) -> Result<Vec<u8>, String> {
     .map_err(|error| format!("PNG compression failed ({error:?})"))
 }
 
+fn compress_chunks(rows: &[u8], metadata: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    const PARALLEL_MIN_BYTES: usize = 256 * 1024;
+    if rows.len().min(metadata.len()) >= PARALLEL_MIN_BYTES {
+        return std::thread::scope(|scope| {
+            // IDAT and inKD are independent zlib streams. Compress them
+            // together and preserve their established order in the file.
+            let task = std::thread::Builder::new().spawn_scoped(scope, || deflate(metadata));
+            let data = deflate(rows)?;
+            let ink = match task {
+                Ok(worker) => match worker.join() {
+                    Ok(result) => result?,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                },
+                Err(_) => deflate(metadata)?,
+            };
+            Ok((data, ink))
+        });
+    }
+    Ok((deflate(rows)?, deflate(metadata)?))
+}
+
 fn chunk(out: &mut Vec<u8>, tag: &[u8; 4], bytes: &[u8]) {
     out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
     let start = out.len();
@@ -48,8 +69,7 @@ fn chunk(out: &mut Vec<u8>, tag: &[u8; 4], bytes: &[u8]) {
 }
 
 pub(super) fn encode(raster: Raster<'_>, metadata: &[u8]) -> Result<Vec<u8>, String> {
-    let data = deflate(&filtered_rows(&raster))?;
-    let ink = deflate(metadata)?;
+    let (data, ink) = compress_chunks(&filtered_rows(&raster), metadata)?;
     let mut out = Vec::with_capacity(
         data.len() + ink.len() + raster.colors.len() * 3 + raster.coverage.len() + 93,
     );

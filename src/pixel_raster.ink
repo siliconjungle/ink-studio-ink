@@ -12,6 +12,9 @@ record Box { x: u32, y: u32, w: u32, h: u32, }
 record Span { start: u32, length: u32, }
 record Runs { paint: Paint, end: u32, }
 record RunMark { slot: i32, alpha: Option<u32>, spans: List<Vec3<u32>>, point: Bool, }
+record RunStyle { slot: i32, alpha: Option<u32>, valid: Bool, }
+record RunPlan { spans: Buffer<Vec3<u32>>, end: u32, }
+record MarkPlan { marks: Buffer<RunMark>, valid: Bool, }
 record Step { x: i32, y: i32, dx: i32, dy: i32, down: Bool, }
 record Stroke { paint: Paint, tip: Step, }
 record Position { x: f64, y: f64, }
@@ -109,7 +112,7 @@ fn span(g: mask.Grid, value: json.Json) -> Span {
     return Span { start: y * g.width + x, length: if n == 4294967295 { 0 } else { n } };
 }
 
-fn run_mark(g: mask.Grid, spec: List<json.Member>, slot: i32, paint: Paint) -> Paint {
+fn run_style(spec: List<json.Member>, slot: i32) -> RunStyle {
     let is_alpha = values.has(spec, "alpha");
     let clears = values.has(spec, "clear");
     let alpha = values.word(values.get(spec, "alpha"), 255);
@@ -117,18 +120,23 @@ fn run_mark(g: mask.Grid, spec: List<json.Member>, slot: i32, paint: Paint) -> P
         values.only(spec, ["swatch", "clear", "runs"]) &&
         (if clears { values.flag(spec, "clear", false) && !values.has(spec, "swatch") } else { slot != -3 })
     };
-    if !valid { return Paint { ..paint, issue: "A pixel run mark needs a swatch, clear flag or alpha byte" }; }
+    return RunStyle { slot: if clears { -1 } else { slot }, alpha: if is_alpha { Some(alpha) } else { None }, valid: valid };
+}
+
+fn run_mark(g: mask.Grid, spec: List<json.Member>, slot: i32, paint: Paint) -> Paint {
+    let style = run_style(spec, slot);
+    if !style.valid { return Paint { ..paint, issue: "A pixel run mark needs a swatch, clear flag or alpha byte" }; }
     let rows = values.items(values.get(spec, "runs"));
     if length(rows) == 0 || length(rows) > mask.size(g) {
         return Paint { ..paint, issue: "A pixel run mark needs native runs" };
     }
     var out: Paint = spend_marks(Paint { ..paint, drawing: 0 }, 1);
-    if is_alpha && out.alpha.len() == 0 {
+    let alpha = style.alpha.fold(fn(n) => n, fn(unit) => 4294967295);
+    if alpha <= 255 && out.alpha.len() == 0 {
         out = Paint { ..out, alpha: buffer_fill(mask.size(g), 255) };
     }
-    let id: i32 = if clears { -1 } else { slot };
     let start = Runs { paint: out, end: 0 };
-    return foldl(rows, start, fn(row) => fn(next) => apply_run(g, row, is_alpha, alpha, id, next)).paint;
+    return foldl(rows, start, fn(row) => fn(next) => apply_run(g, row, alpha <= 255, alpha, style.slot, next)).paint;
 }
 
 fn apply_run(g: mask.Grid, row: json.Json, is_alpha: Bool, alpha: u32, id: i32, old: Runs) -> Runs {
@@ -146,6 +154,43 @@ fn apply_run(g: mask.Grid, row: json.Json, is_alpha: Bool, alpha: u32, id: i32, 
         repeat_until(run.length, charged, fn(out) => false, fn(i) => fn(out) => write_alpha(out, run.start + i, alpha))
     } else { write_span(charged, run, id) };
     return Runs { paint: next, end: run.start + run.length };
+}
+
+fn plan_span(g: mask.Grid, row: json.Json, old: RunPlan) -> RunPlan {
+    let run = span(g, row);
+    if run.length == 0 || run.start < old.end {
+        return RunPlan { ..old, end: 4294967295 };
+    }
+    let y = quot_or(run.start, g.width, 0);
+    let x = rem_or(run.start, g.width, 0);
+    return RunPlan { spans: old.spans.push(vec3(y, x, run.length)), end: run.start + run.length };
+}
+
+fn plan_mark(g: mask.Grid, ids: List<String>, raw: json.Json, old: MarkPlan) -> MarkPlan {
+    let spec = values.fields(raw);
+    if !values.has(spec, "runs") { return MarkPlan { ..old, valid: false }; }
+    let id: i32 = if values.has(spec, "swatch") { slot(ids, values.get(spec, "swatch")) } else { -3 };
+    let style = run_style(spec, id);
+    let rows = values.items(values.get(spec, "runs"));
+    if !style.valid || length(rows) == 0 || length(rows) > mask.size(g) {
+        return MarkPlan { ..old, valid: false };
+    }
+    let start = RunPlan { spans: Buffer.empty(), end: 0 };
+    let checked = fold_until(rows, start, fn(row) => fn(out) => out.end == 4294967295,
+        fn(row) => fn(out) => if out.end == 4294967295 { out } else { plan_span(g, row, out) });
+    if checked.end == 4294967295 { return MarkPlan { ..old, valid: false }; }
+    return MarkPlan { marks: old.marks.push(RunMark { slot: style.slot, alpha: style.alpha,
+        spans: checked.spans.freeze(), point: false }), valid: true };
+}
+
+fn prepare_runs(g: mask.Grid, ids: List<String>, content: List<json.Member>) -> List<RunMark> {
+    let marks = values.items(values.get(content, "marks"));
+    if length(marks) > 4096 { return []; }
+    let start = MarkPlan { marks: Buffer.empty(), valid: true };
+    let planned = fold_until(marks, start, fn(row) => fn(out) => !out.valid,
+        fn(row) => fn(out) => if out.valid { plan_mark(g, ids, row, out) } else { out });
+    // Deferred diagnostics and mixed drawing tools use the authored path.
+    return if planned.valid { planned.marks.freeze() } else { [] };
 }
 
 fn point(g: mask.Grid, raw: json.Json) -> Vec2<u32> {
@@ -704,14 +749,16 @@ fn retained_span(g: mask.Grid, span: Vec3<u32>, slot: i32, alpha: u32, old: Pain
     return write_span(charged, Span { start: first, length: span.z }, slot);
 }
 
-fn raster(g: mask.Grid, ids: List<String>, content: List<json.Member>, packed: List<i32>, runs: List<RunMark>, work: Work) -> Raw {
-    let marks = values.items(values.get(content, "marks"));
-    if length(packed) != 0 && length(runs) == 0 && length(marks) == 0 {
+fn raster(g: mask.Grid, ids: List<String>, content: List<json.Member>, packed: List<i32>,
+    prepared: List<RunMark>, runs: List<RunMark>, work: Work) -> Raw {
+    let marks = if length(prepared) == 0 { values.items(values.get(content, "marks")) } else { [] };
+    if length(packed) != 0 && length(runs) == 0 && length(marks) == 0 && length(prepared) == 0 {
         return Raw { slots: packed, alpha: [], work: work, issue: "" };
     }
     let base = initial(g, ids, content, packed, work);
-    let authored = foldl(marks, base, fn(row) => fn(out) =>
-        if out.issue == "" { mark(g, ids, row, out) } else { out });
+    let authored = if length(prepared) == 0 {
+        foldl(marks, base, fn(row) => fn(out) => if out.issue == "" { mark(g, ids, row, out) } else { out })
+    } else { foldl(prepared, base, fn(row) => fn(out) => retained_runs(g, row, out)) };
     let drawn = foldl(runs, authored, fn(row) => fn(out) => retained_runs(g, row, out));
     return Raw { slots: drawn.slots.freeze(), alpha: drawn.alpha.freeze(), work: drawn.work, issue: drawn.issue };
 }

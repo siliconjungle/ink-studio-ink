@@ -14,6 +14,10 @@ fn get(fields: List<json.Member>, key: String) -> json.Json {
     return json.lookup(fields, key).fold(fn(value) => value, fn(unit) => json.null());
 }
 
+fn property(value: json.Json, key: String) -> Option<json.Json> {
+    return json.get(value, key).fold(fn(item) => item, fn(issue) => None);
+}
+
 fn has(fields: List<json.Member>, key: String) -> Bool {
     return fold_until(fields, false, fn(field) => fn(found) => found,
         fn(field) => fn(found) => found || field.key == key);

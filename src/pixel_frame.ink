@@ -7,7 +7,8 @@ import "pixel_raster.ink" as paint;
 import "pixel_selection.ink" as selection;
 
 record Location { id: String, frame: String, layer: String, }
-record Cel { id: String, layer: String, frame: String, fields: List<json.Member>, runs: List<paint.RunMark>, plane: u32, }
+record Cel { id: String, layer: String, frame: String, fields: List<json.Member>, runs: List<paint.RunMark>,
+    prepared: List<paint.RunMark>, plane: u32, }
 record SlotPlane { frame: String, layer: String, pixels: List<i32>, }
 record SlotOwner { frame: String, layer: String, plane: u32, }
 record AttachedPlanes { cels: List<Cel>, ordinal: u32, issue: String, }
@@ -52,7 +53,7 @@ fn hex_digit(byte: u32) -> u32 {
     return if byte <= 70 { byte - 55 } else { byte - 87 };
 }
 
-fn no_cel() -> Cel { return Cel { id: "", layer: "", frame: "", fields: [], runs: [], plane: 0 }; }
+fn no_cel() -> Cel { return Cel { id: "", layer: "", frame: "", fields: [], runs: [], prepared: [], plane: 0 }; }
 fn no_capture() -> Captured { return Captured { found: false, slots: [], alpha: [], clipping: [] }; }
 fn blank() -> Pixel { return Pixel { slot: -1, color: 0, alpha: 0, locked: false }; }
 
@@ -60,7 +61,7 @@ fn cel_entry(frame: String, row: json.Member) -> Cel {
     let spec = value.fields(row.value);
     let id = json.lookup(spec, "id").fold(fn(v) => value.text(v), fn(unit) =>
         string_concat(string_concat(frame, "/"), row.key));
-    return Cel { id: id, frame: frame, layer: row.key, fields: spec, runs: [], plane: 0 };
+    return Cel { id: id, frame: frame, layer: row.key, fields: spec, runs: [], prepared: [], plane: 0 };
 }
 
 fn all_cels(frames: List<json.Json>) -> List<Cel> {
@@ -76,17 +77,13 @@ fn append_cels(frame: List<json.Member>, out: Buffer<Cel>) -> Buffer<Cel> {
 
 fn find_cel(cels: List<Cel>, id: String) -> Cel {
     if id == "" { return no_cel(); }
-    return repeat_until(length(cels), no_cel(), fn(cel) => cel.id != "", fn(i) => fn(found) =>
-        if cels.at_or(i, no_cel()).id == id { cels.at_or(i, no_cel()) } else { found });
+    return fold_until(cels, no_cel(), fn(row) => fn(found) => found.id != "", fn(row) => fn(found) =>
+        if row.id == id { row } else { found });
 }
 
 fn active_cel(cels: List<Cel>, frame: String, layer: String) -> Cel {
-    return repeat_until(length(cels), no_cel(), fn(cel) => cel.id != "", fn(i) => fn(found) =>
-        match_location(cels.at_or(i, no_cel()), frame, layer, found));
-}
-
-fn match_location(cel: Cel, frame: String, layer: String, found: Cel) -> Cel {
-    return if cel.frame == frame && cel.layer == layer { cel } else { found };
+    return fold_until(cels, no_cel(), fn(row) => fn(found) => found.id != "", fn(row) => fn(found) =>
+        if row.frame == frame && row.layer == layer { row } else { found });
 }
 
 fn resolved_cel(cels: List<Cel>, start: Cel) -> Cel {
@@ -436,7 +433,7 @@ fn step(art: Artwork, scope: Scope, scene: Scene) -> Scene {
     let place = placement(art.inputs.at_or(job.ordinal, json.null()), active);
     let source = resolved_cel(art.cels, active);
     let slots: List<i32> = if source.plane == 0 { [] } else { art.planes.at_or(source.plane - 1, []) };
-    let raster = paint.raster(art.grid, art.ids, source.fields, slots, source.runs, old.work);
+    let raster = paint.raster(art.grid, art.ids, source.fields, slots, source.prepared, source.runs, old.work);
     let raw = if old.spec.sample_only { translated_sample(art.grid, raster, place, old.spec.inspect) }
         else { translated(art.grid, raster, place) };
     if raw.issue != "" { return Scene { ..old, issue: raw.issue }; }
@@ -533,6 +530,11 @@ fn prepare(document: json.Json) -> Artwork {
         ids: palette.map(fn(swatch) => swatch.key), colors: palette.map(fn(swatch) => palette_color(swatch.value)),
         cels: cels, locations: cels.map(fn(cel) => Location { id: cel.id, frame: cel.frame, layer: cel.layer }),
         frames: frames.map(fn(row) => frame_name(row)), inputs: layers, planes: [] };
+}
+
+fn plan_runs(art: Artwork) -> Artwork {
+    let cels = art.cels.map(fn(cel) => Cel { ..cel, prepared: paint.prepare_runs(art.grid, art.ids, cel.fields) });
+    return Artwork { ..art, cels: cels };
 }
 
 fn attach_planes(art: Artwork, planes: List<SlotPlane>) -> Result<Artwork, String> {

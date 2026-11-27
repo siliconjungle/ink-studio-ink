@@ -51,9 +51,11 @@ fn prepare(source: json.Json, art: frame.Artwork, options: json.Json) -> Result<
     let mode = json.lookup(settings, "colorMode").fold(fn(raw) => value.text(raw), fn(unit) => "auto");
     if mode != "auto" && mode != "indexed" && mode != "rgba" { return Err("Choose auto, indexed, or rgba PNG color mode"); }
     let raster = input.raster;
+    let palette = value.property(source, "palette").fold(fn(raw) => value.fields(raw), fn(unit) => []);
+    let ramps = value.property(source, "ramps").fold(fn(raw) => value.items(raw), fn(unit) => []);
     let base = Image { width: art.grid.width, height: art.grid.height, channels: 4, pixels: [], colors: [], coverage: [],
         palette: input.colors.map(fn(rgb) => colors.color_text(rgb)), ids: input.ids, slots: raster.slots,
-        knockouts: raster.knockouts, metadata: json.object(assets.palette_metadata(value.fields(source))) };
+        knockouts: raster.knockouts, metadata: json.object(assets.palette_metadata(palette, ramps)) };
     if mode != "rgba" {
         let indexed = index(raster, input.colors);
         if !indexed.full {
