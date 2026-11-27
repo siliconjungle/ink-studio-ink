@@ -145,9 +145,12 @@ fn from_eye(center: Vec3<f32>, camera: Camera) -> Vec3<f32> {
     return vec3(center.x - camera.eye.x, center.y - camera.eye.y, center.z - camera.eye.z);
 }
 
-fn world_visible(splat: WorldGaussian, camera: Camera, depth: f32) -> Bool {
-    return splat.alpha >= 0.004 && splat.reach > 0.0 &&
-        depth >= camera.near_clip && depth <= camera.far_clip && camera.focal > 0.0 &&
+fn contributes(splat: WorldGaussian) -> Bool {
+    return splat.alpha >= 0.004 && splat.reach > 0.0;
+}
+
+fn world_visible(camera: Camera, depth: f32) -> Bool {
+    return depth >= camera.near_clip && depth <= camera.far_clip && camera.focal > 0.0 &&
         (!camera.perspective || depth > 0.0);
 }
 
@@ -178,9 +181,10 @@ fn screen_gaussian(splat: WorldGaussian, camera: Camera, position: Vec3<f32>, de
 }
 
 fn project_world_one(splat: WorldGaussian, camera: Camera) -> Ellipse {
+    if !contributes(splat) { return hidden(); }
     let position = from_eye(splat.position, camera);
     let depth = -dot3(camera.back, position);
-    if !world_visible(splat, camera, depth) { return hidden(); }
+    if !world_visible(camera, depth) { return hidden(); }
     return project_one(screen_gaussian(splat, camera, position, depth), camera.half_viewport);
 }
 
@@ -389,9 +393,10 @@ fn hidden_contour() -> ContourEllipse {
 }
 
 fn contour_ellipse(splat: WorldGaussian, camera: Camera) -> ContourEllipse {
+    if !contributes(splat) { return hidden_contour(); }
     let position = from_eye(splat.position, camera);
     let depth = -dot3(camera.back, position);
-    if !world_visible(splat, camera, depth) { return hidden_contour(); }
+    if !world_visible(camera, depth) { return hidden_contour(); }
     let screen = screen_gaussian(splat, camera, position, depth);
     // The same pixel variance is applied on each grid. In native-pixel
     // units, variance on the double-resolution grid is one quarter as large.
