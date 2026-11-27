@@ -160,7 +160,7 @@ export function reference(original) {
   return cases;
 }
 
-function verify(actual, expected, steps, name) {
+export function verify(actual, expected, steps, name) {
   assert.equal(actual.length, expected.length, name);
   for (let i = 0; i < expected.length; i++) {
     assert.deepEqual(actual[i], expected[i], name + ' ' + (i + 1) + ' ' + JSON.stringify(steps[i]));
@@ -170,7 +170,7 @@ function verify(actual, expected, steps, name) {
   }
 }
 
-function fileAndSession(original, native, scratch, sample) {
+export function fileAndSession(original, native, scratch, sample) {
   const source = join(scratch, 'art.json'), patch = join(scratch, 'patch.json');
   const originalDraft = join(scratch, 'reference-draft'), inkDraft = join(scratch, 'native-draft');
   const originalOutput = join(scratch, 'reference.json'), inkOutput = join(scratch, 'ink.json');

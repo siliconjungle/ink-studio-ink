@@ -180,9 +180,29 @@ fn compare_frame(before: frame.Artwork, after: frame.Artwork, a: List<paint.Deta
     };
 }
 
+fn count_pixel(pair: Pair, p: u32, count: u32) -> u32 {
+    let left = pair.before.view.pixels.at_or(p, frame.blank());
+    let right = pair.after.view.pixels.at_or(p, frame.blank());
+    let a = frame.owner(pair.before.view.trace.at_or(p, 0));
+    let b = frame.owner(pair.after.view.trace.at_or(p, 0));
+    let changed = left.color != right.color || left.alpha != right.alpha || !same_location(pair, a, b) ||
+        !same_swatch(pair, left.slot, right.slot) || protected(pair.before, p, left) != protected(pair.after, p, right);
+    return count + (if changed { 1 } else { 0 });
+}
+
+fn scan_composite(pair: Pair, settings: Settings, out: Scan) -> Scan {
+    let size = mask.size(pair.grid);
+    // With equal grids both sides use the same flat index. Count-only reviews
+    // can compare their pixels directly without constructing sample records.
+    if !settings.exact && out.rows.len() >= settings.limit && pair.before.grid == pair.after.grid {
+        let count = repeat_until(size, out.count, fn(n) => false, fn(p) => fn(n) => count_pixel(pair, p, n));
+        return Scan { ..out, count: count };
+    }
+    return repeat_until(size, out, fn(next) => false, fn(p) => fn(next) => scan_pixel(pair, settings, p, next));
+}
+
 fn scan_frame(pair: Pair, a: List<u32>, b: List<u32>, settings: Settings, out: Scan) -> Scan {
-    let composite = repeat_until(mask.size(pair.grid), out, fn(next) => false,
-        fn(p) => fn(next) => scan_pixel(pair, settings, p, next));
+    let composite = scan_composite(pair, settings, out);
     return repeat_until(length(pair.after.view.sources), composite, fn(next) => false,
         fn(i) => fn(next) => scan_layer(pair, a, b, i, next));
 }
@@ -207,8 +227,7 @@ fn pair(id: String, grid: mask.Grid, left: Raster, right: Raster) -> Pair {
 fn composite_diff(pair: Pair, limit: u32) -> Report {
     let start = Scan { count: 0, rows: Buffer.empty(), cells: Buffer.empty(), protected_cells: Buffer.empty(), issue: "" };
     let settings = Settings { limit: limit, exact: false };
-    let changes = repeat_until(mask.size(pair.grid), start, fn(out) => false,
-        fn(p) => fn(out) => scan_pixel(pair, settings, p, out));
+    let changes = scan_composite(pair, settings, start);
     return Report { pixelCount: changes.count, pixels: changes.rows.freeze(),
         exact: Exact { cells: [], protectedCells: [], details: [], grids: [] }, guides: [] };
 }

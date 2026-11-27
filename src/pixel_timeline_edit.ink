@@ -3,6 +3,7 @@ module StudioPixelTimelineEdit;
 import "std:json" as json;
 import "pixel_brush.ink" as brush;
 import "pixel_canvas_registration.ink" as registration;
+import "pixel_cel_batch.ink" as batch;
 import "pixel_commands.ink" as commands;
 import "pixel_fault.ink" as fault;
 import "pixel_frame.ink" as frame;
@@ -517,10 +518,14 @@ fn variant_positions(source: json.Json, from: String, positions: List<List<u32>>
         .concat(origins.map(fn(i) => positions.at_or(i, [])));
 }
 
-fn apply(source: json.Json, art: frame.Artwork, operation: json.Json) -> Result<Edit, json.Json> {
+fn apply(source: json.Json, art: frame.Artwork, named: selection.Named, operation: json.Json) -> Result<Edit, json.Json> {
     let message = "Choose add-frame, duration, set-tag, remove-tag, set-directional, set-tilemap, place-tiles, make-local-variant, reuse-exact-tile, layer-offset, cel-offset, blank, duplicate, hold, unlink, move, copy, edit-cels, or write-cels";
     let op = json.members(operation).map_err(fn(issue) => invalid(message))?;
     let tool = value.text(value.get(op, "type"));
+    if tool == "edit-cels" || tool == "write-cels" {
+        let edited = batch.apply(source, art, named, tool, op)?;
+        return Ok(Edit { source: edited.source, artwork: edited.artwork, target: edited.target, changes_art: edited.changed });
+    }
     if commands.includes(["set-slice-key", "remove-slice-key", "remove-slice"], tool) { return edit_slice(source, art, tool, op); }
     if tool == "make-local-variant" || tool == "reuse-exact-tile" { return share_tile(source, art, tool, op); }
     return apply_standard(source, art, tool, op, message);

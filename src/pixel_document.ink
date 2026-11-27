@@ -705,9 +705,9 @@ change edit_pixel_editor_guides(operation: json.Json) -> Result<json.Json, json.
 }
 
 change edit_pixel_editor_timeline(operation: json.Json) -> Result<json.Json, json.Json>
-    reads(EditorSource, EditorArtwork, EditorPositions)
+    reads(EditorSource, EditorArtwork, EditorNamed, EditorPositions)
     writes(EditorSource, EditorArtwork, EditorPositions, EditorNamed, EditorImage, EditorPaint) {
-    let edited = timeline_edit.apply(EditorSource, EditorArtwork, operation)?;
+    let edited = timeline_edit.apply(EditorSource, EditorArtwork, EditorNamed, operation)?;
     if edited.changes_art {
         let checked = open_pixel_document(edited.source).map_err(fn(issue) => timeline_issue(edited.artwork, issue))?;
         let protected = timeline_edit.check_protection(EditorSource, EditorArtwork, edited.artwork)?;
