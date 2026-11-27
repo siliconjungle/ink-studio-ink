@@ -140,6 +140,29 @@ const roundedDotRows = [
 const roundedDot = [roundedDotRows, [], camera, lamp, { ...reveal, radius: 10.5 }];
 const expectedDot = call('project_lit_contour_scene', [[roundedDotRows[1]], [], camera, lamp]);
 assert.deepEqual(call('project_revealed_lit_contours', roundedDot), expectedDot);
+const arrivingTerrain = [
+  { ...disc, position: [0, 0, -6], rgb: 10 },
+  { ...disc, position: [0, 8.25, -6], rgb: 11 },
+  { ...disc, position: [0, 0, -6.5], rgb: 12 },
+  { ...disc, position: [1, 0, -6.5], rgb: 13 },
+  { ...disc, position: [0, 0, -7.5], rgb: 14 },
+];
+const arriving = [arrivingTerrain, revealActors, camera, lamp, { ...reveal, radius: 10.5 }, [5, 2]];
+const preparedArriving = [call('prepare_contour_terrain', [arrivingTerrain]), ...arriving.slice(1)];
+const arrivalCases = [
+  [5, [2, 3, 4]],
+  [5.5, [0, 2, 3, 4]],
+  [5.95, [0, 1, 2, 3, 4]],
+  [6.1, [0, 1, 2, 3, 4]],
+].flatMap(([time, indices]) => {
+  const clock = { time, latest: 5, block_rows: 2 };
+  const expected = call('project_lit_contour_scene', [indices.map(i => arrivingTerrain[i]), ...arriving.slice(1, 4)]);
+  return [
+    { pure: 'project_streamed_lit_contours', args: [...arriving, clock], expected },
+    { pure: 'project_streamed_prepared_contours', args: [...preparedArriving, clock], expected },
+  ];
+});
+for (const { pure, args, expected } of arrivalCases) assert.deepEqual(call(pure, args), expected);
 const sourceRow = [1, 2, 3, 0.5, 4, 5, 6, 0xf08010, 7, 8, 9, 128, 11, 12, 13, 14];
 const imported = [{ position: [1, 2, 3], covariance0: [4, 5, 6], covariance1: [7, 8, 9],
   reach: 3, rgb: 0xf08010, alpha: 0.5 }];
@@ -188,6 +211,7 @@ try {
     { pure: 'project_revealed_lit_contours', args: raised, expected: expectedRaised },
     { pure: 'project_revealed_prepared_contours', args: raisedPrepared, expected: expectedRaised },
     { pure: 'project_revealed_lit_contours', args: roundedDot, expected: expectedDot },
+    ...arrivalCases,
     { pure: 'import_builder_splats', args: [sourceRow], expected: imported, cpuOnly: true },
   ];
   writeFileSync(requestsPath, JSON.stringify(tests.map(({ pure, args }) => ({ pure, args }))));

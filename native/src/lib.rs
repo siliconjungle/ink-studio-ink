@@ -9,7 +9,7 @@ mod present;
 mod render;
 pub use contours::ContourSettings;
 use contours::ContourRaster;
-pub use packed_inputs::{Bone, Camera, ContourLight, ContourReveal, ContourWindow, RigLight, WorldSplat};
+pub use packed_inputs::{Bone, Camera, ContourClock, ContourLight, ContourReveal, ContourWindow, RigLight, WorldSplat};
 use packed_inputs::{GpuWords, PackedInputs, binding};
 pub use present::PixelPresenter;
 
@@ -70,6 +70,12 @@ pub struct ContourOptions {
     pub parallel_u64_merge: bool,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct ContourTerrain {
+    pub arrival_blocks: usize,
+    pub retain_normals: bool,
+}
+
 impl GaussianRenderer {
     pub fn new(
         device: &wgpu::Device,
@@ -78,7 +84,7 @@ impl GaussianRenderer {
         size: [u32; 2],
         splats: &Value,
     ) -> Result<Self, String> {
-        Self::create(device, queue, format, size, splats, None, None, ContourOptions::default(), false)
+        Self::create(device, queue, format, size, splats, None, None, ContourOptions::default(), ContourTerrain::default())
     }
 
     pub fn with_camera(
@@ -99,7 +105,7 @@ impl GaussianRenderer {
             Some((camera, ordering)),
             None,
             ContourOptions::default(),
-            false,
+            ContourTerrain::default(),
         )
     }
 
@@ -141,7 +147,7 @@ impl GaussianRenderer {
         settings: ContourSettings<'_>,
         options: ContourOptions,
     ) -> Result<Self, String> {
-        Self::build_contours(device, queue, format, size, splats, camera, ordering, settings, options, false)
+        Self::with_contour_terrain(device, queue, format, size, splats, camera, ordering, settings, options, ContourTerrain::default())
     }
 
     /// Keep camera-independent terrain normals resident between terrain writes.
@@ -156,10 +162,11 @@ impl GaussianRenderer {
         settings: ContourSettings<'_>,
         options: ContourOptions,
     ) -> Result<Self, String> {
-        Self::build_contours(device, queue, format, size, splats, camera, ordering, settings, options, true)
+        Self::with_contour_terrain(device, queue, format, size, splats, camera, ordering, settings, options,
+            ContourTerrain { retain_normals: true, ..Default::default() })
     }
 
-    fn build_contours(
+    pub fn with_contour_terrain(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
@@ -169,12 +176,12 @@ impl GaussianRenderer {
         ordering: WorldOrder,
         settings: ContourSettings<'_>,
         options: ContourOptions,
-        retain_terrain: bool,
+        terrain: ContourTerrain,
     ) -> Result<Self, String> {
         if matches!(ordering, WorldOrder::Preordered | WorldOrder::Actor(_)) {
             return Err("Colored Contours requires sorted world or skinned splats".into());
         }
-        Self::create(device, queue, format, size, splats, Some((camera, ordering)), Some(settings), options, retain_terrain)
+        Self::create(device, queue, format, size, splats, Some((camera, ordering)), Some(settings), options, terrain)
     }
 
     fn create(
@@ -186,7 +193,7 @@ impl GaussianRenderer {
         camera: Option<(&Value, WorldOrder)>,
         contours: Option<ContourSettings<'_>>,
         options: ContourOptions,
-        retain_terrain: bool,
+        terrain: ContourTerrain,
     ) -> Result<Self, String> {
         if size.contains(&0) {
             return Err("Gaussian render target must have positive dimensions".into());
@@ -282,14 +289,16 @@ impl GaussianRenderer {
             inputs["contourLight"] = contour_light_off();
             args.push(json!({ "input": "contourLight" }));
             inputs["contourReveal"] = json!({"center": [0, 0], "radius": 0, "edge_width": 0, "floor_height": 0});
-            args.push(json!({ "input": "contourReveal" }));
-            function = "project_revealed_lit_contours";
+            inputs["terrainArrivals"] = json!(vec![-100.0; terrain.arrival_blocks.max(1)]);
+            inputs["contourClock"] = json!({"time": 0, "latest": 0, "block_rows": 0});
+            args.extend(["contourReveal", "terrainArrivals", "contourClock"].map(|input| json!({ "input": input })));
+            function = "project_streamed_lit_contours";
         }
-        let retained_steps = if directional && retain_terrain {
+        let retained_steps = if directional && terrain.retain_normals {
             steps.push(json!({"id": "terrain-normals", "call": "prepare_contour_terrain",
                 "args": [{"input": "splats"}]}));
             args[0] = json!({"step": "terrain-normals"});
-            function = "project_revealed_prepared_contours";
+            function = "project_streamed_prepared_contours";
             &["terrain-normals"][..]
         } else {
             &[]
@@ -469,6 +478,27 @@ impl GaussianRenderer {
         let input = binding(&mut self.packed_inputs.contour_reveal, &self.engine, self.session,
             "contourReveal", ContourReveal::layout)?;
         self.engine.write_packed(input, reveal.words())?;
+        Ok(())
+    }
+
+    /// Update the timestamps of the current terrain blocks after a stream edit.
+    pub fn stage_terrain_arrivals(&mut self, starts: &[f32]) -> Result<(), String> {
+        if !self.directional || starts.iter().any(|start| !start.is_finite()) {
+            return Err("Invalid contour terrain arrival times".into());
+        }
+        let input = binding(&mut self.packed_inputs.terrain_arrivals, &self.engine, self.session,
+            "terrainArrivals", packed_inputs::list::<f32>)?;
+        self.engine.write_changed_packed(input, starts.iter().map(|start| start.to_bits()).collect())?;
+        Ok(())
+    }
+
+    pub fn stage_contour_clock(&mut self, clock: ContourClock) -> Result<(), String> {
+        if !self.directional || !clock.time.is_finite() || !clock.latest.is_finite() {
+            return Err("Invalid contour clock".into());
+        }
+        let input = binding(&mut self.packed_inputs.contour_clock, &self.engine, self.session,
+            "contourClock", ContourClock::layout)?;
+        self.engine.write_packed(input, clock.words())?;
         Ok(())
     }
 

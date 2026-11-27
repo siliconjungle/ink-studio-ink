@@ -1,5 +1,5 @@
 use ink_gpu_program::{Backend, Engine};
-use ink_studio_wgpu::{Bone, Camera, ContourReveal, ContourSettings, ContourWindow, GaussianRenderer, RigLight, WorldOrder};
+use ink_studio_wgpu::{Bone, Camera, ContourClock, ContourReveal, ContourSettings, ContourWindow, GaussianRenderer, RigLight, WorldOrder};
 use serde_json::json;
 
 #[test]
@@ -138,6 +138,19 @@ fn computes_and_draws_from_the_same_device_buffer() {
     let feathered = draw_fixture(&device, &queue, &texture, &readback, &directional);
     assert_eq!(feathered[center], feathered[0]);
     directional.stage_contour_reveal(ContourReveal { radius: 2.5, ..reveal }).unwrap();
+    directional.project(&device).unwrap();
+    assert_eq!(draw_fixture(&device, &queue, &texture, &readback, &directional), data);
+    directional.stage_terrain_arrivals(&[5.0]).unwrap();
+    let clock = ContourClock { time: 5.0, latest: 5.0, block_rows: 1 };
+    directional.stage_contour_clock(clock).unwrap();
+    directional.project(&device).unwrap();
+    let just_arrived = draw_fixture(&device, &queue, &texture, &readback, &directional);
+    assert_eq!(just_arrived[center], just_arrived[0]);
+    directional.stage_contour_clock(ContourClock { time: 6.1, ..clock }).unwrap();
+    directional.project(&device).unwrap();
+    assert_eq!(draw_fixture(&device, &queue, &texture, &readback, &directional), data);
+    directional.stage_terrain_arrivals(&[-100.0]).unwrap();
+    directional.stage_contour_clock(clock).unwrap();
     directional.project(&device).unwrap();
     assert_eq!(draw_fixture(&device, &queue, &texture, &readback, &directional), data);
 }

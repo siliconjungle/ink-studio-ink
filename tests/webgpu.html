@@ -144,6 +144,17 @@
     await directional.stageContourWindow([0, -2], 2.5, 2.2, 0);
     const fullyVisible = await directionalPixels(null);
     if (fullyVisible.some((channel, i) => channel !== disabled[i])) throw new Error('Dithered edge changed the interior');
+    await directional.stageTerrainArrivals([5]);
+    await directional.stageContourClock(5, 5, 1);
+    const justArrived = await directionalPixels(null);
+    if (justArrived[center] !== justArrived[red]) throw new Error('A newly resident terrain block was visible immediately');
+    await directional.stageContourClock(6.1, 5, 1);
+    const settled = await directionalPixels(null);
+    if (settled.some((channel, i) => channel !== disabled[i])) throw new Error('A settled terrain block did not restore the scene');
+    await directional.stageTerrainArrivals([-100]);
+    await directional.stageContourClock(5, 5, 1);
+    const rebaked = await directionalPixels(null);
+    if (rebaked.some((channel, i) => channel !== disabled[i])) throw new Error('A rebaked terrain block replayed the arrival animation');
     await directional.close();
     readback.destroy();
     const bone = { axis_x: [1, 0, 0], axis_y: [0, 1, 0], axis_z: [0, 0, 1], offset: [0, 0, 0] };

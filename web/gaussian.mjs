@@ -58,10 +58,14 @@ export async function createGaussianRenderer(device, format, { width, height, sp
   }
   const directional = contours?.directional === true;
   if (directional) {
+    const arrivalBlocks = contours.terrainBlocks ?? 1;
+    if (!Number.isInteger(arrivalBlocks) || arrivalBlocks < 1) throw new Error('Invalid terrain block count');
     projection.input.contourLight = contourLightOff;
     projection.input.contourReveal = contourRevealOff;
-    steps.at(-1).call = 'project_revealed_lit_contours';
-    steps.at(-1).args.push({ input: 'contourLight' }, { input: 'contourReveal' });
+    projection.input.terrainArrivals = Array(arrivalBlocks).fill(-100);
+    projection.input.contourClock = { time: 0, latest: 0, block_rows: 0 };
+    steps.at(-1).call = 'project_streamed_lit_contours';
+    steps.at(-1).args.push(...['contourLight', 'contourReveal', 'terrainArrivals', 'contourClock'].map(input => ({ input })));
   }
   const compactedWorld = projection.call === 'project_visible_sorted_world' && !contours && !hasSkin;
   const ink = await loadInk(bundleURL, { device, parallelU64Merge: compactedWorld });
@@ -160,6 +164,15 @@ export async function createGaussianRenderer(device, format, { width, height, sp
           throw new Error('Invalid directional contour reveal');
         }
         return session.write('contourReveal', { center, radius, edge_width: edgeWidth, floor_height: floorHeight });
+      },
+      stageTerrainArrivals(starts) {
+        if (!directional || !starts.every(Number.isFinite)) throw new Error('Invalid contour terrain arrival times');
+        return session.writeChanged('terrainArrivals', starts);
+      },
+      stageContourClock(time, latest, blockRows) {
+        if (!directional || !Number.isFinite(time) || !Number.isFinite(latest) ||
+            !Number.isInteger(blockRows) || blockRows < 0 || blockRows > 0xffffffff) throw new Error('Invalid contour clock');
+        return session.write('contourClock', { time, latest, block_rows: blockRows });
       },
       async updateSkinCamera(value, { bones, light }) {
         if (!hasSkin) throw new Error('Skin updates require a skinned world view');
