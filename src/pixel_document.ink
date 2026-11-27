@@ -14,6 +14,7 @@ import "pixel_preview.ink" as preview;
 import "pixel_commands.ink" as commands;
 import "pixel_batch.ink" as batch;
 import "pixel_session.ink" as session;
+import "pixel_palette_edit.ink" as palette_edits;
 import "pixel_asset_export.ink" as assets;
 import "pixel_png.ink" as png;
 import "pixel_png_input.ink" as png_input;
@@ -639,6 +640,16 @@ change paint_pixel_editor(operation: json.Json, slots: List<i32>, alpha: List<u3
 pub fn pixel_guarded_input(point: Option<Vec2<u32>>, at: json.Json, layer: Option<json.Json>, from: Option<json.Json>,
     to: Option<json.Json>) -> guarded.Input {
     return guarded.Input { point: point, at: at, layer: layer, from: from, to: to };
+}
+
+change edit_pixel_editor_palette(operation: json.Json, scoped: Bool) -> Result<json.Json, json.Json>
+    reads(EditorSource, EditorArtwork) writes(EditorSource, EditorArtwork, EditorImage, EditorPaint) {
+    let edited = palette_edits.apply(EditorSource, EditorArtwork, operation, scoped)?;
+    EditorSource = edited.source;
+    EditorArtwork = edited.artwork;
+    EditorImage = None;
+    EditorPaint = paint.empty_cache();
+    return Ok(edited.report);
 }
 
 change replace_guarded_pixels(id: String, frame: String, cel: Option<String>, edits: List<guarded.Input>, reuse_composites: Bool)

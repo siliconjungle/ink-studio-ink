@@ -107,7 +107,7 @@ fn resolve(source: json.Json, art: frame.Artwork, current: Cursor, raw: json.Jso
     let legacy = current.legacy != "" && supplied == json.text(current.legacy);
     let cel = json.lookup(spec, "cel");
     let target_frame = json.lookup(spec, "frame");
-    let migrated: Option<json.Json> = if legacy && !value.has(spec, "cel") && !value.has(spec, "frame") {
+    let migrated: Option<json.Json> = if legacy && route.kind != "palette" && !value.has(spec, "cel") && !value.has(spec, "frame") {
         Some(json.text("artwork"))
     } else { target_frame };
     let scope = frame.resolve(art, requested_scope(migrated), None, requested_scope(cel));
@@ -129,14 +129,14 @@ fn check_command(command: Command, current: Cursor, spec: List<json.Member>,
     if !legacy && value.get(spec, "revision") != json.text(current.revision) {
         return invalid(command, problem("stale-document", complaint, expected(revision, current.revision)));
     }
-    if command.kind != "raster" && command.kind != "selections" {
+    if command.kind != "raster" && command.kind != "selections" && command.kind != "palette" {
         return invalid(command, problem("unsupported-destination",
             string_concat("Pixel editor has not implemented destination ", command.destination), [member("destination", json.text(command.destination))]));
     }
     if value.has(spec, "ownership") {
         return invalid(command, problem("hybrid-owner-needs-source", "A hybrid edit needs a bound source destination", []));
     }
-    if !value.has(spec, "cel") && wanted.fold(fn(item) => item != json.text(command.frame), fn(unit) => true) {
+    if !value.has(spec, "cel") && wanted.fold(fn(item) => item != json.text(command.frame), fn(unit) => command.kind != "palette") {
         return invalid(command, problem("wrong-frame", "Pixel edit needs the observed frame ID", expected(wanted, command.frame)));
     }
     if value.has(spec, "sourceRevision") {

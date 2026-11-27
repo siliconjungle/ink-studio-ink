@@ -188,6 +188,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
   const travel = bind('travel_pixel_history'), check = bind('resolve_pixel_edit');
   const grid = bind('pixel_editor_grid');
   const guarded = bind('replace_guarded_pixels');
+  const paletteEdit = bind('edit_pixel_editor_palette');
   const plan = bind('plan_pixel_command'), describe = bind('describe_pixel_command_document');
   const inspect = bind('inspect_pixel_command');
   const stamp = bind('export_pixel_command_stamp'), deck = bind('export_pixel_command_layer_deck');
@@ -263,6 +264,16 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
     return { kind: 'raster', ...result.Ok };
   }
 
+  function applyPalette(patch) {
+    const scoped = ['frame', 'cel', 'edits'].some(key => Object.hasOwn(patch, key));
+    const result = paletteEdit(codec.fromJS(patch.operation ?? null), scoped);
+    if (Object.hasOwn(result, 'Err')) {
+      const conflict = codec.toJS(result.Err);
+      throw Object.assign(new Error(conflict.message), { conflict });
+    }
+    return codec.toJS(result.Ok);
+  }
+
   async function attempt(patch, { dryRun = false, expected, preview, options: editOptions } = {}) {
     const { cursor, pending, redo } = read();
     const shot = (expected?.command.options ?? editOptions)?.shotHitFrame;
@@ -279,7 +290,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
           { expected: expected.inputs.documentRevision, actual: cursor.revision });
       }
       const gate = check(codec.fromJS(gateFields(patch)));
-      if (gate.frame) command.frame = gate.frame;
+      if (gate.frame) command.frame = gate.kind === 'palette' ? null : gate.frame;
       const conflict = codec.toJS(gate.conflict);
       if (conflict) throw Object.assign(new Error(conflict.message), { conflict });
       if (shot !== undefined) {
@@ -292,6 +303,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
       observe();
       if (preview) observePreview();
       const target = gate.direct ? applyGuarded(patch, gate, !!preview && !preview.exact)
+        : gate.kind === 'palette' ? applyPalette(patch)
         : gate.kind === 'selections' ? editor.saveSelection(patch.operation, { frame: gate.frame })
         : editor.paint(patch.operation, { frame: gate.frame, cel: gate.cel.Some });
       target.destination = gate.destination;

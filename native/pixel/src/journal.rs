@@ -815,10 +815,24 @@ impl PixelCommandEditor {
         frame: &str,
         cel: Option<&str>,
     ) -> Result<Value, Value> {
+        let scoped = ["frame", "cel", "edits"].iter().any(|key| member(&patch, key).is_some());
         let operation = member_mut(&mut patch, "operation")
             .map_or(Json::Null, |value| std::mem::replace(value, Json::Null));
         let invalid = |message: String| conflict("invalid-edit", message);
-        let report = if kind == "selections" {
+        let report = if kind == "palette" {
+            let encoded = compiled_json(operation, &|kind, scalar, flag, values, keys| {
+                self.editor.program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
+            });
+            let result = self.editor.program.invoke_view_l_edit_pixel_editor_palette(encoded, scoped)
+                .map_err(invalid)?.result;
+            let decode = |output: &_| {
+                Json::from_ink(output, Limits::default()).and_then(|row| json_value(&row)).map_err(invalid)
+            };
+            return match result {
+                Ok(target) => decode(&target.to_json()),
+                Err(issue) => Err(decode(&issue.to_json())?),
+            };
+        } else if kind == "selections" {
             serde_json::to_value(
                 self.editor
                     .save_selection_data(operation, Some(frame))
@@ -961,7 +975,7 @@ impl PixelCommandEditor {
                 .map_err(invalid)?
                 .result;
             if !gate.l_frame.is_empty() {
-                common["command"]["frame"] = json!(&gate.l_frame);
+                common["command"]["frame"] = if gate.l_kind == "palette" { Value::Null } else { json!(&gate.l_frame) };
             }
             let issue =
                 Json::from_ink(&gate.l_conflict.to_json(), Limits::default()).map_err(invalid)?;
