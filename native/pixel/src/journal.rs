@@ -1,5 +1,7 @@
 use super::edit_preview::{CellChange, Color, Location, PixelEditPreview, Preview, Sample, Site};
-use super::{Json, Limits, OrderedJson, PixelEditor, Wire, compiled_json, member_mut, revision};
+use super::{
+    Json, Limits, OrderedJson, PixelEditor, Wire, compiled_json, coordinate, member_mut, revision,
+};
 use serde_json::{Map, Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -811,14 +813,47 @@ impl PixelCommandEditor {
             Json::Text(id) => id,
             _ => String::new(),
         };
-        let edits = compiled_json(
-            take_member(&mut patch, "edits"),
-            &|kind, scalar, flag, values, keys| {
+        let encode = |raw| {
+            compiled_json(raw, &|kind, scalar, flag, values, keys| {
                 self.editor
                     .program
                     .function_l_pixel_json_value(kind, scalar, flag, values, keys)
-            },
-        );
+            })
+        };
+        let edits = match take_member(&mut patch, "edits") {
+            Json::Array(rows) if rows.len() <= 4096 => rows
+                .into_iter()
+                .map(|row| {
+                    let mut at = Json::Null;
+                    let (mut layer, mut from, mut to) = (None, None, None);
+                    if let Json::Object(fields) = row {
+                        for (key, raw) in fields {
+                            match key.as_str() {
+                                "at" => at = raw,
+                                "layer" => layer = Some(raw),
+                                "from" => from = Some(raw),
+                                "to" => to = Some(raw),
+                                _ => (),
+                            }
+                        }
+                    }
+                    let point = match &at {
+                        Json::Array(xy) if xy.len() == 2 => coordinate(&xy[0], 512)
+                            .zip(coordinate(&xy[1], 512))
+                            .map(|(x, y)| [x, y]),
+                        _ => None,
+                    };
+                    self.editor.program.function_l_pixel_guarded_input(
+                        point,
+                        encode(if point.is_some() { Json::Null } else { at }),
+                        layer.map(encode),
+                        from.map(encode),
+                        to.map(encode),
+                    )
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         let invalid = |message| EditConflicts::from(conflict("invalid-edit", message));
         let output = self
             .editor

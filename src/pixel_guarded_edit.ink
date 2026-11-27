@@ -12,6 +12,8 @@ import "pixel_selection.ink" as selection;
 import "pixel_values.ink" as value;
 
 record Mark { at: Vec2<u32>, slot: i32, }
+record Input { point: Option<Vec2<u32>>, at: json.Json, layer: Option<json.Json>, from: Option<json.Json>, to: Option<json.Json>, }
+record Expected { layer: json.Json, swatch: json.Json, }
 record Target { frame: String, layer: String, cel: String, pixels: List<Vec2<u32>>, }
 record Edit { document: json.Json, artwork: frame.Artwork, target: Target, cache: paint.CachedView, diff: Option<preview.Pair>, }
 record Observed { raster: preview.Raster, active: List<paint.Detail>, details: List<paint.Detail>, }
@@ -78,16 +80,15 @@ fn actual_state(scan: Scan, point: Vec2<u32>, p: u32, cell: frame.Pixel, trace: 
         history.member("underneath", json.object(owner_fields(below))) ]).concat(alpha));
 }
 
-fn expected_state(fields: List<json.Member>) -> json.Json {
-    return json.object([history.member("layer", value.get(fields, "layer")),
-        history.member("swatch", value.get(fields, "from"))]);
+fn expected_state(expected: Expected) -> json.Json {
+    return json.object([history.member("layer", expected.layer), history.member("swatch", expected.swatch)]);
 }
 
-fn conflict_at(scan: Scan, fields: List<json.Member>, point: Vec2<u32>, p: u32, cell: frame.Pixel,
+fn conflict_at(scan: Scan, expected: Expected, point: Vec2<u32>, p: u32, cell: frame.Pixel,
     trace: u32, code: String) -> json.Json {
     let message = string_concat("Pixel edit no longer applies at ", coords(scan.grid, p));
     return history.problem(code, message, [history.member("at", at(point)),
-        history.member("expected", expected_state(fields)), history.member("actual", actual_state(scan, point, p, cell, trace))]);
+        history.member("expected", expected_state(expected)), history.member("actual", actual_state(scan, point, p, cell, trace))]);
 }
 
 fn coords(grid: mask.Grid, p: u32) -> String {
@@ -98,42 +99,41 @@ fn matches_guard(observed: String, expected: json.Json) -> Bool {
     return if observed == "" { expected == json.null() } else { observed == value.text(expected) };
 }
 
-fn guard_code(scan: Scan, fields: List<json.Member>, cell: frame.Pixel, trace: u32, p: u32, visited: Bool) -> String {
+fn guard_code(scan: Scan, expected: Expected, cell: frame.Pixel, trace: u32, p: u32, visited: Bool) -> String {
     if visited { return "duplicate-pixel"; }
     if preview.protected(scan.visible, p, cell) { return "protected-pixel"; }
     let swatch = scan.visible.swatches.at_or(preview.swatch_index(cell.slot), "");
     let layer = scan.visible.layers.at_or(frame.owner(trace), "");
-    if !matches_guard(swatch, value.get(fields, "from")) || !matches_guard(layer, value.get(fields, "layer")) {
+    if !matches_guard(swatch, expected.swatch) || !matches_guard(layer, expected.layer) {
         return "pixel-changed";
     }
     if scan.layer != "" && layer != "" && layer != scan.layer { return "wrong-cel"; }
     return "";
 }
 
-fn check_mark(scan: Scan, raw: json.Json, old: Checks) -> Checks {
-    let fields = value.fields(raw);
-    let site = value.get(fields, "at");
-    let point = selection.point(value.items(site), scan.grid);
-    let requested = value.get(fields, "to");
-    let slot: i32 = if value.has(fields, "to") { raster.slot(scan.ids, requested) } else { -3 };
+fn check_mark(scan: Scan, row: Input, old: Checks) -> Checks {
+    let point = row.point.fold(fn(point) => point, fn(unit) => selection.point(value.items(row.at), scan.grid));
+    let slot: i32 = row.to.fold(fn(requested) => raster.slot(scan.ids, requested), fn(unit) => -3);
     if !selection.inside(point, scan.grid) || slot == -3 ||
-        !value.has(fields, "from") || !value.has(fields, "layer") {
+        row.from == None || row.layer == None {
+        let site = row.point.fold(fn(point) => at(point), fn(unit) => row.at);
         return Checks { ..old, issues: old.issues.push(invalid_pixel(site)) };
     }
+    let expected = Expected { layer: row.layer.fold(fn(raw) => raw, fn(unit) => json.null()),
+        swatch: row.from.fold(fn(raw) => raw, fn(unit) => json.null()) };
     let p = mask.index(scan.grid, point);
     let visited = word_and(old.visited.at_or(mask.word_slot(p), 0), mask.word_bit(p)) != 0;
     let cell = scan.visible.view.pixels.at_or(p, frame.blank());
     let trace = scan.visible.view.trace.at_or(p, 0);
-    let code = guard_code(scan, fields, cell, trace, p, visited);
+    let code = guard_code(scan, expected, cell, trace, p, visited);
     let pending = mask.mark(old.visited, p);
     if code == "" {
         return Checks { ..old, visited: pending, marks: old.marks.push(Mark { at: point, slot: slot }) };
     }
-    return Checks { ..old, visited: pending, issues: old.issues.push(conflict_at(scan, fields, point, p, cell, trace, code)) };
+    return Checks { ..old, visited: pending, issues: old.issues.push(conflict_at(scan, expected, point, p, cell, trace, code)) };
 }
 
-fn read_marks(scan: Scan, edits: json.Json) -> Result<List<Mark>, List<json.Json>> {
-    let rows = value.items(edits);
+fn read_marks(scan: Scan, rows: List<Input>) -> Result<List<Mark>, List<json.Json>> {
     if length(rows) == 0 || length(rows) > 4096 { return Err(invalid("Pixel paint needs 1–4096 edits")); }
     let start = Checks { visited: mask.blank(scan.grid), marks: Buffer.empty(), issues: Buffer.empty() };
     let checked = foldl(rows, start, fn(row) => fn(out) => check_mark(scan, row, out));
@@ -216,7 +216,7 @@ fn finalize(art: frame.Artwork, page: preview.Page, scope: frame.Scope, marks: L
 }
 
 fn apply(source: json.Json, art: frame.Artwork, id: String, frame_id: String, cel: Option<String>,
-    edits: json.Json, reuse_composites: Bool) -> Result<Edit, List<json.Json>> {
+    edits: List<Input>, reuse_composites: Bool) -> Result<Edit, List<json.Json>> {
     let old = observed(source, art, frame_id)?;
     let scope = selected_layer(art, id, frame_id, cel)?;
     let creating = cel.fold(fn(name) => false, fn(unit) => true);

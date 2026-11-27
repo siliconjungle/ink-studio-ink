@@ -196,7 +196,20 @@ export async function openPixelJournal({ editor, state, codec, revision }, input
   }
 
   function applyGuarded(patch, gate, reuseComposites) {
-    const result = guarded(patch.id, gate.frame, gate.cel, codec.fromJS(patch.edits ?? null), reuseComposites);
+    const missing = { None: null };
+    const nullValue = codec.fromJS(null);
+    const edits = Array.isArray(patch.edits) && patch.edits.length <= 4096 ? patch.edits.map(raw => {
+      const row = isRecord(raw) ? raw : {};
+      const at = row.at ?? null;
+      // Keep invalid coordinates in their authored form for the conflict reply.
+      const packed = Array.isArray(at) && at.length === 2 &&
+        at.every(word => Number.isInteger(word) && word >= 0 && word < 512);
+      const field = key => Object.hasOwn(row, key)
+        ? { Some: row[key] === null ? nullValue : codec.fromJS(row[key]) } : missing;
+      return { point: packed ? { Some: at } : missing, at: packed || at === null ? nullValue : codec.fromJS(at),
+        layer: field('layer'), from: field('from'), to: field('to') };
+    }) : [];
+    const result = guarded(patch.id, gate.frame, gate.cel, edits, reuseComposites);
     if (Object.hasOwn(result, 'Err')) {
       const conflicts = result.Err.map(issue => codec.toJS(issue));
       throw Object.assign(new Error(conflicts[0].message), { conflicts });

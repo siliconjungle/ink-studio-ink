@@ -606,7 +606,12 @@ change paint_pixel_editor(operation: json.Json, slots: List<i32>, alpha: List<u3
     return Ok(edit.report);
 }
 
-change replace_guarded_pixels(id: String, frame: String, cel: Option<String>, edits: json.Json, reuse_composites: Bool)
+pub fn pixel_guarded_input(point: Option<Vec2<u32>>, at: json.Json, layer: Option<json.Json>, from: Option<json.Json>,
+    to: Option<json.Json>) -> guarded.Input {
+    return guarded.Input { point: point, at: at, layer: layer, from: from, to: to };
+}
+
+change replace_guarded_pixels(id: String, frame: String, cel: Option<String>, edits: List<guarded.Input>, reuse_composites: Bool)
     -> Result<guarded.Target, List<json.Json>>
     reads(EditorSource, EditorArtwork) writes(EditorSource, EditorArtwork, EditorImage, EditorPaint, JournalPreviewPair) {
     let edit = guarded.apply(EditorSource, EditorArtwork, id, frame, cel, edits, reuse_composites)?;

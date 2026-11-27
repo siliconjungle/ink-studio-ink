@@ -126,14 +126,16 @@ export function guardedCases(root) {
         { ...guard([2, 0], null), to: '#cb4519' },
         { ...guard([1, 0], 'alias'), to: '' },
         { ...guard([7, 5], 'brass'), layer: [] },
+        { at: [1001, 0], layer: null, from: null, to: 'brass' },
+        { at: [7, 5], layer: null, to: null },
       ], { cel: 'front-ink' });
       const expected = ['invalid-pixel', 'protected-pixel', 'invalid-pixel', 'pixel-changed',
-        'duplicate-pixel', 'wrong-cel', 'invalid-pixel', 'invalid-pixel', 'pixel-changed'];
+        'duplicate-pixel', 'wrong-cel', 'invalid-pixel', 'invalid-pixel', 'pixel-changed', 'invalid-pixel', 'invalid-pixel'];
       const dryRun = run('preview', { edit: command('apply', { patch: proposal }), options: exact });
       assert.deepEqual(dryRun.conflicts.map(issue => issue.code), expected);
       assert.equal(dryRun.conflicts[3].actual.underneath.layer, 'paper');
       assert.equal(dryRun.conflicts[3].actual.alpha, 255);
-      assert.equal(dryRun.diff.skippedHits.length, 8);
+      assert.equal(dryRun.diff.skippedHits.length, 10);
       const staged = step('preview-patch', { patch: proposal });
       assert.deepEqual(staged.receipt.conflicts, dryRun.conflicts);
       assert.equal(run('preview').pixelCount, 0);
