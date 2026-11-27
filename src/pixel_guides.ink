@@ -76,12 +76,59 @@ fn valid(scope: List<String>, raw: json.Json, progress: Result<List<String>, Str
 
 fn validate(doc: List<json.Member>, frames: List<String>) -> Result<Unit, String> {
     if !value.has(doc, "guides") { return Ok(()); }
+    let ready = prepare(value.get(doc, "guides"), frames)?;
+    return Ok(());
+}
+
+fn prepare(raw: json.Json, frames: List<String>) -> Result<List<json.Json>, String> {
     let error = "Pixel guides need a list of at most 256 entries";
-    let guides = json.elements(value.get(doc, "guides")).map_err(fn(issue) => error)?;
+    let guides = json.elements(raw).map_err(fn(issue) => error)?;
     if length(guides) > 256 { return Err(error); }
     let start: Result<List<String>, String> = Ok([]);
     let unique = foldl(guides, start, fn(row) => fn(out) => valid(frames, row, out))?;
-    return Ok(());
+    return Ok(guides);
+}
+
+fn id(row: json.Json) -> String { return value.text(value.get(value.fields(row), "id")); }
+
+fn edit_error(issue: String) -> json.Json { return history.problem("invalid-edit", issue, []); }
+
+fn edit(source: json.Json, frames: List<String>, operation: json.Json) -> Result<json.Json, json.Json> {
+    let message = "A guide edit needs an upsert or remove operation";
+    let options = json.members(operation).map_err(fn(issue) => edit_error(message))?;
+    if !value.only(options, ["upsert", "remove"]) { return Err(edit_error(message)); }
+    let additions = json.lookup(options, "upsert").fold(fn(raw) => raw, fn(unit) => json.array([]));
+    let changes = prepare(additions, frames).map_err(fn(issue) => edit_error(issue))?;
+    let ids = changes.map(fn(row) => id(row));
+    let invalid = "Guide edits need unique IDs and may update or remove each guide once";
+    let raw = json.lookup(options, "remove").fold(fn(raw) => raw, fn(unit) => json.array([]));
+    let removals = json.elements(raw).map_err(fn(issue) => edit_error(invalid))?;
+    let remove = removals.map(fn(row) => value.text(row));
+    let checked = foldl(remove, ids, fn(name) => fn(used) =>
+        if !brush.stable_id(name) || commands.includes(used, name) { used } else { used.concat([name]) });
+    if length(checked) != length(ids) + length(remove) || length(checked) == 0 { return Err(edit_error(invalid)); }
+    return update(source, changes, remove);
+}
+
+fn update(source: json.Json, changes: List<json.Json>, remove: List<String>) -> Result<json.Json, json.Json> {
+    let doc = value.fields(source);
+    let old = value.items(value.get(doc, "guides"));
+    let known = old.map(fn(row) => id(row));
+    let missing = foldl(remove, "", fn(name) => fn(found) =>
+        if found != "" || commands.includes(known, name) { found } else { name });
+    if missing != "" {
+        return Err(history.problem("missing-guide", string_concat("Unknown pixel guide ", missing),
+            [history.member("guide", json.text(missing))]));
+    }
+    let updates = changes.map(fn(row) => history.member(id(row), row));
+    let retained = old.filter(fn(row) => !commands.includes(remove, id(row)))
+        .map(fn(row) => json.lookup(updates, id(row)).fold(fn(replacement) => replacement, fn(unit) => row));
+    let added = changes.filter(fn(row) => !commands.includes(known, id(row)));
+    let next = retained.concat(added);
+    if length(next) > 256 { return Err(edit_error("Pixel guides need a list of at most 256 entries")); }
+    let field = history.member("guides", json.array(next));
+    return Ok(json.object(if value.has(doc, "guides") { doc.map(fn(row) => if row.key == "guides" { field } else { row }) }
+        else { doc.concat([field]) }));
 }
 
 fn lexical(a: String, b: String) -> Bool {

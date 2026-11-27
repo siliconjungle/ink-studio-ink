@@ -562,7 +562,7 @@ impl PixelCommandEditor {
         while id != report.receipt {
             let row = self.receipts.get(&id).ok_or("Missing pixel edit receipt")?;
             let target = &row.receipt["affectedTargets"][0];
-            if target["kind"] != "raster" || target.get("tool").is_some() {
+            if target["kind"] != "guides" && (target["kind"] != "raster" || target.get("tool").is_some()) {
                 targets.push(target.clone());
             }
             id = row.parent;
@@ -899,12 +899,15 @@ impl PixelCommandEditor {
             return Json::from_ink(&target.to_json(), Limits::default())
                 .and_then(|row| json_value(&row))
                 .map_err(invalid);
-        } else if kind == "palette" {
+        } else if kind == "palette" || kind == "guides" {
             let encoded = compiled_json(operation, &|kind, scalar, flag, values, keys| {
                 self.editor.program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
             });
-            let result = self.editor.program.invoke_view_l_edit_pixel_editor_palette(encoded, scoped)
-                .map_err(invalid)?.result;
+            let result = if kind == "guides" {
+                self.editor.program.invoke_view_l_edit_pixel_editor_guides(encoded)
+            } else {
+                self.editor.program.invoke_view_l_edit_pixel_editor_palette(encoded, scoped)
+            }.map_err(invalid)?.result;
             let decode = |output: &_| {
                 Json::from_ink(output, Limits::default()).and_then(|row| json_value(&row)).map_err(invalid)
             };
@@ -1128,7 +1131,7 @@ impl PixelCommandEditor {
                 };
                 self.editor.program.rollback_transaction();
                 return Ok(EditOutcome::Preview(preview.report(
-                    if gate.l_direct {
+                    if gate.l_direct || gate.l_kind == "guides" {
                         Vec::new()
                     } else {
                         vec![target]

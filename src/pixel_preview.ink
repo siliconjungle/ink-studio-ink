@@ -248,8 +248,22 @@ fn changed_guides(before: json.Json, after: json.Json) -> List<json.Json> {
     let a = guide_rows(before);
     let b = guide_rows(after);
     let keys = a.concat(b.filter(fn(row) => !value.has(a, row.key)));
-    return keys.filter(fn(row) => value.get(a, row.key) != value.get(b, row.key)).map(fn(row) =>
+    return keys.filter(fn(row) => !same_guide(value.get(a, row.key), value.get(b, row.key))).map(fn(row) =>
         guide_row(row.key, value.get(a, row.key), value.get(b, row.key)));
+}
+
+fn same_guide(before: json.Json, after: json.Json) -> Bool {
+    if before == after { return true; }
+    let left = value.fields(before);
+    let right = value.fields(after);
+    return length(left) == length(right) && foldl(left, true,
+        fn(row) => fn(equal) => equal && value.get(right, row.key) == row.value);
+}
+
+fn guide_target(before: json.Json, after: json.Json) -> json.Json {
+    let changes = changed_guides(before, after).map(fn(row) => json.object(
+        value.fields(row).filter(fn(entry) => entry.key == "id" || entry.key == "change")));
+    return json.object([member("kind", json.text("guides")), member("guides", json.array(changes))]);
 }
 
 fn guide_row(id: String, before: json.Json, after: json.Json) -> json.Json {

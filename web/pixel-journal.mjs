@@ -191,6 +191,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
   const grid = bind('pixel_editor_grid');
   const guarded = bind('replace_guarded_pixels');
   const paletteEdit = bind('edit_pixel_editor_palette');
+  const guideEdit = bind('edit_pixel_editor_guides');
   const canvasEdit = bind('edit_pixel_editor_canvas');
   const plan = bind('plan_pixel_command'), describe = bind('describe_pixel_command_document');
   const inspect = bind('inspect_pixel_command');
@@ -279,7 +280,10 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
 
   function applyPalette(patch) {
     const scoped = ['frame', 'cel', 'edits'].some(key => Object.hasOwn(patch, key));
-    const result = paletteEdit(codec.fromJS(patch.operation ?? null), scoped);
+    return decodeEdit(paletteEdit(codec.fromJS(patch.operation ?? null), scoped));
+  }
+
+  function decodeEdit(result) {
     if (Object.hasOwn(result, 'Err')) {
       const conflict = codec.toJS(result.Err);
       throw Object.assign(new Error(conflict.message), { conflict });
@@ -323,12 +327,14 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
       const target = gate.direct ? applyGuarded(patch, gate, !!preview && !preview.exact)
         : gate.kind === 'canvas' ? applyCanvas(patch)
         : gate.kind === 'palette' ? applyPalette(patch)
+        : gate.kind === 'guides' ? decodeEdit(guideEdit(codec.fromJS(patch.operation ?? null)))
         : gate.kind === 'selections' ? editor.saveSelection(patch.operation, { frame: gate.frame })
         : editor.paint(patch.operation, { frame: gate.frame, cel: gate.cel.Some });
       target.destination = gate.destination;
       if (preview) {
         const changes = gate.kind === 'selections' ? undefined : unwrap(editDiff(preview.limit, preview.exact));
-        const report = previewReport(codec, changes, gate.direct ? [] : [target], [], links().Some, preview.exact);
+        const report = previewReport(codec, changes, gate.direct || gate.kind === 'guides' ? [] : [target],
+          [], links().Some, preview.exact);
         state.rollbackTransaction();
         return report;
       }
@@ -396,7 +402,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
     for (let id = cursor.receipt; id !== result.receipt;) {
       const row = receipts.get(id);
       const target = row.receipt.affectedTargets[0];
-      if (target.kind !== 'raster' || target.tool) targets.push(target);
+      if (target.kind !== 'guides' && (target.kind !== 'raster' || target.tool)) targets.push(target);
       id = row.parent;
     }
     return previewReport(codec, result.changes, structuredClone(targets.reverse()), [], result.celLinks.Some, exact);

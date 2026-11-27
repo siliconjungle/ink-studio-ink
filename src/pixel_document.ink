@@ -665,6 +665,14 @@ query extract_pixel_editor_palette(options: json.Json) -> Result<json.Json, Stri
     return extract_palette.document(EditorSource, EditorArtwork, options);
 }
 
+change edit_pixel_editor_guides(operation: json.Json) -> Result<json.Json, json.Json>
+    reads(EditorSource, EditorArtwork) writes(EditorSource) {
+    let revised = guides.edit(EditorSource, EditorArtwork.frames, operation)?;
+    let target = preview.guide_target(EditorSource, revised);
+    EditorSource = revised;
+    return Ok(target);
+}
+
 change edit_pixel_editor_canvas(operation: json.Json, scoped: Bool) -> Result<json.Json, String>
     reads(EditorSource, EditorArtwork, EditorPositions)
     writes(EditorSource, EditorArtwork, EditorPositions, EditorNamed, EditorScope, EditorImage, EditorPaint) {
