@@ -212,6 +212,71 @@ fn pack_brush_slots(operation: &mut Json) -> Vec<i32> {
         .collect()
 }
 
+fn rgba_row(row: Json, canvas: [u32; 2], names: &mut IndexMap<String, u32>) -> [u32; 3] {
+    let invalid = [u32::MAX, 0, u32::MAX];
+    let Json::Object(fields) = row else {
+        return invalid;
+    };
+    let mut p = u32::MAX;
+    let mut rgba = None;
+    let mut swatch = None;
+    for (key, value) in fields {
+        match key.as_str() {
+            "at" => p = coordinate_slot(canvas, &value),
+            "rgba" => rgba = Some(value),
+            "swatch" => swatch = Some(value),
+            _ => return invalid,
+        }
+    }
+    if p == u32::MAX {
+        return invalid;
+    }
+    if matches!(rgba, Some(Json::Null)) && swatch.is_none() {
+        return [p + 262144, 0, u32::MAX];
+    }
+    let Some(Json::Array(bytes)) = rgba else {
+        return invalid;
+    };
+    if bytes.len() != 4 {
+        return invalid;
+    }
+    let mut encoded = 0;
+    for byte in bytes {
+        let Some(n) = coordinate(&byte, 256) else {
+            return invalid;
+        };
+        encoded = (encoded << 8) | n;
+    }
+    let name = swatch.map_or(u32::MAX, |raw| {
+        let key = if let Json::Text(name) = raw {
+            name
+        } else {
+            String::new()
+        };
+        let ordinal = names.len() as u32;
+        *names.entry(key).or_insert(ordinal)
+    });
+    [p, encoded, name]
+}
+
+fn pack_rgba(operation: &mut Json, [width, height]: [u32; 2]) -> (Vec<u32>, Vec<String>) {
+    if !matches!(member_mut(operation, "tool"), Some(Json::Text(t)) if t == "rgba") {
+        return (Vec::new(), Vec::new());
+    }
+    let Some(input) = take_array(operation, "pixels") else {
+        return (Vec::new(), Vec::new());
+    };
+    if input.len() > (width * height) as usize {
+        return (Vec::new(), Vec::new());
+    }
+    let mut names = IndexMap::new();
+    let rows = input
+        .into_iter()
+        .flat_map(|row| rgba_row(row, [width, height], &mut names))
+        .collect();
+    (rows, names.into_keys().collect())
+}
+
 fn pack_named_pixels(input: &mut Json) -> Vec<Vec<u32>> {
     let Json::Object(fields) = input else {
         return Vec::new();
@@ -266,38 +331,132 @@ fn pack_named_pixels(input: &mut Json) -> Vec<Vec<u32>> {
         .collect()
 }
 
-fn restore_named_pixels(input: &mut Json, width: u32, positions: Vec<Vec<u32>>) {
-    let Json::Object(fields) = input else {
-        return;
+fn snapshot_cel_marks<'a>(
+    document: &'a mut Json,
+    frame_id: &str,
+    layer: &str,
+) -> Option<&'a mut Vec<Json>> {
+    let Json::Array(frames) = member_mut(document, "frames")? else {
+        return None;
     };
-    let Some(Json::Array(rows)) = fields
-        .iter_mut()
-        .find(|(key, _)| key == "selections")
-        .map(|(_, v)| v)
-    else {
-        return;
+    let frame = frames.iter_mut().find(|frame| {
+        matches!(frame, Json::Object(fields) if fields.iter().any(|(key, value)| {
+            key == "id" && matches!(value, Json::Text(id) if id == frame_id)
+        }))
+    })?;
+    let cel = member_mut(member_mut(frame, "cels")?, layer)?;
+    let Json::Array(marks) = member_mut(cel, "marks")? else {
+        return None;
     };
-    for (row, positions) in rows.iter_mut().zip(positions) {
-        if positions.is_empty() {
-            continue;
-        }
-        let Json::Object(fields) = row else {
-            continue;
-        };
-        if let Some((_, pixels)) = fields.iter_mut().find(|(key, _)| key == "pixels") {
-            *pixels = Json::Array(
-                positions
-                    .into_iter()
-                    .map(|p| {
-                        Json::Array(vec![
-                            Json::Number((p % width).to_string()),
-                            Json::Number((p / width).to_string()),
-                        ])
-                    })
+    Some(marks)
+}
+
+fn snapshot_mark(swatch: Option<String>, alpha: Option<u32>, runs: Vec<[u32; 3]>) -> Json {
+    let pigment = if let Some(alpha) = alpha {
+        ("alpha", Json::Number(alpha.to_string()))
+    } else if let Some(swatch) = swatch {
+        ("swatch", Json::Text(swatch))
+    } else {
+        ("clear", Json::Boolean(true))
+    };
+    let spans = runs
+        .into_iter()
+        .map(|run| {
+            Json::Array(
+                run.into_iter()
+                    .map(|n| Json::Number(n.to_string()))
                     .collect(),
-            );
+            )
+        })
+        .collect();
+    Json::Object(vec![
+        (pigment.0.into(), pigment.1),
+        ("runs".into(), Json::Array(spans)),
+    ])
+}
+
+fn append_json_members(
+    out: &mut String,
+    fields: &[(String, Json)],
+    mut write_value: impl FnMut(&mut String, &str, &Json) -> Result<(), String>,
+) -> Result<(), String> {
+    out.push('{');
+    for (i, (key, value)) in fields.iter().enumerate() {
+        if i != 0 {
+            out.push(',');
+        }
+        out.push_str(&serde_json::to_string(key).map_err(|error| error.to_string())?);
+        out.push(':');
+        write_value(out, key, value)?;
+    }
+    out.push('}');
+    Ok(())
+}
+
+fn append_snapshot_selections(
+    out: &mut String,
+    rows: &[Json],
+    width: u32,
+    positions: &[Vec<u32>],
+    limits: Limits,
+) -> Result<(), String> {
+    use std::fmt::Write;
+    out.push('[');
+    for (i, row) in rows.iter().enumerate() {
+        if i != 0 {
+            out.push(',');
+        }
+        if let (Json::Object(fields), Some(sites)) =
+            (row, positions.get(i).filter(|row| !row.is_empty()))
+        {
+            append_json_members(out, fields, |out, key, value| {
+                if key != "pixels" {
+                    out.push_str(&value.stringify(limits)?);
+                    return Ok(());
+                }
+                out.push('[');
+                for (i, p) in sites.iter().enumerate() {
+                    if i != 0 {
+                        out.push(',');
+                    }
+                    write!(out, "[{},{}]", p % width, p / width)
+                        .map_err(|error| error.to_string())?;
+                }
+                out.push(']');
+                Ok(())
+            })?;
+        } else {
+            out.push_str(&row.stringify(limits)?);
         }
     }
+    out.push(']');
+    Ok(())
+}
+
+fn snapshot_json(
+    document: &Json,
+    width: u32,
+    positions: &[Vec<u32>],
+    limits: Limits,
+) -> Result<String, String> {
+    let Json::Object(fields) = document else {
+        return document.stringify(limits);
+    };
+    if positions.iter().all(Vec::is_empty) {
+        return document.stringify(limits);
+    }
+    // The metadata is still bounded by the JSON codec. Saved coordinates
+    // already crossed the typed boundary and serialize straight to the file.
+    let mut output = String::new();
+    append_json_members(&mut output, fields, |out, key, value| {
+        if let ("selections", Json::Array(rows)) = (key, value) {
+            append_snapshot_selections(out, rows, width, positions, limits)
+        } else {
+            out.push_str(&value.stringify(limits)?);
+            Ok(())
+        }
+    })?;
+    Ok(output)
 }
 
 fn coordinate_runs(canvas: [u32; 2], pixels: Json, limit: u32) -> Vec<u32> {
@@ -499,6 +658,10 @@ impl SelectionInput {
 fn prepare_selection(canvas: [u32; 2], query: &str, saved: &str) -> Result<SelectionInput, String> {
     let OrderedJson(query) = serde_json::from_str(query).map_err(|error| error.to_string())?;
     let OrderedJson(saved) = serde_json::from_str(saved).map_err(|error| error.to_string())?;
+    Ok(prepare_selection_value(canvas, query, saved))
+}
+
+fn prepare_selection_value(canvas: [u32; 2], query: Json, saved: Json) -> SelectionInput {
     let [width, height] = canvas;
     let mut runs = Vec::new();
     let mut nodes = Vec::new();
@@ -521,11 +684,11 @@ fn prepare_selection(canvas: [u32; 2], query: &str, saved: &str) -> Result<Selec
             }
         }
     }
-    Ok(SelectionInput {
+    SelectionInput {
         nodes,
         saved: Json::Object(packed_saved),
         runs,
-    })
+    }
 }
 
 #[derive(Debug, PartialEq, serde::Serialize)]
@@ -557,6 +720,10 @@ pub struct RasterPaintReport {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub added_swatches: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub selection: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drawing: Option<serde_json::Value>,
@@ -564,6 +731,18 @@ pub struct RasterPaintReport {
 
 fn is_false(value: &bool) -> bool {
     !value
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSelectionReport {
+    pub destination: &'static str,
+    pub kind: &'static str,
+    pub frame: String,
+    pub selection: String,
+    pub tool: String,
+    pub pixel_count: u32,
+    pub runs: Vec<[u32; 3]>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -642,12 +821,15 @@ impl PixelEditor {
                 .function_l_pixel_json_value(kind, scalar, flag, values, keys)
         };
         let slots = pack_brush_slots(&mut operation);
+        let (pixels, names) = pack_rgba(&mut operation, self.grid);
         let operation = compiled_json(operation, &build);
         let report = self
             .program
             .invoke_view_l_paint_pixel_editor(
                 operation,
                 slots,
+                pixels,
+                names,
                 frame.map(str::to_owned),
                 cel.map(str::to_owned),
             )?
@@ -666,8 +848,46 @@ impl PixelEditor {
             shading: report.l_shading,
             ramp: report.l_ramp,
             added_swatches: report.l_addedSwatches,
+            from: report.l_from,
+            to: report.l_to,
             selection: report.l_selection,
             drawing,
+        })
+    }
+
+    pub fn save_selection(
+        &mut self,
+        operation: &str,
+        frame: Option<&str>,
+    ) -> Result<SavedSelectionReport, String> {
+        let OrderedJson(mut operation) =
+            serde_json::from_str(operation).map_err(|error| error.to_string())?;
+        let query = member_mut(&mut operation, "query")
+            .map_or(Json::Null, |value| std::mem::replace(value, Json::Null));
+        let build = |kind, scalar, flag, values, keys| {
+            self.program
+                .function_l_pixel_json_value(kind, scalar, flag, values, keys)
+        };
+        let (nodes, _, runs) =
+            prepare_selection_value(self.grid, query, Json::Object(Vec::new())).compile(&build);
+        let metadata = compiled_json(operation, &build);
+        let report = self
+            .program
+            .invoke_view_l_save_pixel_editor_selection(
+                metadata,
+                nodes,
+                runs,
+                frame.map(str::to_owned),
+            )?
+            .result?;
+        Ok(SavedSelectionReport {
+            destination: "selections",
+            kind: "selections",
+            frame: report.l_frame,
+            selection: report.l_selection,
+            tool: report.l_tool,
+            pixel_count: report.l_pixelCount,
+            runs: report.l_runs,
         })
     }
 
@@ -720,8 +940,16 @@ impl PixelEditor {
         let snapshot = self.program.invoke_view_l_snapshot_pixel_editor()?.result;
         let limits = Limits::default();
         let mut document = Json::from_ink(&snapshot.l_document.to_json(), limits)?;
-        restore_named_pixels(&mut document, self.grid[0], snapshot.l_positions);
-        document.stringify(limits)
+        for edit in snapshot.l_edits {
+            let marks = snapshot_cel_marks(&mut document, &edit.l_frame, &edit.l_layer)
+                .ok_or("Missing retained raster cel in the snapshot")?;
+            marks.extend(
+                edit.l_marks
+                    .into_iter()
+                    .map(|mark| snapshot_mark(mark.l_swatch, mark.l_alpha, mark.l_runs)),
+            );
+        }
+        snapshot_json(&document, self.grid[0], &snapshot.l_positions, limits)
     }
 
     pub fn select(

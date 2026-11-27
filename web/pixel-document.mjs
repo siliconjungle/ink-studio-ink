@@ -41,6 +41,7 @@ export function createPixelEditor(source) {
   const draw = state.bind('paint_pixel_editor', { resultOnly: true });
   const read = state.bind('snapshot_pixel_editor', { resultOnly: true });
   const capture = state.bind('capture_pixel_editor_brush', { resultOnly: true });
+  const save = state.bind('save_pixel_editor_selection', { resultOnly: true });
   let grid;
   function replaceDocument(source) {
     const input = typeof source === 'string' ? JSON.parse(source) : source;
@@ -54,17 +55,27 @@ export function createPixelEditor(source) {
       pixels: maskPixels(chosen.grid.width, chosen.words) };
   }
   function paint(operation, { frame, cel } = {}) {
-    const { metadata, slots } = packBrushSlots(operation);
-    const result = unwrap(draw(codec.fromJS(metadata), slots, option(frame), option(cel)));
-    const { pixelPerfect, selection, shape, shading, ramp, addedSwatches, ...target } = result;
+    const brush = packBrushSlots(operation);
+    const { metadata, rows, names } = packRgba(brush.metadata, grid);
+    const result = unwrap(draw(codec.fromJS(metadata), brush.slots, rows, names, option(frame), option(cel)));
+    const { pixelPerfect, selection, shape, shading, ramp, addedSwatches, from, to, ...target } = result;
     const drawing = ownData(operation, 'drawing');
     return { destination: 'raster', kind: 'raster', ...target,
       ...(pixelPerfect && { pixelPerfect }), ...(Object.hasOwn(shape, 'Some') && { shape: shape.Some }),
       ...(Object.hasOwn(shading, 'Some') && { shading: shading.Some }),
       ...(Object.hasOwn(ramp, 'Some') && { ramp: ramp.Some }),
       ...(addedSwatches.length && { addedSwatches }),
+      ...(Object.hasOwn(from, 'Some') && { from: from.Some }),
+      ...(Object.hasOwn(to, 'Some') && { to: to.Some }),
       ...(Object.hasOwn(selection, 'Some') && { selection: selection.Some }),
       ...(drawing !== undefined && { drawing: structuredClone(drawing) }) };
+  }
+  function saveSelection(operation, { frame } = {}) {
+    const query = ownData(operation, 'query');
+    const metadata = query === undefined ? operation : replacingDataField(operation, 'query', null);
+    const { encoded, runs } = prepareSelection(grid.width, grid.height, query ?? null, {});
+    const target = unwrap(save(codec.fromJS(metadata), encoded, runs, option(frame)));
+    return { destination: 'selections', kind: 'selections', ...target };
   }
   function captureBrush(options = {}) {
     const pixels = ownData(options, 'pixels');
@@ -88,10 +99,20 @@ export function createPixelEditor(source) {
       if (!positions.length) continue;
       document.selections[i].pixels = positions.map(p => [p % document.width, Math.floor(p / document.width)]);
     }
+    if (saved.edits.length) {
+      const frames = new Map(document.frames.map(frame => [frame.id, frame]));
+      for (const edit of saved.edits) {
+        const cel = frames.get(edit.frame).cels[edit.layer];
+        for (const { swatch, alpha, runs } of edit.marks) {
+          cel.marks.push(Object.hasOwn(alpha, 'Some') ? { alpha: alpha.Some, runs }
+            : Object.hasOwn(swatch, 'Some') ? { swatch: swatch.Some, runs } : { clear: true, runs });
+        }
+      }
+    }
     return document;
   }
   replaceDocument(source);
-  return Object.freeze({ replaceDocument, select, paint, captureBrush, snapshot });
+  return Object.freeze({ replaceDocument, select, saveSelection, paint, captureBrush, snapshot });
 }
 
 function ownData(value, key) {
@@ -148,6 +169,48 @@ function packBrushSlots(operation) {
   const metadata = replacingDataField(operation, 'brush', replacingDataField(brush, 'slots', []));
   return { metadata, slots };
 }
+
+// Each row crosses as position, packed RGBA, and a swatch-name index.
+// The upper position bit carries clear. Ink checks the reported shape and values.
+function packRgba(operation, grid) {
+  const input = ownData(operation, 'tool') === 'rgba' && ownData(operation, 'pixels');
+  if (!Array.isArray(input)) return { metadata: operation, rows: [], names: [] };
+  const metadata = replacingDataField(operation, 'pixels', []);
+  if (input.length > grid.width * grid.height) return { metadata, rows: [], names: [] };
+  const ids = new Map();
+  const names = [];
+  const rows = new Uint32Array(input.length * 3);
+  for (let i = 0; i < input.length; i++) {
+    const row = ownData(input, i);
+    rows[i * 3] = 0xffffffff;
+    if (!row || Object.getPrototypeOf(row) !== Object.prototype ||
+        Object.keys(row).some(key => !['at', 'rgba', 'swatch'].includes(key))) continue;
+    const p = documentPoint(grid.width, grid.height, ownData(row, 'at'));
+    if (p === 0xffffffff) continue;
+    const rgba = ownData(row, 'rgba');
+    const swatch = ownData(row, 'swatch');
+    if (rgba === null && swatch === undefined) {
+      rows[i * 3] = p + 262144;
+      continue;
+    }
+    if (!Array.isArray(rgba) || rgba.length !== 4) continue;
+    const bytes = [0, 1, 2, 3].map(index => ownData(rgba, index));
+    if (!bytes.every(n => Number.isInteger(n) && n >= 0 && n <= 255)) continue;
+    rows[i * 3] = p;
+    rows[i * 3 + 1] = ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) >>> 0;
+    rows[i * 3 + 2] = 0xffffffff;
+    if (swatch !== undefined) {
+      const name = typeof swatch === 'string' ? swatch : '';
+      if (!ids.has(name)) {
+        ids.set(name, names.length);
+        names.push(name);
+      }
+      rows[i * 3 + 2] = ids.get(name);
+    }
+  }
+  return { metadata, rows, names };
+}
+
 
 function replacingDataField(source, name, value) {
   const fields = Object.getOwnPropertyDescriptors(source);

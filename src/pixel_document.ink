@@ -424,7 +424,7 @@ pub fn open_pixel_document(document: json.Json) -> Result<Opened, String> {
 
 record EditorDocument { source: json.Json, artwork: frame_raster.Artwork, named: selection.Named, }
 record EditorSelection { frame: String, grid: mask.Grid, words: List<u32>, }
-record EditorSnapshot { document: json.Json, positions: List<List<u32>>, }
+record EditorSnapshot { document: json.Json, positions: List<List<u32>>, edits: List<paint.SnapshotCel>, }
 record NamedBuild { ids: Buffer<String>, frames: Buffer<String>, packed: Buffer<Bool>, pixels: Buffer<List<u32>>,
     seen: Map<u64, List<String>>, issue: String, }
 record NamedPixels { seen: Buffer<u32>, indices: Buffer<u32>, packed: Bool, issue: String, }
@@ -572,16 +572,18 @@ change load_pixel_editor(document: json.Json, positions: List<List<u32>>) -> Res
     return Ok(grid);
 }
 
-query snapshot_pixel_editor() -> EditorSnapshot reads(EditorSource, EditorPositions) {
-    return EditorSnapshot { document: EditorSource, positions: EditorPositions };
+query snapshot_pixel_editor() -> EditorSnapshot reads(EditorSource, EditorArtwork, EditorPositions) {
+    let snapshot = paint.snapshot(EditorSource, EditorArtwork);
+    return EditorSnapshot { document: snapshot.source, positions: EditorPositions, edits: snapshot.edits };
 }
 
-change paint_pixel_editor(operation: json.Json, slots: List<i32>, frame: Option<String>, cel: Option<String>) -> Result<paint.Report, String>
+change paint_pixel_editor(operation: json.Json, slots: List<i32>, pixels: List<u32>, names: List<String>, frame: Option<String>, cel: Option<String>) -> Result<paint.Report, String>
     reads(EditorSource, EditorArtwork, EditorNamed, EditorScope)
     writes(EditorSource, EditorArtwork, EditorScope, EditorImage) {
-    let edit = paint.paint(EditorSource, EditorArtwork, EditorNamed, operation, slots, frame, cel, EditorScope)?;
+    let rgba = paint.RgbaInput { pixels: pixels, names: names };
+    let edit = paint.paint(EditorSource, EditorArtwork, EditorNamed, operation, slots, rgba, frame, cel, EditorScope)?;
     if edit.report.pixelCount != 0 {
-        EditorSource = edit.document;
+        if edit.document != json.null() { EditorSource = edit.document; }
         EditorArtwork = edit.artwork;
         EditorScope = edit.scope;
         EditorImage = edit.image;
@@ -603,4 +605,71 @@ change select_pixel_editor(query: List<json.Json>, saved: json.Json, runs: List<
 
 query capture_pixel_editor_brush(options: json.Json, pixels: List<u32>) -> Result<brushes.Capture, String> reads(EditorArtwork, EditorNamed) {
     return brushes.capture(EditorArtwork, EditorNamed, options, pixels);
+}
+
+record SavedSelectionReport { frame: String, selection: String, tool: String, pixelCount: u32, runs: List<Vec3<u32>>, }
+record SavedSelection { source: json.Json, named: selection.Named, positions: List<List<u32>>, report: SavedSelectionReport, }
+
+fn persist_selection(source: json.Json, named: selection.Named, packed: List<List<u32>>,
+    g: mask.Grid, scope: frame_raster.Scope, chosen: EditorSelection, name: String, tool: String) -> SavedSelection {
+    let sites = mask.indices(chosen.words);
+    let compressed = length(sites) >= mask.word_count(g);
+    let data = if compressed { chosen.words } else { sites };
+    let position = selection.named_slot(named.ids, name);
+    let new_row = position == 4294967295;
+    let ids = if new_row { named.ids.concat([name]) } else { named.ids };
+    let frames = if new_row { named.frames.concat([scope.frame]) }
+        else { named.frames.map_indexed(fn(i) => fn(old) => if i == position { scope.frame } else { old }) };
+    let formats = if new_row { named.packed.concat([compressed]) }
+        else { named.packed.map_indexed(fn(i) => fn(old) => if i == position { compressed } else { old }) };
+    let masks = if new_row { named.pixels.concat([data]) }
+        else { named.pixels.map_indexed(fn(i) => fn(old) => if i == position { data } else { old }) };
+    let prior = named.ids.map_indexed(fn(i) => fn(id) => if i == position { sites } else { packed.at_or(i, []) });
+    let positions = if new_row { prior.concat([sites]) } else { prior };
+    let document = json.members(source).fold(fn(rows) => rows, fn(e) => []);
+    let rows = pair(field(document, "selections"));
+    let row = json.object([member("id", json.text(name)), member("frame", json.text(scope.frame)), member("pixels", json.array([]))]);
+    let saved = if new_row { rows.concat([row]) } else {
+        rows.map_indexed(fn(i) => fn(old) => if i == position { row } else { old })
+    };
+    let report = SavedSelectionReport { frame: scope.frame, selection: name, tool: tool,
+        pixelCount: length(sites), runs: paint.runs(g, sites) };
+    return SavedSelection { source: json.object(paint.replace(document, "selections", json.array(saved))),
+        named: selection.Named { ids: ids, frames: frames, packed: formats, pixels: masks },
+        positions: positions, report: report };
+}
+
+fn save_mask_options(raw: json.Json) -> Result<List<json.Member>, String> {
+    let issue = "A selection edit needs a stable selection ID and a query";
+    let spec = object(raw, issue)?;
+    if !allowed(spec, ["id", "query", "layer", "cel", "sources", "targetRevision"]) || !stable_id(text(field(spec, "id"))) {
+        return Err(issue);
+    }
+    return Ok(spec);
+}
+
+change save_pixel_editor_selection(operation: json.Json, query: List<json.Json>, runs: List<List<u32>>,
+    frame: Option<String>) -> Result<SavedSelectionReport, String>
+    reads(EditorArtwork, EditorNamed, EditorScope, EditorImage, EditorSource, EditorPositions)
+    writes(EditorNamed, EditorSource, EditorPositions) {
+    let spec = save_mask_options(operation)?;
+    let layer = json.lookup(spec, "layer").fold(fn(raw) => Some(recall_label(raw)), fn(unit) => None);
+    let cel = json.lookup(spec, "cel").fold(fn(raw) => Some(recall_label(raw)), fn(unit) => None);
+    let scope = frame_raster.resolve(EditorArtwork, frame, layer, cel)?;
+    let prepared: Result<selection.Image, String> = if scope == EditorScope { Ok(EditorImage) }
+        else { frame_raster.raster(EditorArtwork, scope).fold(fn(result) => Ok(result.image), fn(issue) => Err(issue)) };
+    let image = prepared?;
+    let g = frame_raster.artwork_grid(EditorArtwork);
+    let chosen = editor_selection(g, scope, image, EditorNamed, query, json.object([]), runs)?;
+    if has(spec, "targetRevision") { return Err("A target revision needs an intent query"); }
+    if has(spec, "sources") && field(spec, "sources") != json.array([]) {
+        return Err("Selection sources differ from the inspected sources");
+    }
+    let root = json.members(first_query(query)).fold(fn(rows) => rows, fn(e) => []);
+    let saved = persist_selection(EditorSource, EditorNamed, EditorPositions, g, scope, chosen,
+        text(field(spec, "id")), text(field(root, "type")));
+    EditorSource = saved.source;
+    EditorNamed = saved.named;
+    EditorPositions = saved.positions;
+    return Ok(saved.report);
 }

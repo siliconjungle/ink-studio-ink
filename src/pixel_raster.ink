@@ -12,8 +12,6 @@ record Box { x: u32, y: u32, w: u32, h: u32, }
 record Span { start: u32, length: u32, }
 record Runs { paint: Paint, end: u32, }
 record RunMark { slot: i32, alpha: Option<u32>, spans: List<Vec3<u32>>, }
-// Editor-created marks are already validated spans. Keep their authored prefix in order.
-record RunCache { prefix: List<json.Json>, tail: List<RunMark>, }
 record Step { x: i32, y: i32, dx: i32, dy: i32, down: Bool, }
 record Stroke { paint: Paint, tip: Step, }
 record Position { x: f64, y: f64, }
@@ -679,13 +677,6 @@ fn mark(g: mask.Grid, ids: List<String>, raw: json.Json, paint: Paint) -> Paint 
     return out;
 }
 
-fn no_run_cache() -> RunCache { return RunCache { prefix: [], tail: [] }; }
-
-fn append_runs(content: List<json.Member>, cache: RunCache, added: List<RunMark>) -> RunCache {
-    let prefix = if length(cache.tail) == 0 { values.items(values.get(content, "marks")) } else { cache.prefix };
-    return RunCache { prefix: prefix, tail: cache.tail.concat(added) };
-}
-
 fn retained_runs(g: mask.Grid, row: RunMark, old: Paint) -> Paint {
     if old.issue != "" { return old; }
     let alpha = row.alpha.fold(fn(n) => n, fn(unit) => 4294967295);
@@ -708,11 +699,11 @@ fn retained_span(g: mask.Grid, span: Vec3<u32>, slot: i32, alpha: u32, old: Pain
     return write_span(charged, Span { start: first, length: span.z }, slot);
 }
 
-fn raster(g: mask.Grid, ids: List<String>, content: List<json.Member>, cache: RunCache, work: Work) -> Raw {
+fn raster(g: mask.Grid, ids: List<String>, content: List<json.Member>, runs: List<RunMark>, work: Work) -> Raw {
     let base = initial(g, ids, content, work);
-    let marks = if length(cache.tail) == 0 { values.items(values.get(content, "marks")) } else { cache.prefix };
+    let marks = values.items(values.get(content, "marks"));
     let authored = foldl(marks, base, fn(row) => fn(out) =>
         if out.issue == "" { mark(g, ids, row, out) } else { out });
-    let drawn = foldl(cache.tail, authored, fn(row) => fn(out) => retained_runs(g, row, out));
+    let drawn = foldl(runs, authored, fn(row) => fn(out) => retained_runs(g, row, out));
     return Raw { slots: drawn.slots.freeze(), alpha: drawn.alpha.freeze(), work: drawn.work, issue: drawn.issue };
 }

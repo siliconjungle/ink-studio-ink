@@ -7,7 +7,7 @@ import "pixel_raster.ink" as paint;
 import "pixel_selection.ink" as selection;
 
 record Location { id: String, frame: String, layer: String, }
-record Cel { id: String, layer: String, frame: String, fields: List<json.Member>, runs: paint.RunCache, }
+record Cel { id: String, layer: String, frame: String, fields: List<json.Member>, runs: List<paint.RunMark>, }
 record Placement { x: i32, y: i32, opacity: f64, }
 record Layer { id: String, kind: String, parent: String, clip: String, blend: String, protect: Bool,
     locked: Bool, visible: Bool, opacity: f64, }
@@ -38,7 +38,7 @@ fn hex_digit(byte: u32) -> u32 {
     return if byte <= 70 { byte - 55 } else { byte - 87 };
 }
 
-fn no_cel() -> Cel { return Cel { id: "", layer: "", frame: "", fields: [], runs: paint.no_run_cache() }; }
+fn no_cel() -> Cel { return Cel { id: "", layer: "", frame: "", fields: [], runs: [] }; }
 fn no_capture() -> Captured { return Captured { found: false, slots: [], alpha: [], clipping: [] }; }
 fn blank() -> Pixel { return Pixel { slot: -1, color: 0, alpha: 0, locked: false }; }
 
@@ -46,7 +46,7 @@ fn cel_entry(frame: String, row: json.Member) -> Cel {
     let spec = value.fields(row.value);
     let id = json.lookup(spec, "id").fold(fn(v) => value.text(v), fn(unit) =>
         string_concat(string_concat(frame, "/"), row.key));
-    return Cel { id: id, frame: frame, layer: row.key, fields: spec, runs: paint.no_run_cache() };
+    return Cel { id: id, frame: frame, layer: row.key, fields: spec, runs: [] };
 }
 
 fn all_cels(frames: List<json.Json>) -> List<Cel> {
@@ -418,4 +418,9 @@ fn compile(document: json.Json, frame: String, layer: String, cel: String) -> Re
     let art = prepare(document);
     let scope = resolve(art, optional_scope(frame), optional_scope(layer), optional_scope(cel))?;
     return raster(art, scope);
+}
+
+fn can_paint(view: PaintView, protected: List<u32>, p: u32) -> Bool {
+    return !view.pixels.at_or(p, blank()).locked && !mask.selected(protected, p) &&
+        view.captured.clipping.at_or(p, 255) != 0;
 }

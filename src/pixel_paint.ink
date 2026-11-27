@@ -8,6 +8,7 @@ import "pixel_drawing_grid.ink" as drawing;
 import "pixel_frame.ink" as frame;
 import "pixel_mask.ink" as mask;
 import "pixel_raster.ink" as raster;
+import "pixel_rgba_edit.ink" as rgba;
 import "pixel_selection.ink" as selection;
 import "pixel_shapes.ink" as shape;
 import "pixel_values.ink" as value;
@@ -17,18 +18,24 @@ record Tool { kind: String, slot: i32, perfect: Bool, selection: Option<String>,
     saved_brush: json.Json, samples: Option<json.Json>, shading: Option<json.Json>, }
 record Constraint { limited: Bool, words: List<u32>, }
 record Guard { drawn: frame.PaintView, protected: List<u32>, selected: Constraint, }
+record EditContext { guard: Guard, details: List<Detail>, active: List<Detail>, }
+record RgbaInput { pixels: List<u32>, names: List<String>, }
 record Stroke { words: Buffer<u32>, previous: drawing.Point, tip: drawing.Point, issue: String, }
 record Segment { pen: drawing.Pen, stroke: Stroke, }
 record Runs { spans: Buffer<Vec3<u32>>, y: u32, x: u32, length: u32, }
 record Report { frame: String, layer: String, cel: String, tool: String, pixelCount: u32,
     runs: List<Vec3<u32>>, pixelPerfect: Bool, selection: Option<String>, shape: Option<String>, shading: Option<String>,
-    ramp: Option<String>, addedSwatches: List<String>, }
+    ramp: Option<String>, addedSwatches: List<String>, from: Option<String>, to: Option<String>, }
 record Detail { id: String, kind: String, first: u32, last: u32, sites: List<u32>, }
 record Details { rows: Buffer<Detail>, issue: String, }
 record Changes { sites: List<u32>, marks: List<raster.RunMark>, added: List<brush.Swatch>, shading: brush_paint.Shading, }
 record Ranks { positions: Buffer<u32>, slots: Buffer<u32>, }
 record Groups { marks: Buffer<raster.RunMark>, index: u32, spans: Runs, }
-record Appended { authored: json.Json, runs: raster.RunCache, }
+record Appended { fields: List<json.Member>, runs: List<raster.RunMark>, }
+record SavedCel { frame: String, layer: String, authored: json.Json, }
+record SnapshotMark { swatch: Option<String>, alpha: Option<u32>, runs: List<Vec3<u32>>, }
+record SnapshotCel { frame: String, layer: String, marks: List<SnapshotMark>, }
+record RasterSnapshot { source: json.Json, edits: List<SnapshotCel>, }
 record Edit { document: json.Json, artwork: frame.Artwork, report: Report,
     scope: frame.Scope, image: selection.Image, }
 
@@ -88,8 +95,7 @@ fn read_points(grid: drawing.Drawing, single: Bool, items: List<json.Member>) ->
 fn selected(p: u32, limit: Constraint) -> Bool { return !limit.limited || mask.selected(limit.words, p); }
 
 fn writable(guard: Guard, p: u32) -> Bool {
-    return !guard.drawn.pixels.at_or(p, frame.blank()).locked && !mask.selected(guard.protected, p) &&
-        guard.drawn.captured.clipping.at_or(p, 255) != 0;
+    return frame.can_paint(guard.drawn, guard.protected, p);
 }
 
 fn emit(tool: Tool, guard: Guard, p: drawing.Point, old: Stroke) -> Stroke {
@@ -199,21 +205,21 @@ fn brush_changes(art: frame.Artwork, override: i32, b: brush.Brush, shade: brush
     let keys = stamps.filter(fn(row) => captured.slots.at_or(row.pixel, -1) != row.slot)
         .map(fn(row) => wrapping_shl(row.pixel, 8) + drawing.unsigned(row.slot)).sort();
     let sites = keys.map(fn(key) => wrapping_shr(key, 8));
-    let marks = grouped_marks(art.grid, length(art.ids) + length(palette.added), keys);
+    let marks = grouped_marks(art.grid, keys, false);
     return Ok(Changes { sites: sites, marks: marks, added: palette.added, shading: shade });
 }
 
-fn brush_rank(key: u32, old: Ranks) -> Ranks {
+fn rank_group(key: u32, old: Ranks) -> Ranks {
     let slot = word_and(key, 255);
     if old.positions.at_or(slot, 4294967295) != 4294967295 { return old; }
     let i = old.slots.len();
     return Ranks { slots: old.slots.push(slot), positions: old.positions.set(slot, i) };
 }
 
-fn grouped_marks(g: mask.Grid, count: u32, keys: List<u32>) -> List<raster.RunMark> {
+fn grouped_marks(g: mask.Grid, keys: List<u32>, opacity: Bool) -> List<raster.RunMark> {
     if length(keys) == 0 { return []; }
-    let seed = Ranks { positions: buffer_fill(count, 4294967295), slots: Buffer.empty() };
-    let rank = foldl(keys, seed, fn(k) => fn(out) => brush_rank(k, out));
+    let seed = Ranks { positions: buffer_fill(256, 4294967295), slots: Buffer.empty() };
+    let rank = foldl(keys, seed, fn(k) => fn(out) => rank_group(k, out));
     let positions = rank.positions.freeze();
     let slots = rank.slots.freeze();
     // Eight palette bits and eighteen canvas bits fit in one sortable word.
@@ -221,19 +227,21 @@ fn grouped_marks(g: mask.Grid, count: u32, keys: List<u32>) -> List<raster.RunMa
         wrapping_shl(positions.at_or(word_and(key, 255), 0), 18) + wrapping_shr(key, 8)).sort();
     let init = Groups { marks: Buffer.empty(), index: 4294967295, spans: empty_runs() };
     let groups = foldl(ordered, init, fn(key) => fn(out) =>
-        group_visit(g, slots, wrapping_shr(key, 18), word_and(key, 262143), out));
-    return end_group(slots, groups).freeze();
+        group_visit(g, slots, opacity, wrapping_shr(key, 18), word_and(key, 262143), out));
+    return end_group(slots, opacity, groups).freeze();
 }
 
-fn end_group(slots: List<u32>, old: Groups) -> Buffer<raster.RunMark> {
+fn end_group(slots: List<u32>, opacity: Bool, old: Groups) -> Buffer<raster.RunMark> {
     if old.index == 4294967295 { return old.marks; }
-    let slot = drawing.signed(slots.at_or(old.index, 0));
-    return old.marks.push(raster.RunMark { slot: slot, alpha: None, spans: emit_span(old.spans).freeze() });
+    let channel = slots.at_or(old.index, 0);
+    let slot: i32 = if opacity || channel == 255 { -1 } else { drawing.signed(channel) };
+    return old.marks.push(raster.RunMark { slot: slot, alpha: if opacity { Some(channel) } else { None },
+        spans: emit_span(old.spans).freeze() });
 }
 
-fn group_visit(g: mask.Grid, slots: List<u32>, i: u32, p: u32, old: Groups) -> Groups {
+fn group_visit(g: mask.Grid, slots: List<u32>, opacity: Bool, i: u32, p: u32, old: Groups) -> Groups {
     if old.index == i { return Groups { ..old, spans: add_span(g, p, old.spans) }; }
-    return Groups { index: i, marks: end_group(slots, old), spans: add_span(g, p, empty_runs()) };
+    return Groups { index: i, marks: end_group(slots, opacity, old), spans: add_span(g, p, empty_runs()) };
 }
 
 
@@ -468,10 +476,6 @@ fn is_valid_run(span: Result<Vec3<u32>, String>) -> Bool {
     return span.fold(fn(row) => true, fn(issue) => false);
 }
 
-fn encoded_run(row: Vec3<u32>) -> json.Json {
-    return json.array([json.number(number(row.x)), json.number(number(row.y)), json.number(number(row.z))]);
-}
-
 fn member(key: String, raw: json.Json) -> json.Member { return json.Member { key: key, value: raw }; }
 
 fn replace(items: List<json.Member>, key: String, raw: json.Json) -> List<json.Member> {
@@ -486,13 +490,6 @@ fn local_mark(g: mask.Grid, offset: frame.Placement, row: raster.RunMark) -> Res
     return Ok(raster.RunMark { ..row, spans: spans });
 }
 
-fn encode_mark(ids: List<String>, row: raster.RunMark) -> json.Json {
-    let pigment = if row.slot < 0 { member("clear", json.boolean(true)) }
-        else { member("swatch", json.text(ids.at_or(drawing.unsigned(row.slot), ""))) };
-    let mark = row.alpha.fold(fn(a) => member("alpha", json.number(number(a))), fn(unit) => pigment);
-    return json.object([mark, member("runs", json.array(row.spans.map(fn(span) => encoded_run(span))))]);
-}
-
 fn append_marks(art: frame.Artwork, scope: frame.Scope, marks: List<raster.RunMark>, cel: String) -> Result<Appended, String> {
     let target = frame.active_cel(art.cels, scope.frame, scope.layer);
     let ordinal = frame.clip_index(art.layers, scope.layer, length(art.layers));
@@ -503,22 +500,21 @@ fn append_marks(art: frame.Artwork, scope: frame.Scope, marks: List<raster.RunMa
     }
     let fallback = raster.RunMark { slot: -1, alpha: None, spans: [] };
     let local = rows.map(fn(row) => row.fold(fn(mark) => mark, fn(issue) => fallback));
-    let added = local.map(fn(row) => encode_mark(art.ids, row));
     let source = frame.resolved_cel(art.cels, target);
-    let next = raster.append_runs(source.fields, source.runs, local);
-    return Ok(Appended { authored: authored_cel(scope, target, source.fields, cel, added), runs: next });
+    let fields = independent_fields(scope, target, source.fields, cel);
+    return Ok(Appended { fields: fields, runs: source.runs.concat(local) });
 }
 
-fn authored_cel(scope: frame.Scope, target: frame.Cel, source: List<json.Member>, id: String, added: List<json.Json>) -> json.Json {
+fn independent_fields(scope: frame.Scope, target: frame.Cel, source: List<json.Member>, id: String) -> List<json.Member> {
     let prior = value.items(value.get(source, "marks"));
     let active = target.fields.filter(fn(item) => item.key != "hold");
     let base = if target.id == "" && id != default_id(scope) { replace(active, "id", json.text(id)) } else { active };
-    let revised = replace(base, "marks", json.array(prior.concat(added)));
+    let revised = replace(base, "marks", json.array(prior));
     let slots = json.lookup(source, "slots");
     if value.has(target.fields, "hold") {
-        return json.object(slots.fold(fn(raw) => replace(revised, "slots", raw), fn(unit) => revised));
+        return slots.fold(fn(raw) => replace(revised, "slots", raw), fn(unit) => revised);
     }
-    return json.object(revised);
+    return revised;
 }
 
 fn default_id(scope: frame.Scope) -> String { return string_concat(scope.frame, string_concat("/", scope.layer)); }
@@ -541,24 +537,44 @@ fn unused_cel(locations: List<frame.Location>, scope: frame.Scope, index: u32) -
     return if frame.location(locations, id).id == "" { id } else { "" };
 }
 
-fn replace_frame(row: json.Json, scope: frame.Scope, cel: json.Json) -> json.Json {
-    let fields = value.fields(row);
-    if value.text(value.get(fields, "id")) != scope.frame { return row; }
-    let cels = value.fields(value.get(fields, "cels"));
-    return json.object(replace(fields, "cels", json.object(replace(cels, scope.layer, cel))));
+fn serialize_mark(ids: List<String>, row: raster.RunMark) -> SnapshotMark {
+    let swatch: Option<String> = if row.slot < 0 { None } else { Some(ids.at_or(drawing.unsigned(row.slot), "")) };
+    return SnapshotMark { swatch: swatch, alpha: row.alpha, runs: row.spans };
 }
 
-fn revise(source: json.Json, scope: frame.Scope, cel: json.Json, added: List<brush.Swatch>) -> json.Json {
-    let base = value.fields(source);
+fn saved_frame(row: json.Json, edits: List<SavedCel>) -> json.Json {
+    let fields = value.fields(row);
+    let id = value.text(value.get(fields, "id"));
+    let own = edits.filter(fn(cel) => cel.frame == id);
+    if length(own) == 0 { return row; }
+    let initial = value.fields(value.get(fields, "cels"));
+    let current = foldl(own, initial, fn(cel) => fn(cels) => replace(cels, cel.layer, cel.authored));
+    return json.object(replace(fields, "cels", json.object(current)));
+}
+
+// Resolve cel order and swatch IDs before the hosts serialize the typed runs.
+fn snapshot(source: json.Json, art: frame.Artwork) -> RasterSnapshot {
+    let edited = art.cels.filter(fn(cel) => length(cel.runs) != 0);
+    if length(edited) == 0 { return RasterSnapshot { source: source, edits: [] }; }
+    let exported = edited.map(fn(cel) => SavedCel { frame: cel.frame, layer: cel.layer, authored: json.object(cel.fields) });
+    let items = value.fields(source);
+    let frames = value.items(value.get(items, "frames"));
+    let doc = json.object(replace(items, "frames", json.array(frames.map(fn(row) => saved_frame(row, exported)))));
+    let edits = edited.map(fn(cel) => SnapshotCel { frame: cel.frame, layer: cel.layer,
+        marks: cel.runs.map(fn(row) => serialize_mark(art.ids, row)) });
+    return RasterSnapshot { source: doc, edits: edits };
+}
+
+fn revised_palette(source: json.Json, added: List<brush.Swatch>) -> json.Json {
+    if length(added) == 0 { return json.null(); }
+    let items = value.fields(source);
     let extra = added.map(fn(row) => member(row.id, json.text(brush_paint.color_text(row.color))));
-    let old_palette = value.fields(value.get(base, "palette"));
-    let items = if length(extra) == 0 { base } else { replace(base, "palette", json.object(old_palette.concat(extra))) };
-    let authored = value.items(value.get(items, "frames"));
-    return json.object(replace(items, "frames", json.array(authored.map(fn(row) => replace_frame(row, scope, cel)))));
+    let base = value.fields(value.get(items, "palette"));
+    return json.object(replace(items, "palette", json.object(base.concat(extra))));
 }
 
 fn attach(art: frame.Artwork, scope: frame.Scope, id: String, added: Appended) -> frame.Artwork {
-    let cel = frame.Cel { id: id, frame: scope.frame, layer: scope.layer, fields: value.fields(added.authored),
+    let cel = frame.Cel { id: id, frame: scope.frame, layer: scope.layer, fields: added.fields,
         runs: added.runs };
     if frame.location(art.locations, id).id != "" {
         return frame.Artwork { ..art, cels: art.cels.map(fn(row) => if row.id == id { cel } else { row }) };
@@ -567,11 +583,93 @@ fn attach(art: frame.Artwork, scope: frame.Scope, id: String, added: Appended) -
         locations: art.locations.concat([frame.Location { id: id, frame: scope.frame, layer: scope.layer }]) };
 }
 
+fn begin_edit(source: json.Json, art: frame.Artwork, named: selection.Named, scope: frame.Scope,
+    wanted: Option<String>) -> Result<EditContext, String> {
+    let details = protections(source, art)?;
+    let limit = constraint(art.grid, named, scope.frame, wanted)?;
+    let drawn = frame.paint_view(art, scope)?;
+    let active = active_details(details, selection.named_slot(art.frames, scope.frame));
+    let issue = gap_issue(art.grid, active, drawn.pixels);
+    if issue != "" { return Err(issue); }
+    let guard = Guard { drawn: drawn, protected: locked_pixels(art.grid, active), selected: limit };
+    return Ok(EditContext { guard: guard, details: details, active: active });
+}
+
+fn apply_color(source: json.Json, art: frame.Artwork, named: selection.Named, spec: List<json.Member>,
+    input: RgbaInput, frame_id: Option<String>, cel: Option<String>, cached: frame.Scope, kind: String) -> Result<Edit, String> {
+    if kind == "rgba" {
+        if !value.only(spec, ["tool", "layer", "pixels"]) || length(input.pixels) == 0 ||
+            rem_or(length(input.pixels), 3, 0) != 0 || length(input.pixels) > mask.size(art.grid) * 3 {
+            return Err("An RGBA edit needs a layer or cel and native pixels");
+        }
+        let scope = target(art, spec, frame_id, cel)?;
+        let ctx = begin_edit(source, art, named, scope, None)?;
+        let changes = rgba_changes(art, ctx.guard, input)?;
+        let report = color_report(art, scope, kind, changes);
+        return finish_edit(source, art, scope, changes, report, ctx, cached);
+    }
+    let name = value.text(value.get(spec, "selection"));
+    if !value.only(spec, ["tool", "layer", "selection", "from", "to"]) || !brush.stable_id(name) {
+        return Err("Swatch replacement needs a layer or cel and a saved selection");
+    }
+    let from = value.text(value.get(spec, "from"));
+    let to = value.text(value.get(spec, "to"));
+    let prior = selection.find_swatch(art.ids, from);
+    let next = selection.find_swatch(art.ids, to);
+    if prior < 0 || next < 0 || prior == next { return Err("Choose two distinct existing swatch IDs"); }
+    let scope = target(art, spec, frame_id, cel)?;
+    let ctx = begin_edit(source, art, named, scope, Some(name))?;
+    let changes = replace_changes(art.grid, ctx.guard, prior, next)?;
+    let base = color_report(art, scope, kind, changes);
+    let report = Report { ..base, selection: Some(name), from: Some(from), to: Some(to) };
+    return finish_edit(source, art, scope, changes, report, ctx, cached);
+}
+
+fn color_report(art: frame.Artwork, scope: frame.Scope, tool: String, changes: Changes) -> Report {
+    return Report { frame: scope.frame, layer: scope.layer, cel: choose_cel(art, scope), tool: tool,
+        runs: runs(art.grid, changes.sites), pixelCount: length(changes.sites), pixelPerfect: false, shape: None,
+        selection: None, shading: None, ramp: None, addedSwatches: changes.added.map(fn(row) => row.id),
+        from: None, to: None };
+}
+
+fn replace_changes(g: mask.Grid, guard: Guard, from: i32, to: i32) -> Result<Changes, String> {
+    let pixels = mask.indices(guard.selected.words).filter(fn(p) => guard.drawn.captured.slots.at_or(p, -1) == from);
+    let denied = repeat_until(length(pixels), false, fn(found) => found, fn(i) => fn(found) =>
+        !writable(guard, pixels.at_or(i, 0)));
+    if denied { return Err("Swatch replacement cannot change this pixel"); }
+    let marks: List<raster.RunMark> = if length(pixels) == 0 { [] }
+        else { [raster.RunMark { slot: to, alpha: None, spans: runs(g, pixels) }] };
+    return Ok(Changes { sites: pixels, marks: marks, added: [], shading: brush_paint.unshaded() });
+}
+
+fn rgba_changes(art: frame.Artwork, guard: Guard, input: RgbaInput) -> Result<Changes, String> {
+    let plan = rgba.plan(art, guard.drawn, guard.protected, input.pixels, input.names)?;
+    let previous = guard.drawn.captured;
+    let sites = plan.writes.map(fn(row) => row.pixel).sort();
+    let color_keys = plan.writes.filter(fn(row) => row.slot != previous.slots.at_or(row.pixel, -1))
+        .map(fn(row) => wrapping_shl(row.pixel, 8) + (if row.slot < 0 { 255 } else { drawing.unsigned(row.slot) })).sort();
+    let alpha_keys = plan.writes.filter(fn(row) => opacity_changed(previous, row))
+        .map(fn(row) => wrapping_shl(row.pixel, 8) + row.alpha).sort();
+    let marks = grouped_marks(art.grid, color_keys, false).concat(grouped_marks(art.grid, alpha_keys, true));
+    return Ok(Changes { sites: sites, marks: marks, added: plan.added, shading: brush_paint.unshaded() });
+}
+
+fn opacity_changed(previous: frame.Captured, row: rgba.Write) -> Bool {
+    if row.slot < 0 { return false; }
+    let alpha: u32 = if previous.slots.at_or(row.pixel, -1) < 0 { 255 } else { previous.alpha.at_or(row.pixel, 255) };
+    return row.alpha != alpha;
+}
+
+
 fn paint(source: json.Json, art: frame.Artwork, named: selection.Named, operation: json.Json,
-    slots: List<i32>, frame_id: Option<String>, cel: Option<String>, cached: frame.Scope) -> Result<Edit, String> {
+    slots: List<i32>, input: RgbaInput, frame_id: Option<String>, cel: Option<String>, cached: frame.Scope) -> Result<Edit, String> {
     let error = "A raster tool needs a layer or cel and a pencil, eraser, fill, shape or brush operation";
     let parsed: Result<List<json.Member>, String> = json.members(operation).fold(fn(rows) => Ok(rows), fn(issue) => Err(error));
     let spec = parsed?;
+    let kind = value.text(value.get(spec, "tool"));
+    if kind == "rgba" || kind == "replace-swatch" {
+        return apply_color(source, art, named, spec, input, frame_id, cel, cached, kind);
+    }
     if !value.only(spec, ["tool", "layer", "at", "points", "samples", "swatch", "pixelPerfect", "shape",
         "brush", "shading", "drawing", "selection"]) { return Err(error); }
     let scope = target(art, spec, frame_id, cel)?;
@@ -580,27 +678,26 @@ fn paint(source: json.Json, art: frame.Artwork, named: selection.Named, operatio
 }
 
 fn paint_target(source: json.Json, art: frame.Artwork, named: selection.Named, scope: frame.Scope, tool: Tool, slots: List<i32>, cached: frame.Scope) -> Result<Edit, String> {
-    let details = protections(source, art)?;
-    let limit = constraint(art.grid, named, scope.frame, tool.selection)?;
-    let drawn = frame.paint_view(art, scope)?;
-    let active = active_details(details, selection.named_slot(art.frames, scope.frame));
-    let issue = gap_issue(art.grid, active, drawn.pixels);
-    if issue != "" { return Err(issue); }
-    let guard = Guard { drawn: drawn, protected: locked_pixels(art.grid, active), selected: limit };
-    let delta: Result<Changes, String> = if tool.kind == "brush" { brushed(source, art, tool, guard, slots) }
-        else { basic_changes(tool, guard) };
+    let ctx = begin_edit(source, art, named, scope, tool.selection)?;
+    let delta: Result<Changes, String> = if tool.kind == "brush" { brushed(source, art, tool, ctx.guard, slots) }
+        else { basic_changes(tool, ctx.guard) };
     let changes = delta?;
     let report = Report { frame: scope.frame, layer: scope.layer, cel: choose_cel(art, scope), tool: tool.kind,
         pixelCount: length(changes.sites), runs: runs(art.grid, changes.sites), pixelPerfect: tool.perfect, selection: tool.selection,
         shape: if tool.kind == "shape" { Some(shape.kind(tool.geometry)) } else { None },
         shading: optional_text(changes.shading.mode), ramp: optional_text(changes.shading.named),
-        addedSwatches: changes.added.map(fn(row) => row.id) };
+        addedSwatches: changes.added.map(fn(row) => row.id), from: None, to: None };
+    return finish_edit(source, art, scope, changes, report, ctx, cached);
+}
+
+fn finish_edit(source: json.Json, art: frame.Artwork, scope: frame.Scope, changes: Changes, report: Report,
+    ctx: EditContext, cached: frame.Scope) -> Result<Edit, String> {
     if report.pixelCount == 0 {
         return Ok(Edit { document: json.null(), artwork: frame.empty_artwork(), report: report, scope: cached,
             image: selection.Image { rgba: [], palette: mask.no_palette() } });
     }
     let retained = if cached.frame == scope.frame { cached } else { frame.Scope { frame: scope.frame, layer: "" } };
-    return commit_paint(source, art, scope, changes, report, details, active, retained);
+    return commit_paint(source, art, scope, changes, report, ctx.details, ctx.active, retained);
 }
 
 fn optional_text(text: String) -> Option<String> { return if text == "" { None } else { Some(text) }; }
@@ -618,6 +715,6 @@ fn commit_paint(source: json.Json, art: frame.Artwork, scope: frame.Scope, chang
     let issue = gap_issue(art.grid, active, canvas.pixels);
     if issue != "" { return Err(issue); }
     let updated = frame.finish_view(next, canvas, retained)?;
-    return Ok(Edit { document: revise(source, scope, cel.authored, changes.added), artwork: next, report: report, scope: retained,
+    return Ok(Edit { document: revised_palette(source, changes.added), artwork: next, report: report, scope: retained,
         image: updated.image });
 }

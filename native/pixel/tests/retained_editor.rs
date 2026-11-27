@@ -202,3 +202,52 @@ fn brush_palette_and_alpha_are_visible_to_capture_and_survive_reload() {
         "#213b71"
     );
 }
+#[test]
+fn named_masks_update_in_place_and_drive_exact_color_edits() {
+    let mut editor = PixelEditor::new(&document(2, 5).to_string()).unwrap();
+    let actual = editor
+        .save_selection(
+            r#"{"id":"pin","query":{"type":"rectangle","rect":[1,1,3,1]},"layer":"ink"}"#,
+            Some("front"),
+        )
+        .unwrap();
+    assert_eq!(actual.runs, [[1, 1, 3]]);
+    assert_eq!(actual.pixel_count, 3);
+
+    let command = r#"{"tool":"rgba","layer":"ink","pixels":[
+        {"at":[1,1],"rgba":[19,43,71,0],"swatch":"glaze"},
+        {"at":[3,1],"rgba":[19,43,71,127],"swatch":"glaze"}]}"#;
+    let report = editor.paint(command, Some("front"), None).unwrap();
+    assert_eq!(report.added_swatches, ["glaze"]);
+    let wrong = r#"{"tool":"rgba","layer":"ink","pixels":[{"at":[1,1],"rgba":[0,0,0,255],"swatch":"glaze"}]}"#;
+    let prior = editor.snapshot().unwrap();
+    assert_eq!(
+        editor.paint(wrong, Some("front"), None).unwrap_err(),
+        "RGBA does not match swatch glaze"
+    );
+    assert_eq!(editor.snapshot().unwrap(), prior);
+
+    let recolor =
+        r#"{"tool":"replace-swatch","layer":"ink","selection":"pin","from":"glaze","to":"rust"}"#;
+    let replaced = editor.paint(recolor, Some("front"), None).unwrap();
+    assert_eq!(replaced.runs, [[1, 1, 1], [1, 3, 1]]);
+    let saved = editor.snapshot().unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(doc["selections"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        doc["selections"][0]["pixels"],
+        serde_json::json!([[1, 1], [2, 1], [3, 1]])
+    );
+    let query = r#"{"type":"swatch","id":"rust"}"#;
+    let pick = |editor: &mut PixelEditor| {
+        editor
+            .select(query, Some("front"), Some("ink"), None, "{}")
+            .unwrap()
+            .pixels
+    };
+    assert_eq!(pick(&mut editor), [[2, 1], [3, 1]]);
+    assert_eq!(
+        pick(&mut PixelEditor::new(&saved).unwrap()),
+        [[2, 1], [3, 1]]
+    );
+}
