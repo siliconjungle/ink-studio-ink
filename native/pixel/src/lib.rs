@@ -5,7 +5,7 @@ mod journal;
 mod png;
 mod png_import;
 pub use journal::{
-    EditHistory, PixelCommandEditor, PixelEditError, PixelPreviewOptions, StagedPixelEdit,
+    EditHistory, PixelCommandEditor, PixelEditError, PixelFileEditor, PixelPreviewOptions, StagedPixelEdit,
 };
 pub use png_import::{extract_png_palette, open_pixel_png};
 

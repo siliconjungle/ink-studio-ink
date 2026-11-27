@@ -118,6 +118,21 @@ Run `inspect` with `at: [x, y]` to read the document revision, the visible layer
 
 Rust callers can pass a command JSON string to `PixelCommandEditor::execute` and receive the serialized reply. For an existing native journal sequence, pass `{ "op": "execute", "command": … }` in its steps. For a single command, `command-document` reads a request file with `{ "document": …, "command": … }` and prints the original reply shape. An invalid envelope exits with status 1. A rejected edit with a receipt or an invalid preview prints its JSON and exits with status 2.
 
+Use the native file commands to preview a local raster, selection, palette,
+or canvas patch, write it to disk, and replay its receipt.
+
+```sh
+ink-studio-pixel preview drawing.json patch.json --exact --out review.json
+ink-studio-pixel edit drawing.json patch.json --out revised.json > receipt.json
+ink-studio-pixel replay drawing.json receipt.json --out reproduced.json
+```
+
+Replay verifies the exact input revision, edit flags and output revision. Supply
+the same edit flags, such as `--frame front`, when replaying a receipt. Exact
+preview and replay use separate output paths. File edits keep original version
+1 raster documents at version 1. The in-memory editor continues to migrate
+them when opening a journal.
+
 `raster` and `select-document` are the native equivalents. Their JSON request contains `document` and optional `frame`, `layer` or `cel`. Add `query` for `select-document`.
 
 `selectPixels(width, height, query, { rgba, saved, indexed })` in the same browser module returns selected `[x, y]` coordinates in native row order. The shared Ink implementation covers rectangular and elliptical marquees, lassos and polygons, literal and saved masks, mask combinations and modifiers, wand fills, swatches, and clusters. Wand fills take one packed `0xRRGGBBAA` word per pixel. Saved masks map selection IDs to coordinate lists.

@@ -1,3 +1,5 @@
+mod file_edit_cli;
+mod file_output;
 mod journal_cli;
 mod palette_cli;
 mod session_cli;
@@ -144,8 +146,11 @@ fn select(path: std::ffi::OsString, packed: bool) -> Result<(), String> {
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel import-png FILE | ink-studio-pixel select|select-mask|raster|select-document|paint-document|save-selection-document|capture-brush-document|copy-selection-document|journal-document|command-document REQUEST | ink-studio-pixel session ACTION DIRECTORY | ink-studio-pixel palette ACTION SOURCE --out OUTPUT";
+    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel import-png FILE | ink-studio-pixel select|select-mask|raster|select-document|paint-document|save-selection-document|capture-brush-document|copy-selection-document|journal-document|command-document REQUEST | ink-studio-pixel session ACTION DIRECTORY | ink-studio-pixel palette ACTION SOURCE --out OUTPUT | ink-studio-pixel edit|preview|replay DOCUMENT INPUT [--out OUTPUT]";
     let path = args.next().ok_or(usage)?;
+    if let Some(action @ ("edit" | "preview" | "replay")) = path.to_str() {
+        return file_edit_cli::run(action, args);
+    }
     if path == "session" { return session_cli::run(args); }
     if path == "palette" { return palette_cli::run(args); }
     if let Some(request) = args.next() {

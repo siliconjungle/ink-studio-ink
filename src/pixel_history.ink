@@ -94,6 +94,11 @@ fn requested_scope(raw: Option<json.Json>) -> Option<String> {
 }
 
 fn resolve(source: json.Json, art: frame.Artwork, current: Cursor, raw: json.Json) -> Command {
+    return resolve_at(source, art, current, raw, None, false);
+}
+
+fn resolve_at(source: json.Json, art: frame.Artwork, current: Cursor, raw: json.Json,
+    file_frame: Option<json.Json>, legacy_file: Bool) -> Command {
     let spec = value.fields(raw);
     let route = destination(source, requested_destination(spec));
     let base = Command { destination: route.id, kind: route.kind, frame: "", cel: None,
@@ -104,15 +109,32 @@ fn resolve(source: json.Json, art: frame.Artwork, current: Cursor, raw: json.Jso
             [member("destination", name)]));
     }
     let supplied = value.get(spec, "revision");
-    let legacy = current.legacy != "" && supplied == json.text(current.legacy);
+    let migrated = current.legacy != "" && supplied == json.text(current.legacy);
     let cel = json.lookup(spec, "cel");
-    let target_frame = json.lookup(spec, "frame");
-    let migrated: Option<json.Json> = if legacy && route.kind != "palette" && route.kind != "canvas" && !value.has(spec, "cel") && !value.has(spec, "frame") {
-        Some(json.text("artwork"))
-    } else { target_frame };
-    let scope = frame.resolve(art, requested_scope(migrated), None, requested_scope(cel));
+    let requested = json.lookup(spec, "frame");
+    let wanted: Option<json.Json> = if migrated && route.kind != "palette" && route.kind != "canvas" &&
+        !value.has(spec, "cel") && !value.has(spec, "frame") { Some(json.text("artwork")) } else { requested };
+    let scope = edit_scope(art, wanted, file_frame, cel, legacy_file);
+    let cursor = if legacy_file { Cursor { ..current, revision: current.legacy } } else { current };
     return scope.fold(fn(found) => check_command(Command { ..base, frame: found.frame, cel: requested_scope(cel) },
-        current, spec, migrated, legacy), fn(issue) => invalid(base, problem("invalid-edit", issue, [])));
+        cursor, spec, wanted, migrated, legacy_file), fn(issue) => invalid(base, problem("invalid-edit", issue, [])));
+}
+
+fn edit_scope(art: frame.Artwork, wanted: Option<json.Json>, file_frame: Option<json.Json>,
+    cel: Option<json.Json>, legacy_file: Bool) -> Result<frame.Scope, String> {
+    let from_file = file_frame.fold(fn(raw) => raw, fn(unit) => json.null());
+    if file_frame.fold(fn(raw) => legacy_file || json.as_text(raw).fold(fn(id) => false, fn(issue) => true),
+        fn(unit) => false) {
+        return Err(string_concat("Unknown pixel frame ", labels.label(from_file)));
+    }
+    if legacy_file {
+        if cel.fold(fn(raw) => true, fn(unit) => false) {
+            return Err(string_concat("Unknown pixel cel ", cel.fold(fn(raw) => labels.label(raw), fn(unit) => "")));
+        }
+        return frame.resolve(art, None, None, None);
+    }
+    let target: Option<json.Json> = file_frame.fold(fn(raw) => Some(raw), fn(unit) => wanted);
+    return frame.resolve(art, requested_scope(target), None, requested_scope(cel));
 }
 
 fn expected(raw: Option<json.Json>, actual: String) -> List<json.Member> {
@@ -121,7 +143,7 @@ fn expected(raw: Option<json.Json>, actual: String) -> List<json.Member> {
 }
 
 fn check_command(command: Command, current: Cursor, spec: List<json.Member>,
-    wanted: Option<json.Json>, legacy: Bool) -> Command {
+    wanted: Option<json.Json>, legacy: Bool, legacy_file: Bool) -> Command {
     let revision = json.lookup(spec, "revision");
     let edit_id = value.text(value.get(spec, "id"));
     let complaint = "Pixel edit needs the observed revision and a valid edit ID";
@@ -136,7 +158,8 @@ fn check_command(command: Command, current: Cursor, spec: List<json.Member>,
     if value.has(spec, "ownership") {
         return invalid(command, problem("hybrid-owner-needs-source", "A hybrid edit needs a bound source destination", []));
     }
-    if !value.has(spec, "cel") && wanted.fold(fn(item) => item != json.text(command.frame), fn(unit) => command.kind != "palette" && command.kind != "canvas") {
+    if !legacy_file && wanted.fold(fn(item) => item != json.text(command.frame),
+        fn(unit) => !value.has(spec, "cel") && command.kind != "palette" && command.kind != "canvas") {
         return invalid(command, problem("wrong-frame", "Pixel edit needs the observed frame ID", expected(wanted, command.frame)));
     }
     if value.has(spec, "sourceRevision") {

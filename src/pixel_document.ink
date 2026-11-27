@@ -921,6 +921,11 @@ query resolve_pixel_edit(patch: json.Json) -> history.Command reads(EditorSource
     return history.resolve(EditorSource, EditorArtwork, JournalCursor, patch);
 }
 
+query resolve_pixel_file_edit(patch: json.Json, frame: Option<json.Json>, legacy: Bool) -> history.Command
+    reads(EditorSource, EditorArtwork, JournalCursor) {
+    return history.resolve_at(EditorSource, EditorArtwork, JournalCursor, patch, frame, legacy);
+}
+
 query plan_pixel_command(command: json.Json) -> Result<commands.Plan, String> reads(EditorSource) {
     return commands.plan(EditorSource, command);
 }

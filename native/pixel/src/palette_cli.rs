@@ -1,4 +1,5 @@
-use ink_studio_pixel::{PixelCommandEditor, PixelEditor, extract_png_palette};
+use super::file_output::{output, resolved};
+use ink_studio_pixel::{PixelEditor, PixelFileEditor, extract_png_palette};
 use serde::Deserialize;
 use serde_json::{Map, Value, json, value::RawValue};
 use std::{
@@ -13,36 +14,6 @@ fn as_text(value: &OsStr) -> Result<&str, String> {
     value.to_str().ok_or_else(|| USAGE.into())
 }
 
-fn resolved(path: &Path) -> Result<PathBuf, String> {
-    if let Ok(existing) = fs::canonicalize(path) {
-        return Ok(existing);
-    }
-    let absolute = std::path::absolute(path).map_err(|error| error.to_string())?;
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        if component == std::path::Component::ParentDir {
-            normalized.pop();
-        } else {
-            normalized.push(component.as_os_str());
-        }
-    }
-    Ok(normalized)
-}
-
-fn output(path: &Path, data: &str) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let staged = super::session_cli::stage(parent, data)?;
-    let renamed = fs::rename(&staged, path).map_err(|error| error.to_string());
-    if renamed.is_err() {
-        let _ = fs::remove_file(staged);
-    }
-    renamed
-}
-
 fn imported(document: &str, palette: &str) -> Result<(String, Value), String> {
     #[derive(Deserialize)]
     struct Version {
@@ -55,17 +26,14 @@ fn imported(document: &str, palette: &str) -> Result<(String, Value), String> {
     {
         return Err("Upgrade the document to version 2 before editing the palette".into());
     }
-    let mut editor = PixelCommandEditor::new(document, 0)?;
+    let mut editor = PixelFileEditor::new(document)?;
+    let revision = editor.revision()?;
     let incoming = RawValue::from_string(palette.to_owned()).map_err(|error| error.to_string())?;
-    let command = json!({ "format": "ink-studio/pixel-command", "version": 1, "action": "apply",
-        "patch": { "id": "import-palette", "revision": editor.revision()?, "destination": "document:palette",
-            "operation": { "type": "import", "palette": incoming } } });
-    let receipt = editor
-        .execute(&command.to_string())
+    let patch = json!({ "id": "import-palette", "revision": revision, "destination": "document:palette",
+        "operation": { "type": "import", "palette": incoming } });
+    let edited = editor.edit(&patch.to_string(), &Map::new())
         .map_err(|error| error.to_string())?;
-    let mut receipt: Value = serde_json::from_str(&receipt).map_err(|error| error.to_string())?;
-    receipt["command"]["runner"] = json!("cli");
-    Ok((editor.snapshot()?, receipt))
+    Ok((edited.document, std::sync::Arc::unwrap_or_clone(edited.receipt)))
 }
 
 pub fn run(mut args: impl Iterator<Item = OsString>) -> Result<(), String> {

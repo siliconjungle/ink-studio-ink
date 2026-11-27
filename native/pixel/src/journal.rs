@@ -1,5 +1,8 @@
 mod batch;
+mod file;
 mod session;
+
+pub use file::PixelFileEditor;
 
 use super::edit_preview::{CellChange, Color, Location, PixelEditPreview, Preview, Sample, Site};
 use super::{
@@ -7,6 +10,7 @@ use super::{
     read_document, restore_cel_planes, revision,
 };
 use serde_json::{Map, Value, json};
+use super::document_input::CelPlanes;
 use std::{
     collections::{HashMap, HashSet},
     fmt,
@@ -84,6 +88,11 @@ enum EditMode {
     Preview(PixelPreviewOptions),
 }
 
+enum EditOrigin<'a> {
+    Sdk(Option<Value>),
+    File { options: Map<String, Value>, frame: Option<Json>, legacy: Option<&'a file::LegacyFile> },
+}
+
 enum EditOutcome {
     Staged(StagedPixelEdit),
     Preview(PixelEditPreview),
@@ -140,11 +149,15 @@ fn valid_revision(value: &Value) -> bool {
 }
 
 fn check_replay_receipt(expected: &Value) -> Result<(), PixelEditError> {
+    check_replay_receipt_as(expected, "sdk")
+}
+
+fn check_replay_receipt_as(expected: &Value, runner: &str) -> Result<(), PixelEditError> {
     let command = &expected["command"];
     if expected["format"] != RECEIPT_FORMAT
         || expected["version"] != 1
         || expected["status"] != "applied"
-        || command["runner"] != "sdk"
+        || command["runner"] != runner
         || command["action"] != "edit"
         || !command["patch"].is_object()
         || !command["options"].is_object()
@@ -152,12 +165,14 @@ fn check_replay_receipt(expected: &Value) -> Result<(), PixelEditError> {
         || !valid_revision(&expected["outputs"]["artifactRevision"])
     {
         return Err(
-            "Replay needs an applied version 1 pixel edit receipt from the sdk"
-                .to_owned()
-                .into(),
+            format!("Replay needs an applied version 1 pixel edit receipt from the {runner}").into(),
         );
     }
     Ok(())
+}
+
+fn receipt_patch(recorded: &mut Json) -> Json {
+    member_mut(recorded, "command").map_or(Json::Null, |command| take_member(command, "patch"))
 }
 
 fn receipt_matches(receipt: &Value, expected: &Value) -> bool {
@@ -341,6 +356,10 @@ impl PixelCommandEditor {
         } else {
             String::new()
         };
+        Self::from_document(input, planes, legacy, history_limit)
+    }
+
+    fn from_document(input: Json, planes: CelPlanes, legacy: String, history_limit: u32) -> Result<Self, String> {
         let mut editor = PixelEditor::empty();
         editor.replace_packed_document(input, planes)?;
         let baseline = editor.snapshot()?;
@@ -647,10 +666,7 @@ impl PixelCommandEditor {
     fn replay_edit(&mut self, mut recorded: Json) -> Result<StagedPixelEdit, PixelEditError> {
         let expected = json_value(&recorded)?;
         check_replay_receipt(&expected)?;
-        let patch = member_mut(&mut recorded, "command")
-            .and_then(|value| member_mut(value, "patch"))
-            .map(|value| std::mem::replace(value, Json::Null))
-            .unwrap_or(Json::Null);
+        let patch = receipt_patch(&mut recorded);
         Ok(self
             .edit(patch, Some(&expected), None, EditMode::Apply)?
             .staged())
@@ -948,6 +964,16 @@ impl PixelCommandEditor {
         shot: Option<Value>,
         mode: EditMode,
     ) -> Result<EditOutcome, PixelEditError> {
+        self.edit_using(patch, expected, EditOrigin::Sdk(shot), mode)
+    }
+
+    fn edit_using(
+        &mut self,
+        patch: Json,
+        expected: Option<&Value>,
+        origin: EditOrigin<'_>,
+        mode: EditMode,
+    ) -> Result<EditOutcome, PixelEditError> {
         let dry_run = !matches!(mode, EditMode::Apply);
         let view = self.view()?;
         let raw_patch = if matches!(mode, EditMode::Preview(_)) {
@@ -955,18 +981,24 @@ impl PixelCommandEditor {
         } else {
             json_value(&patch)?
         };
-        let mut options = Map::new();
-        if let Some(shot) = expected
-            .and_then(|receipt| receipt["command"]["options"].get("shotHitFrame"))
-            .cloned()
-            .or(shot)
-        {
-            options.insert("shotHitFrame".into(), shot);
-        }
+        let (runner, options, shot, file_frame, legacy) = match origin {
+            EditOrigin::Sdk(shot) => {
+                let shot = expected.and_then(|receipt| receipt["command"]["options"].get("shotHitFrame"))
+                    .cloned().or(shot);
+                let options = shot.as_ref().map(|sample| Map::from_iter([("shotHitFrame".into(), sample.clone())]))
+                    .unwrap_or_default();
+                ("sdk", options, shot.is_some(), None, None)
+            }
+            EditOrigin::File { options, frame, legacy } => {
+                let shot = options.contains_key("shot-hit-frame");
+                ("cli", options, shot, frame, legacy)
+            }
+        };
+        let input_revision = legacy.map_or(view.revision.as_str(), file::LegacyFile::revision);
         let mut common = json!({
             "format": RECEIPT_FORMAT, "version": 1,
-            "command": { "runner": "sdk", "action": "edit", "options": options, "patch": raw_patch },
-            "inputs": { "documentRevision": view.revision },
+            "command": { "runner": runner, "action": "edit", "options": options, "patch": raw_patch },
+            "inputs": { "documentRevision": input_revision },
         });
         let mut started = false;
         let previous_grid = self.editor.grid;
@@ -980,45 +1012,48 @@ impl PixelCommandEditor {
                     )
                     .into());
                 }
-                if recorded["inputs"]["documentRevision"] != view.revision {
+                if recorded["inputs"]["documentRevision"] != input_revision {
                     return Err(json!({
                         "code": "stale-document", "message": "Receipt was recorded against a different pixel document",
-                        "expected": recorded["inputs"]["documentRevision"], "actual": view.revision,
+                        "expected": recorded["inputs"]["documentRevision"], "actual": input_revision,
                     }).into());
                 }
             }
-            let meta = compiled_json(
-                gate_metadata(&patch),
-                &|kind, scalar, flag, values, keys| {
-                    self.editor
-                        .program
-                        .function_l_pixel_json_value(kind, scalar, flag, values, keys)
-                },
-            );
-            let gate = self
-                .editor
-                .program
-                .invoke_view_l_resolve_pixel_edit(meta)
-                .map_err(invalid)?
-                .result;
+            let make = |kind, scalar, flag, values, keys| {
+                self.editor.program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
+            };
+            let meta = compiled_json(gate_metadata(&patch), &make);
+            let gate = if runner == "cli" {
+                let frame = file_frame.map(|value| compiled_json(value, &make));
+                self.editor.program.invoke_view_l_resolve_pixel_file_edit(meta, frame, legacy.is_some())
+                    .map_err(invalid)?.result
+            } else {
+                self.editor.program.invoke_view_l_resolve_pixel_edit(meta).map_err(invalid)?.result
+            };
             if !gate.l_frame.is_empty() {
-                common["command"]["frame"] = if matches!(gate.l_kind.as_str(), "canvas" | "palette") {
+                common["command"]["frame"] = if legacy.is_some() || matches!(gate.l_kind.as_str(), "canvas" | "palette") {
                     Value::Null
                 } else {
                     json!(&gate.l_frame)
                 };
+            }
+            if runner == "cli" && shot && !gate.l_frame.is_empty() && gate.l_kind != "shot-correction" {
+                return Err(invalid("A shot hit sample needs a shot-correction edit and a nonnegative shot frame".into()));
             }
             let issue =
                 Json::from_ink(&gate.l_conflict.to_json(), Limits::default()).map_err(invalid)?;
             if !matches!(issue, Json::Null) {
                 return Err(json_value(&issue).map_err(invalid)?.into());
             }
-            if !common["command"]["options"].as_object().unwrap().is_empty() {
+            if shot {
                 return Err(conflict(
                     "invalid-edit",
                     "A shot hit sample needs a shot-correction edit and a nonnegative shot frame",
                 )
                 .into());
+            }
+            if legacy.is_some() && gate.l_kind == "palette" {
+                return Err(invalid("Upgrade the document to version 2 before editing the palette".into()));
             }
             self.editor.program.begin_transaction().map_err(invalid)?;
             started = true;
@@ -1043,6 +1078,10 @@ impl PixelCommandEditor {
                 self.run_raster_edit(patch, &gate.l_kind, &gate.l_frame, gate.l_cel.as_deref())?
             };
             target["destination"] = json!(gate.l_destination);
+            if legacy.is_some() && target.get("frame").is_some() {
+                target["frame"] = Value::Null;
+                if target.get("cel").is_some() { target["cel"] = Value::Null; }
+            }
             if let EditMode::Preview(options) = mode {
                 let preview = if gate.l_kind == "selections" {
                     Preview::default()
@@ -1061,6 +1100,10 @@ impl PixelCommandEditor {
                 )));
             }
             let document = self.editor.snapshot().map_err(invalid)?;
+            let document = match legacy {
+                Some(file) => file.restore(&document).map_err(invalid)?,
+                None => document,
+            };
             let after = revision(&document);
             let links = self
                 .editor
