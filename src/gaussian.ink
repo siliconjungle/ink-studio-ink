@@ -461,6 +461,21 @@ record ContourCut {
     index_base: u32,
 }
 record ContourView { frame: ContourFrame, cut: ContourCut, }
+record ContourRoof { height: f32, amount: f32, }
+record ContourOcclusion { view: ContourView, roof: ContourRoof, }
+
+fn no_contour_roof() -> ContourRoof {
+    return ContourRoof { height: 0.0, amount: 0.0 };
+}
+
+fn cuts_roof(position: Vec3<f32>, moving: Bool, roof: ContourRoof) -> Bool {
+    if roof.amount <= 0.0 { return false; }
+    let height = roof.height + (if moving { 0.9 } else { 0.0 });
+    let closed = 1.0 - roof.amount;
+    if position.y <= height + closed * 7.0 { return false; }
+    if position.y > height + closed * 10.0 { return true; }
+    return position.y > height + closed * (7.0 + 3.0 * reveal_cell_noise(position));
+}
 
 fn hard_reveal(window: ContourWindow) -> ContourReveal {
     return ContourReveal { center: window.center, radius: window.radius, edge_width: 0.0, floor_height: 0.0 };
@@ -654,9 +669,10 @@ pub fn project_streamed_lit_contours(terrain: List<WorldGaussian>, actors: List<
 }
 
 fn project_field_actors(actors: List<WorldGaussian>, camera: Camera, light: ContourLight, reveal: ContourReveal,
-    motion: Bool) -> List<ContourEllipse> {
+    motion: Bool, roof: ContourRoof) -> List<ContourEllipse> {
     return actors.map_indexed(fn(i) => fn(splat) =>
-        if !contributes(splat) || (motion && outside_motion_reveal(splat.position, reveal)) { hidden_contour() }
+        if !contributes(splat) || (motion && outside_motion_reveal(splat.position, reveal))
+            || cuts_roof(splat.position, true, roof) { hidden_contour() }
         else { directional_contour(splat, camera, light, i < light.actor_rows) }).filter(fn(row) => row.alpha > 0.0);
 }
 
@@ -667,11 +683,19 @@ pub fn project_field_lit_contours(terrain: List<WorldGaussian>, actors: List<Wor
 
 pub fn project_cut_lit_contours(terrain: List<WorldGaussian>, actors: List<WorldGaussian>,
     camera: Camera, light: ContourLight, reveal: ContourReveal, starts: List<f32>, view: ContourView) -> List<ContourEllipse> {
+    return project_occluded_lit_contours(terrain, actors, camera, light, reveal, starts,
+        ContourOcclusion { view: view, roof: no_contour_roof() });
+}
+
+pub fn project_occluded_lit_contours(terrain: List<WorldGaussian>, actors: List<WorldGaussian>,
+    camera: Camera, light: ContourLight, reveal: ContourReveal, starts: List<f32>, occlusion: ContourOcclusion) -> List<ContourEllipse> {
+    let view = occlusion.view;
     let ground = terrain.map_indexed(fn(i) => fn(splat) =>
         if !contributes(splat) || outside_world_row(splat.position, i, reveal, starts, view.frame)
-            || cuts_foreground(splat.position, i, camera.back, view) { hidden_contour() }
+            || cuts_foreground(splat.position, i, camera.back, view)
+            || cuts_roof(splat.position, view.frame.clip_motion && i >= view.frame.terrain_rows, occlusion.roof) { hidden_contour() }
         else { directional_contour(splat, camera, light, false) }).filter(fn(row) => row.alpha > 0.0);
-    let posing = project_field_actors(actors, camera, light, reveal, view.frame.clip_motion);
+    let posing = project_field_actors(actors, camera, light, reveal, view.frame.clip_motion, occlusion.roof);
     return sort_contours(ground.concat(posing));
 }
 
@@ -724,10 +748,18 @@ pub fn project_field_prepared_contours(terrain: List<PreparedContourTerrain>, ac
 
 pub fn project_cut_prepared_contours(terrain: List<PreparedContourTerrain>, actors: List<WorldGaussian>,
     camera: Camera, light: ContourLight, reveal: ContourReveal, starts: List<f32>, view: ContourView) -> List<ContourEllipse> {
+    return project_occluded_prepared_contours(terrain, actors, camera, light, reveal, starts,
+        ContourOcclusion { view: view, roof: no_contour_roof() });
+}
+
+pub fn project_occluded_prepared_contours(terrain: List<PreparedContourTerrain>, actors: List<WorldGaussian>,
+    camera: Camera, light: ContourLight, reveal: ContourReveal, starts: List<f32>, occlusion: ContourOcclusion) -> List<ContourEllipse> {
+    let view = occlusion.view;
     let ground = terrain.map_indexed(fn(i) => fn(dab) =>
         if !contributes(dab.splat) || outside_world_row(dab.splat.position, i, reveal, starts, view.frame)
-            || cuts_foreground(dab.splat.position, i, camera.back, view) { hidden_contour() }
+            || cuts_foreground(dab.splat.position, i, camera.back, view)
+            || cuts_roof(dab.splat.position, view.frame.clip_motion && i >= view.frame.terrain_rows, occlusion.roof) { hidden_contour() }
         else { project_prepared_dab(dab, camera, light) }).filter(fn(row) => row.alpha > 0.0);
-    let posing = project_field_actors(actors, camera, light, reveal, view.frame.clip_motion);
+    let posing = project_field_actors(actors, camera, light, reveal, view.frame.clip_motion, occlusion.roof);
     return sort_contours(ground.concat(posing));
 }

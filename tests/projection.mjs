@@ -210,6 +210,30 @@ const cutCases = [
   { pure: 'project_cut_prepared_contours', args: [...preparedCut.slice(0, 6), sliced], expected: expectedSlice },
 ];
 for (const { pure, args, expected } of cutCases) assert.deepEqual(call(pure, args), expected);
+// The same altitude is cut in static rows and kept in the two moving ranges.
+const roofRows = [
+  { ...disc, position: [0, 0, -4], rgb: 31 },
+  { ...disc, position: [0, 2.3, -4], rgb: 32 },
+  { ...disc, position: [0, 2.3, -4], rgb: 33 },
+  { ...disc, position: [0, 3.0, -4], rgb: 34 },
+];
+const roofActors = [{ ...roofRows[2], rgb: 35 }, { ...roofRows[3], rgb: 36 }];
+const roofView = { frame: { ...cutFrame, terrain_rows: 2 }, cut: { ...cut, radius: 0 } };
+const roofArgs = [roofRows, roofActors, camera, lamp, { ...reveal, radius: 0 }, []];
+const roofPrepared = [call('prepare_contour_terrain', [roofRows]), ...roofArgs.slice(1)];
+const roofCases = [
+  [0, roofRows, roofActors],
+  [0.25, roofRows, roofActors],
+  [1, [roofRows[0], roofRows[2]], [roofActors[0]]],
+].flatMap(([amount, world, skinned]) => {
+  const options = { view: roofView, roof: { height: 2, amount } };
+  const expected = call('project_lit_contour_scene', [world, skinned, camera, lamp]);
+  return [
+    { pure: 'project_occluded_lit_contours', args: [...roofArgs, options], expected },
+    { pure: 'project_occluded_prepared_contours', args: [...roofPrepared, options], expected },
+  ];
+});
+for (const { pure, args, expected } of roofCases) assert.deepEqual(call(pure, args), expected);
 const sourceRow = [1, 2, 3, 0.5, 4, 5, 6, 0xf08010, 7, 8, 9, 128, 11, 12, 13, 14];
 const imported = [{ position: [1, 2, 3], covariance0: [4, 5, 6], covariance1: [7, 8, 9],
   reach: 3, rgb: 0xf08010, alpha: 0.5 }];
@@ -261,6 +285,7 @@ try {
     ...arrivalCases,
     ...motionCases,
     ...cutCases,
+    ...roofCases,
     { pure: 'import_builder_splats', args: [sourceRow], expected: imported, cpuOnly: true },
   ];
   writeFileSync(requestsPath, JSON.stringify(tests.map(({ pure, args }) => ({ pure, args }))));

@@ -6,6 +6,7 @@ const bundleURL = new URL('../build/gpu/', import.meta.url);
 const contourLightOff = { enabled: false, direction: [0, 1, 0], actor_center: [0, 0, 0], actor_rows: 0,
   ambient: [1, 1, 1], key: [0, 0, 0] };
 const contourRevealOff = { center: [0, 0], radius: 0, edge_width: 0, floor_height: 0 };
+const contourRoofOff = { height: 0, amount: 0 };
 const contourCutOff = { actor_base: [0, 0, 0], radius: 0, min_height: 0, slice_distance: 0, index_base: 0 };
 
 function assertEllipseLayout(view, contours) {
@@ -64,11 +65,12 @@ export async function createGaussianRenderer(device, format, { width, height, sp
     projection.input.contourLight = contourLightOff;
     projection.input.contourReveal = contourRevealOff;
     projection.input.terrainArrivals = Array(arrivalBlocks).fill(-100);
-    projection.input.contourView = {
-      frame: { clock: { time: 0, latest: 0, block_rows: 0 }, clip_motion: false, terrain_rows: 0 }, cut: contourCutOff,
+    projection.input.contourOcclusion = {
+      view: { frame: { clock: { time: 0, latest: 0, block_rows: 0 }, clip_motion: false, terrain_rows: 0 }, cut: contourCutOff },
+      roof: contourRoofOff,
     };
-    steps.at(-1).call = 'project_cut_lit_contours';
-    steps.at(-1).args.push(...['contourLight', 'contourReveal', 'terrainArrivals', 'contourView'].map(input => ({ input })));
+    steps.at(-1).call = 'project_occluded_lit_contours';
+    steps.at(-1).args.push(...['contourLight', 'contourReveal', 'terrainArrivals', 'contourOcclusion'].map(input => ({ input })));
   }
   const compactedWorld = projection.call === 'project_visible_sorted_world' && !contours && !hasSkin;
   const ink = await loadInk(bundleURL, { device, parallelU64Merge: compactedWorld });
@@ -172,7 +174,7 @@ export async function createGaussianRenderer(device, format, { width, height, sp
         if (!directional || !starts.every(Number.isFinite)) throw new Error('Invalid contour terrain arrival times');
         return session.writeChanged('terrainArrivals', starts);
       },
-      stageContourClock(time, latest, blockRows, terrainRows, cut = contourCutOff) {
+      stageContourClock(time, latest, blockRows, terrainRows, cut = contourCutOff, roof = contourRoofOff) {
         if (!directional || !Number.isFinite(time) || !Number.isFinite(latest) ||
             !Number.isInteger(blockRows) || blockRows < 0 || blockRows > 0xffffffff ||
             (terrainRows !== undefined && (!Number.isInteger(terrainRows) || terrainRows < 0 || terrainRows > 0xffffffff))) {
@@ -184,9 +186,12 @@ export async function createGaussianRenderer(device, format, { width, height, sp
             !Number.isInteger(cut.index_base) || cut.index_base < 0 || cut.index_base > 0xffffffff) {
           throw new Error('Invalid contour cut');
         }
-        return session.write('contourView', {
-          frame: { clock: { time, latest, block_rows: blockRows }, clip_motion: terrainRows !== undefined,
-            terrain_rows: terrainRows ?? 0 }, cut,
+        if (!Number.isFinite(roof.height) || !Number.isFinite(roof.amount) || roof.amount < 0 || roof.amount > 1) {
+          throw new Error('Invalid contour roof');
+        }
+        return session.write('contourOcclusion', {
+          view: { frame: { clock: { time, latest, block_rows: blockRows }, clip_motion: terrainRows !== undefined,
+            terrain_rows: terrainRows ?? 0 }, cut }, roof,
         });
       },
       async updateSkinCamera(value, { bones, light }) {

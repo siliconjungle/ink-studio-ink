@@ -1,5 +1,5 @@
 use ink_gpu_program::{Backend, Engine};
-use ink_studio_wgpu::{Bone, Camera, ContourClock, ContourCut, ContourReveal, ContourSettings, ContourWindow, GaussianRenderer, RigLight, WorldOrder};
+use ink_studio_wgpu::{Bone, Camera, ContourClock, ContourCut, ContourReveal, ContourRoof, ContourSettings, ContourWindow, GaussianRenderer, RigLight, WorldOrder};
 use serde_json::json;
 
 #[test]
@@ -170,6 +170,13 @@ fn computes_and_draws_from_the_same_device_buffer() {
     assert_eq!(foreground[center], foreground[0]);
     directional.stage_contour_view(clock, Some(1),
         Some(ContourCut { actor_base: [0.0, -0.65, -1.0], ..cut })).unwrap();
+    directional.project(&device).unwrap();
+    assert_eq!(draw_fixture(&device, &queue, &texture, &readback, &directional), data);
+    directional.stage_contour_occlusion(clock, Some(1), None, ContourRoof { height: -0.5, amount: 1.0 }).unwrap();
+    directional.project(&device).unwrap();
+    let hidden_roof = draw_fixture(&device, &queue, &texture, &readback, &directional);
+    assert_eq!(hidden_roof[center], hidden_roof[0]);
+    directional.stage_contour_occlusion(clock, Some(0), None, ContourRoof { height: -0.5, amount: 1.0 }).unwrap();
     directional.project(&device).unwrap();
     assert_eq!(draw_fixture(&device, &queue, &texture, &readback, &directional), data);
 }

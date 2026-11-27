@@ -94,6 +94,8 @@ gpu_record!(ContourClock { time: f32, latest: f32, block_rows: u32 });
 gpu_record!(ContourFrame { clock: ContourClock, clip_motion: bool, terrain_rows: u32 });
 gpu_record!(ContourCut { actor_base: [f32; 3], radius: f32, min_height: f32, slice_distance: f32, index_base: u32 });
 gpu_record!(ContourView { frame: ContourFrame, cut: ContourCut });
+gpu_record!(ContourRoof { height: f32, amount: f32 });
+gpu_record!(ContourOcclusion { view: ContourView, roof: ContourRoof });
 
 impl ContourCut {
     pub(super) const OFF: Self = Self {
@@ -123,6 +125,6 @@ pub(super) struct PackedInputs {
     pub(super) rig_light: Option<PackedInput>,
     pub(super) contour_light: Option<PackedInput>,
     pub(super) contour_reveal: Option<PackedInput>,
-    pub(super) contour_view: Option<PackedInput>,
+    pub(super) contour_occlusion: Option<PackedInput>,
     pub(super) terrain_arrivals: Option<PackedInput>,
 }
