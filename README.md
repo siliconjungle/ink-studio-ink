@@ -102,7 +102,7 @@ Set `tool: 'shape'` and pass `shape: { type, ...geometry }` for lines, quadratic
 
 Use `createPixelCommandEditor(source, { historyLimit })` for revision-checked, in-memory edit history. The browser API returns promises. `revision()` gives the document SHA-256 for an edit envelope with an `id`, `frame` or `cel`, and a raster `operation`. Add `destination: 'selections'` to save a named mask. `previewPatch(patch)` returns the prospective document and receipt without changing the draft. `apply(patch)` applies the edit, and `receipts()` returns version 1 SDK receipts for the current history branch. `replay(receipt)` validates the input revision and verifies the recorded targets and output before accepting the edit.
 
-`begin(label)` opens a group. `preview()` returns its draft document. `commit()` makes the group one undo step, and `cancel()` restores the initial revision and receipts. A rejected apply cancels its open group. `undo()` and `redo()` restore the artwork, selection masks, revision and receipts together. The journal covers retained raster edits, named raster masks, palette edits and whole-canvas transforms.
+`begin(label)` opens a group. `preview()` returns its draft document. `commit()` makes the group one undo step, and `cancel()` restores the initial revision and receipts. A rejected apply cancels its open group. `undo()` and `redo()` restore the artwork, selection masks, revision and receipts together. The journal covers retained raster edits, named raster masks, palette edits, whole-canvas transforms, guides and local timeline edits.
 
 `previewEdit(patch, { limit, exact })` compares one proposed local raster or selection edit with the current artwork. `previewChanges({ limit, exact })` compares the active draft with the artwork at `begin()`. The default limit includes the first 256 changed composite pixels in frame and row order, while `pixelCount` covers the entire change. Set `exact: true` to include all composited and raw layer changes and protection evidence. Both previews leave the draft and receipt history intact.
 
@@ -112,6 +112,10 @@ Use `destination: 'canvas'` for a whole-document edit. Set `operation.type` to `
 
 Use `destination: 'guides'` with `operation.upsert` for new or revised guides and `operation.remove` for guide IDs to delete. Preview reports include the added, modified and removed guides. The edit takes part in the same draft, undo and replay workflow as a canvas edit.
 
+Use `destination: 'timeline'` to add a frame, change its duration, set or remove a playback tag, or edit cel placement and holds. Put frame and layer addresses inside `operation`. Use `from: { frame, layer }` and `to: { frame, layer }` for `hold`, `copy` and `move`. `duplicate` also accepts a source alone and uses the next frame on the same layer. Set `replace: true` to replace an occupied destination. `unlink` makes a held cel independent and keeps any later holds pointing at their original drawing.
+
+Run `ink-studio-pixel timeline DOCUMENT` to inspect frame timing, playback order and linked cels in a file. Use `session timeline DIRECTORY` to inspect the active saved draft.
+
 Use `editor.execute(command)` with an `{ format: 'ink-studio/pixel-command', version: 1, action, … }` envelope. The shared Ink dispatcher handles local `draw`, `mask`, `recolor`, and `transform` aliases, guarded raster and selection operations, `validate`, `select`, `inspect`, `preview`, `replay`, and journal travel. Export the authored document, an indexed `stamp`, a `layer-deck`, or a `png`. Stamp and layer-deck exports include held-cel rasters, opacity, knockouts and the applicable palette and frame metadata.
 
 The `png` command returns base64 with `frame`, `cel`, `layer`, and `colorMode` options. Choose `auto` to use indexed PNG when the samples fit in 256 entries, `indexed` to require indexed PNG, or `rgba` for straight RGBA. PNGs retain editable palette order, aliases, names, locks, ramps, and knockout locations in the `inKD` chunk. For the PNG bytes directly, use `await editor.png(options)` in JavaScript or `PixelCommandEditor::png` with a JSON options string in Rust.
@@ -120,8 +124,8 @@ Run `inspect` with `at: [x, y]` to read the document revision, the visible layer
 
 Rust callers can pass a command JSON string to `PixelCommandEditor::execute` and receive the serialized reply. For an existing native journal sequence, pass `{ "op": "execute", "command": … }` in its steps. For a single command, `command-document` reads a request file with `{ "document": …, "command": … }` and prints the original reply shape. An invalid envelope exits with status 1. A rejected edit with a receipt or an invalid preview prints its JSON and exits with status 2.
 
-Use the native file commands to preview a local raster, selection, palette,
-or canvas patch, write it to disk, and replay its receipt.
+Use the native file commands to preview a local raster, selection, palette, canvas,
+guide or timeline patch, write it to disk, and replay its receipt.
 
 ```sh
 ink-studio-pixel preview drawing.json patch.json --exact --out review.json

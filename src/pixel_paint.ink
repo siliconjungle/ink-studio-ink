@@ -578,13 +578,18 @@ fn saved_frame(row: json.Json, edits: List<SavedCel>) -> json.Json {
 fn snapshot(source: json.Json, art: frame.Artwork) -> RasterSnapshot {
     let edited = art.cels.filter(fn(cel) => length(cel.runs) != 0);
     if length(edited) == 0 { return RasterSnapshot { source: source, edits: [] }; }
-    let exported = edited.map(fn(cel) => SavedCel { frame: cel.frame, layer: cel.layer, authored: json.object(cel.fields) });
-    let items = value.fields(source);
-    let frames = value.items(value.get(items, "frames"));
-    let doc = json.object(replace(items, "frames", json.array(frames.map(fn(row) => saved_frame(row, exported)))));
+    let doc = authored_cels(source, edited);
     let edits = edited.map(fn(cel) => SnapshotCel { frame: cel.frame, layer: cel.layer,
         marks: cel.runs.map(fn(row) => serialize_mark(art.ids, row)) });
     return RasterSnapshot { source: doc, edits: edits };
+}
+
+fn authored_cels(source: json.Json, edited: List<frame.Cel>) -> json.Json {
+    if length(edited) == 0 { return source; }
+    let exported = edited.map(fn(cel) => SavedCel { frame: cel.frame, layer: cel.layer, authored: json.object(cel.fields) });
+    let items = value.fields(source);
+    let frames = value.items(value.get(items, "frames"));
+    return json.object(replace(items, "frames", json.array(frames.map(fn(row) => saved_frame(row, exported)))));
 }
 
 fn revised_palette(source: json.Json, added: List<brush.Swatch>) -> json.Json {

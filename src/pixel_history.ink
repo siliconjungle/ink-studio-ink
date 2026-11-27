@@ -152,7 +152,7 @@ fn check_command(command: Command, current: Cursor, spec: List<json.Member>,
         return invalid(command, problem("stale-document", complaint, expected(revision, current.revision)));
     }
     if command.kind != "raster" && command.kind != "selections" && command.kind != "palette" && command.kind != "canvas" &&
-        command.kind != "guides" {
+        command.kind != "guides" && command.kind != "timeline" {
         return invalid(command, problem("unsupported-destination",
             string_concat("Pixel editor has not implemented destination ", command.destination), [member("destination", json.text(command.destination))]));
     }
@@ -160,7 +160,8 @@ fn check_command(command: Command, current: Cursor, spec: List<json.Member>,
         return invalid(command, problem("hybrid-owner-needs-source", "A hybrid edit needs a bound source destination", []));
     }
     if !legacy_file && wanted.fold(fn(item) => item != json.text(command.frame),
-        fn(unit) => !value.has(spec, "cel") && command.kind != "palette" && command.kind != "canvas" && command.kind != "guides") {
+        fn(unit) => !value.has(spec, "cel") && command.kind != "palette" && command.kind != "canvas" &&
+            command.kind != "guides" && command.kind != "timeline") {
         return invalid(command, problem("wrong-frame", "Pixel edit needs the observed frame ID", expected(wanted, command.frame)));
     }
     if value.has(spec, "sourceRevision") {
@@ -171,6 +172,9 @@ fn check_command(command: Command, current: Cursor, spec: List<json.Member>,
     }
     if command.kind == "guides" && (value.has(spec, "edits") || value.has(spec, "cel")) {
         return invalid(command, problem("invalid-edit", "A guide edit needs an upsert or remove operation", []));
+    }
+    if command.kind == "timeline" && (value.has(spec, "frame") || value.has(spec, "cel") || value.has(spec, "edits")) {
+        return invalid(command, problem("invalid-edit", "Timeline edits use frame and layer addresses inside their operation", []));
     }
     return check_raster_payload(command, spec);
 }

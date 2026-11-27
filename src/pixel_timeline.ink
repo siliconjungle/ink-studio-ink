@@ -114,11 +114,12 @@ fn link_groups(cels: List<frame.Cel>, origins: List<String>) -> List<json.Json> 
     return groups.map(fn(group) => json.object([history.member("source", group.source), history.member("holds", json.array(group.holds))]));
 }
 
-fn tag_error(id: String, message: String) -> String {
-    return string_concat("Playback tag ", string_concat(id, string_concat(": ", message)));
+fn tag_error(id: String, message: String, qualified: Bool) -> String {
+    return if qualified { string_concat("Playback tag ", string_concat(id, string_concat(": ", message))) }
+        else { message };
 }
 
-fn planned(row: List<json.Member>, ids: List<String>, durations: List<f64>, id: String) -> Result<json.Json, String> {
+fn planned(row: List<json.Member>, ids: List<String>, durations: List<f64>, id: String, qualified: Bool) -> Result<json.Json, String> {
     let direction = json.lookup(row, "direction").fold(fn(raw) => value.text(raw), fn(unit) => "forward");
     let has_repeat = value.has(row, "repeat");
     let repeats = value.word(value.get(row, "repeat"), 65535);
@@ -139,7 +140,7 @@ fn planned(row: List<json.Member>, ids: List<String>, durations: List<f64>, id: 
     let bounce = first != last && (direction == "ping-pong" || direction == "ping-pong-reverse");
     let passes: u32 = if has_repeat { repeats } else { if bounce { 2 } else { 1 } };
     return render_tag(row, ids, durations, direction, Playback { first: first, last: last,
-        reverse: reverse, bounce: bounce, loop: loop, passes: passes });
+        reverse: reverse, bounce: bounce, loop: loop, passes: passes }, qualified);
 }
 
 fn exposure_pass(plan: Playback, pass: u32, order: Buffer<u32>) -> Buffer<u32> {
@@ -151,26 +152,46 @@ fn exposure_pass(plan: Playback, pass: u32, order: Buffer<u32>) -> Buffer<u32> {
         out.push(if backward { plan.last - i - start } else { plan.first + i + start }));
 }
 
-fn render_tag(row: List<json.Member>, ids: List<String>, durations: List<f64>, direction: String, plan: Playback) -> Result<json.Json, String> {
+fn playback_duration(plan: Playback, durations: List<f64>) -> f64 {
+    let width = plan.last - plan.first + 1;
+    if !plan.bounce {
+        let span = foldl(durations.drop(plan.first).take(width), 0.0f64, fn(n) => fn(sum) => sum + n);
+        return span * f64_from_u32(plan.passes);
+    }
+    let reversed_last = plan.reverse != (rem_or(plan.passes - 1, 2, 0) != 0);
+    let joined = quot_or(plan.passes, 2, 0);
+    let other = quot_or(plan.passes - 1, 2, 0);
+    let first_joins = if plan.reverse { joined } else { other };
+    let last_joins = if plan.reverse { other } else { joined };
+    let first = plan.passes - first_joins - (if plan.loop && reversed_last { 1 } else { 0 });
+    let last = plan.passes - last_joins - (if plan.loop && !reversed_last { 1 } else { 0 });
+    let middle = foldl(durations.drop(plan.first + 1).take(width - 2), 0.0f64, fn(n) => fn(sum) => sum + n);
+    return middle * f64_from_u32(plan.passes) + durations.at_or(plan.first, 0.0f64) * f64_from_u32(first) +
+        durations.at_or(plan.last, 0.0f64) * f64_from_u32(last);
+}
+
+fn render_tag(row: List<json.Member>, ids: List<String>, durations: List<f64>, direction: String, plan: Playback,
+    validate_only: Bool) -> Result<json.Json, String> {
     let width = plan.last - plan.first + 1;
     let count = width * plan.passes - (if plan.bounce { plan.passes - 1 + (if plan.loop { 1 } else { 0 }) } else { 0 });
     let id = value.text(value.get(row, "id"));
     if value.has(row, "repeat") && count > 65536 {
-        return Err(tag_error(id, "A finite playback tag can contain up to 65,536 frame exposures"));
+        return Err(tag_error(id, "A finite playback tag can contain up to 65,536 frame exposures", validate_only));
     }
+    let duration = playback_duration(plan, durations);
+    if duration > 9007199254740991.0f64 {
+        return Err(tag_error(id, "Playback steps need positive durations within the safe time range", validate_only));
+    }
+    if validate_only { return Ok(json.object(row)); }
     let start: Buffer<u32> = Buffer.empty();
     let order = repeat_until(plan.passes, start, fn(out) => false, fn(i) => fn(out) => exposure_pass(plan, i, out)).freeze();
-    let duration = foldl(order, 0.0f64, fn(i) => fn(sum) => sum + durations.at_or(i, 0.0f64));
-    if duration > 9007199254740991.0f64 {
-        return Err(tag_error(id, "Playback steps need positive durations within the safe time range"));
-    }
     let fields = row.filter(fn(item) => item.key != "direction" && item.key != "loop");
     return Ok(json.object(fields.concat([history.member("direction", json.text(direction)), history.member("loop", json.boolean(plan.loop)),
         history.member("first", inspection.number(plan.first)), history.member("last", inspection.number(plan.last)),
         history.member("durationMs", number(duration)), history.member("order", json.array(order.map(fn(i) => json.text(ids.at_or(i, "")))))])));
 }
 
-fn append_tag(ids: List<String>, durations: List<f64>, raw: json.Json, progress: Result<List<json.Json>, String>)
+fn append_tag(ids: List<String>, durations: List<f64>, raw: json.Json, progress: Result<List<json.Json>, String>, qualified: Bool)
     -> Result<List<json.Json>, String> {
     let before = progress?;
     let row = json.members(raw).map_err(fn(issue) => "Playback tags need unique IDs and valid labels, directions and repeat settings")?;
@@ -179,17 +200,17 @@ fn append_tag(ids: List<String>, durations: List<f64>, raw: json.Json, progress:
         fn(prior) => fn(found) => value.get(value.fields(prior), "id") == id) {
         return Err("Playback tags need unique IDs and valid labels, directions and repeat settings");
     }
-    let tag = planned(row, ids, durations, value.text(id))?;
+    let tag = planned(row, ids, durations, value.text(id), qualified)?;
     return Ok(before.concat([tag]));
 }
 
-fn describe_tags(doc: List<json.Member>, ids: List<String>, durations: List<f64>) -> Result<List<json.Json>, String> {
+fn describe_tags(doc: List<json.Member>, ids: List<String>, durations: List<f64>, qualified: Bool) -> Result<List<json.Json>, String> {
     if !value.has(doc, "tags") { return Ok([]); }
     let issue = "Use a list of up to 128 playback tags";
     let tags = json.elements(value.get(doc, "tags")).map_err(fn(error) => issue)?;
     if length(tags) > 128 { return Err(issue); }
     let initial: Result<List<json.Json>, String> = Ok([]);
-    return foldl(tags, initial, fn(raw) => fn(out) => append_tag(ids, durations, raw, out));
+    return foldl(tags, initial, fn(raw) => fn(out) => append_tag(ids, durations, raw, out, qualified));
 }
 
 fn indexed_cell(cels: List<frame.Cel>, origins: List<String>, id: String, spec: json.Json, index: u32) -> json.Json {
@@ -211,7 +232,7 @@ fn describe(source: json.Json, art: frame.Artwork, revision: String) -> Result<j
     if timing.elapsed > 9007199254740991.0f64 { return Err("Pixel timeline duration exceeds the safe millisecond range"); }
     let frame_rows = timing.rows.freeze();
     let durations = frames.map(fn(row) => value.number(value.get(value.fields(row), "durationMs")));
-    let tags = describe_tags(doc, art.frames, durations)?;
+    let tags = describe_tags(doc, art.frames, durations, false)?;
     let origins = art.cels.map(fn(cel) => if value.has(cel.fields, "hold") { frame.resolved_cel(art.cels, cel).id } else { "" });
     let raster = art.layers.map_indexed(fn(i) => fn(row) => if row.kind == "group" { 4294967295 } else { i })
         .filter(fn(i) => i != 4294967295);

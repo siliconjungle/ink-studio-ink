@@ -26,13 +26,14 @@ import "pixel_inspect.ink" as inspection;
 import "pixel_guides.ink" as guides;
 import "pixel_sample.ink" as sample;
 import "pixel_timeline.ink" as timeline;
+import "pixel_timeline_edit.ink" as timeline_edit;
 
 record Layer { id: String, kind: String, parent: String, }
 record Cel { id: String, hold: String, }
 record Frame { id: String, duration: u64, cels: List<Cel>, }
 record Identifier { name: String, slot: u32, }
 record NameIndex { buckets: Map<u64, List<Identifier>>, duplicate: String, }
-record Visits { seen: Map<u32, u32>, issue: String, }
+record Visits { seen: Map<u32, u32>, issue: String, code: String, cel: String, source: String, }
 record HoldWalk { visits: Visits, path: Buffer<u32>, current: u32, }
 record Opened { document: json.Json, legacy: Bool, }
 record FrameRaster { width: u32, height: u32, frame: String, slots: List<i32>, alpha: List<u32>,
@@ -338,7 +339,10 @@ fn visit_hold(walk: HoldWalk, stamp: u32, targets: List<u32>, cels: List<Cel>) -
     let next = targets.at_or(src - 1, 0);
     let issue = if marker == stamp { string_concat("Pixel cel holds contain a cycle at ", cel.id) }
         else { if next == 4294967295 { string_concat("Unknown hold source cel ", cel.hold) } else { "" } };
-    let visits = Visits { seen: walk.visits.seen.set(src, stamp), issue: issue };
+    let code = if issue == "" { "" } else { if marker == stamp { "cyclic-cel-hold" } else { "missing-cel-source" } };
+    let origin = if issue == "" { "" } else { cels.at_or(stamp - 1, cel).id };
+    let source = if issue == "" { "" } else { if marker == stamp { cel.id } else { cel.hold } };
+    let visits = Visits { seen: walk.visits.seen.set(src, stamp), issue: issue, code: code, cel: origin, source: source };
     return HoldWalk { visits: visits, current: next, path: walk.path.push(src) };
 }
 
@@ -348,12 +352,10 @@ fn trace_hold(targets: List<u32>, cels: List<Cel>, start: u32, visits: Visits) -
     let walk = repeat_until(length(cels) + 1, origin, fn(w) => w.current == 0 || w.visits.issue != "",
         fn(i) => fn(w) => visit_hold(w, start, targets, cels));
     let seen = foldl(walk.path.freeze(), walk.visits.seen, fn(id) => fn(map) => map.set(id, 4294967295));
-    return Visits { issue: walk.visits.issue, seen: seen };
+    return Visits { seen: seen, issue: walk.visits.issue, code: walk.visits.code, cel: walk.visits.cel, source: walk.visits.source };
 }
 
-fn validate_holds(cels: List<Cel>) -> Result<Unit, String> {
-    let index = index_names(cels.map(fn(cel) => cel.id));
-    if index.duplicate != "" { return Err(string_concat("Duplicate pixel cel ID ", index.duplicate)); }
+fn walk_holds(cels: List<Cel>, index: NameIndex) -> Visits {
     var targets: Buffer<u32> = Buffer.empty();
     for cel in cels {
         let found = if cel.hold == "" { 0 } else { find_slot(index.buckets.get_or(labels.id_hash(cel.hold), []), cel.hold) };
@@ -361,8 +363,14 @@ fn validate_holds(cels: List<Cel>) -> Result<Unit, String> {
         targets = targets.push(slot);
     }
     let destinations = targets.freeze();
-    let visits = repeat_until(length(cels), Visits { seen: Map.empty(), issue: "" },
+    return repeat_until(length(cels), Visits { seen: Map.empty(), issue: "", code: "", cel: "", source: "" },
         fn(v) => v.issue != "", fn(i) => fn(v) => trace_hold(destinations, cels, i + 1, v));
+}
+
+fn validate_holds(cels: List<Cel>) -> Result<Unit, String> {
+    let index = index_names(cels.map(fn(cel) => cel.id));
+    if index.duplicate != "" { return Err(string_concat("Duplicate pixel cel ID ", index.duplicate)); }
+    let visits = walk_holds(cels, index);
     return if visits.issue == "" { Ok(()) } else { Err(visits.issue) };
 }
 
@@ -671,6 +679,27 @@ change edit_pixel_editor_guides(operation: json.Json) -> Result<json.Json, json.
     let target = preview.guide_target(EditorSource, revised);
     EditorSource = revised;
     return Ok(target);
+}
+
+change edit_pixel_editor_timeline(operation: json.Json) -> Result<json.Json, json.Json>
+    reads(EditorSource, EditorArtwork) writes(EditorSource, EditorArtwork, EditorImage, EditorPaint) {
+    let edited = timeline_edit.apply(EditorSource, EditorArtwork, operation)?;
+    if edited.changes_art {
+        let checked = open_pixel_document(edited.source).map_err(fn(issue) => timeline_issue(edited.artwork, issue))?;
+        let protected = timeline_edit.check_protection(EditorSource, EditorArtwork, edited.artwork)?;
+        EditorArtwork = edited.artwork;
+        EditorImage = None;
+        EditorPaint = paint.empty_cache();
+    }
+    EditorSource = edited.source;
+    return Ok(edited.target);
+}
+
+fn timeline_issue(art: frame_raster.Artwork, issue: String) -> json.Json {
+    let cels = art.cels.map(fn(cel) => Cel { id: cel.id, hold: text(field(cel.fields, "hold")) });
+    let visits = walk_holds(cels, index_names(cels.map(fn(cel) => cel.id)));
+    if visits.issue != issue || visits.code == "" { return timeline_edit.invalid(issue); }
+    return history.problem(visits.code, issue, [member("cel", json.text(visits.cel)), member("source", json.text(visits.source))]);
 }
 
 change edit_pixel_editor_canvas(operation: json.Json, scoped: Bool) -> Result<json.Json, String>

@@ -4,6 +4,7 @@ import "std:json" as json;
 import "pixel_frame.ink" as frame;
 import "pixel_mask.ink" as mask;
 import "pixel_paint.ink" as paint;
+import "pixel_selection.ink" as selection;
 import "pixel_values.ink" as value;
 
 record Page { source: json.Json, art: frame.Artwork, }
@@ -165,11 +166,14 @@ fn same_cel(before: List<frame.Cel>, after: List<frame.Cel>, id: String, layer: 
 }
 
 fn compare_frame(before: frame.Artwork, after: frame.Artwork, a: List<paint.Detail>, b: List<paint.Detail>,
-    id: String, index: u32, same_stack: Bool, settings: Settings, out: Scan) -> Scan {
-    let left_details = paint.active_details(a, index);
+    id: String, index: u32, prior_index: u32, same_stack: Bool, settings: Settings, out: Scan) -> Scan {
+    let left_details = paint.active_details(a, prior_index);
     let right_details = paint.active_details(b, index);
-    if same_stack && left_details == right_details && unchanged(before, after, id) { return out; }
-    let views = frame_pair(before, after, id, left_details, right_details, settings.exact);
+    let existing = prior_index < length(before.frames);
+    if existing && same_stack && left_details == right_details && unchanged(before, after, id) {
+        return out;
+    }
+    let views = frame_pair(before, after, id, left_details, right_details, existing, settings.exact);
     return match views {
         Ok(pair) => scan_frame(pair, before.colors, after.colors, settings, out),
         Err(issue) => Scan { ..out, issue: issue },
@@ -184,8 +188,10 @@ fn scan_frame(pair: Pair, a: List<u32>, b: List<u32>, settings: Settings, out: S
 }
 
 fn frame_pair(before: frame.Artwork, after: frame.Artwork, id: String,
-    a: List<paint.Detail>, b: List<paint.Detail>, exact: Bool) -> Result<Pair, String> {
-    let left = raster(before, id, a, exact)?;
+    a: List<paint.Detail>, b: List<paint.Detail>, existing: Bool, exact: Bool) -> Result<Pair, String> {
+    let prior: Result<Raster, String> = if existing { raster(before, id, a, exact) }
+        else { Ok(index_view(frame.empty_artwork(), id, [], frame.PreviewView { pixels: [], trace: [], uses_alpha: false, sources: [] })) };
+    let left = prior?;
     let right = raster(after, id, b, exact)?;
     let grid = mask.Grid { width: max_word(before.grid.width, after.grid.width),
         height: max_word(before.grid.height, after.grid.height) };
@@ -232,11 +238,23 @@ fn grid_array(g: mask.Grid) -> json.Json {
     return json.array([json.number(frame.decimal(g.width)), json.number(frame.decimal(g.height))]);
 }
 
-fn changed_grids(before: frame.Artwork, after: frame.Artwork, exact: Bool) -> List<json.Json> {
-    if !exact || before.grid == after.grid { return []; }
+fn changed_grids(before: frame.Artwork, after: frame.Artwork, added: List<String>, exact: Bool) -> List<json.Json> {
+    if !exact || (before.grid == after.grid && length(added) == 0) { return []; }
     let left = grid_array(before.grid);
     let right = grid_array(after.grid);
-    return after.frames.map(fn(id) => json.object([member("frame", json.text(id)), member("before", left), member("after", right)]));
+    let common: List<String> = if before.grid == after.grid { [] } else { before.frames };
+    return common.map(fn(id) => grid_change(id, left, right))
+        .concat(added.map(fn(id) => grid_change(id, json.null(), right)));
+}
+
+fn grid_change(id: String, before: json.Json, after: json.Json) -> json.Json {
+    return json.object([member("frame", json.text(id)), member("before", before), member("after", after)]);
+}
+
+fn append_new_frames<T>(rows: List<T>, added: List<String>, frame_id: fn(T) -> String) -> List<T> {
+    if length(added) == 0 { return rows; }
+    return rows.filter(fn(row) => !frame.known_frame(added, frame_id(row)))
+        .concat(rows.filter(fn(row) => frame.known_frame(added, frame_id(row))));
 }
 
 fn guide_rows(source: json.Json) -> List<json.Member> {
@@ -277,7 +295,10 @@ fn compare(before: frame.Artwork, before_source: json.Json, after: frame.Artwork
     let a = paint.protections(before_source, before)?;
     let b = paint.protections(after_source, after)?;
     let details = if settings.exact { detail_diff(before_source, after_source) } else { [] };
-    let grids = changed_grids(before, after, settings.exact);
+    let same_frames = before.frames == after.frames;
+    let added: List<String> = if !settings.exact || same_frames { [] }
+        else { after.frames.filter(fn(id) => !frame.known_frame(before.frames, id)) };
+    let grids = changed_grids(before, after, added, settings.exact);
     let guides = changed_guides(before_source, after_source);
     if before == after && a == b {
         return Ok(Report { pixelCount: 0, pixels: [], exact: Exact { cells: [], protectedCells: [], details: details,
@@ -287,8 +308,11 @@ fn compare(before: frame.Artwork, before_source: json.Json, after: frame.Artwork
     let frames = after.frames;
     let initial = Scan { count: 0, rows: Buffer.empty(), cells: Buffer.empty(), protected_cells: Buffer.empty(), issue: "" };
     let result = repeat_until(length(frames), initial, fn(next) => next.issue != "", fn(i) => fn(out) =>
-        compare_frame(before, after, a, b, frames.at_or(i, ""), i, same_stack, settings, out));
+        compare_frame(before, after, a, b, frames.at_or(i, ""), i,
+            if same_frames { i } else { selection.named_slot(before.frames, frames.at_or(i, "")) }, same_stack, settings, out));
     if result.issue != "" { return Err(result.issue); }
+    let cells = append_new_frames<CellChange>(result.cells.freeze(), added, fn(row) => row.site.frame);
+    let protected_cells = append_new_frames<Site>(result.protected_cells.freeze(), added, fn(row) => row.frame);
     return Ok(Report { pixelCount: result.count, pixels: result.rows.freeze(),
-        exact: Exact { cells: result.cells.freeze(), protectedCells: result.protected_cells.freeze(), details: details, grids: grids }, guides: guides });
+        exact: Exact { cells: cells, protectedCells: protected_cells, details: details, grids: grids }, guides: guides });
 }

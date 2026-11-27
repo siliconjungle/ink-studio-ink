@@ -94,6 +94,13 @@ impl PixelFileEditor {
         }
     }
 
+    pub fn timeline(&mut self) -> Result<String, PixelEditError> {
+        if self.legacy.is_some() {
+            return Err("Upgrade to a version 2 document to inspect the cel timeline".to_owned().into());
+        }
+        self.editor.timeline()
+    }
+
     pub fn edit(
         &mut self,
         patch: &str,

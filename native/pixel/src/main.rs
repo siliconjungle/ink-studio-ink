@@ -7,7 +7,7 @@ mod session_cli;
 mod session_commands;
 
 use ink_studio_pixel::{
-    IndexedSelectionRaster, OpenedDocument, PixelEditor, mask_pixels, open_pixel_document,
+    IndexedSelectionRaster, OpenedDocument, PixelEditor, PixelFileEditor, mask_pixels, open_pixel_document,
     open_pixel_png, rasterize_pixel_frame, select_pixel_mask_with_raster,
 };
 use serde::Deserialize;
@@ -148,7 +148,7 @@ fn select(path: std::ffi::OsString, packed: bool) -> Result<(), String> {
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel import-png FILE | ink-studio-pixel select|select-mask|raster|select-document|paint-document|save-selection-document|capture-brush-document|copy-selection-document|journal-document|command-document REQUEST | ink-studio-pixel session ACTION DIRECTORY | ink-studio-pixel palette ACTION SOURCE --out OUTPUT | ink-studio-pixel edit|preview|replay DOCUMENT INPUT [--out OUTPUT]";
+    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel timeline DOCUMENT | ink-studio-pixel import-png FILE | ink-studio-pixel select|select-mask|raster|select-document|paint-document|save-selection-document|capture-brush-document|copy-selection-document|journal-document|command-document REQUEST | ink-studio-pixel session ACTION DIRECTORY | ink-studio-pixel palette ACTION SOURCE --out OUTPUT | ink-studio-pixel edit|preview|replay DOCUMENT INPUT [--out OUTPUT]";
     let path = args.next().ok_or(usage)?;
     if let Some(action @ ("edit" | "preview" | "replay")) = path.to_str() {
         return file_edit_cli::run(action, args);
@@ -162,6 +162,12 @@ fn run() -> Result<(), String> {
         if path == "import-png" {
             let image = std::fs::read(request).map_err(|error| error.to_string())?;
             return print_opened(open_pixel_png(&image)?);
+        }
+        if path == "timeline" {
+            let source = std::fs::read_to_string(request).map_err(|error| error.to_string())?;
+            let report = PixelFileEditor::new(&source)?.timeline().map_err(|error| error.to_string())?;
+            println!("{report}");
+            return Ok(());
         }
         if path == "select" || path == "select-mask" {
             return select(request, path == "select-mask");

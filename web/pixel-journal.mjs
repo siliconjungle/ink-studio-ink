@@ -192,6 +192,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
   const guarded = bind('replace_guarded_pixels');
   const paletteEdit = bind('edit_pixel_editor_palette');
   const guideEdit = bind('edit_pixel_editor_guides');
+  const timelineEdit = bind('edit_pixel_editor_timeline');
   const canvasEdit = bind('edit_pixel_editor_canvas');
   const plan = bind('plan_pixel_command'), describe = bind('describe_pixel_command_document');
   const inspect = bind('inspect_pixel_command');
@@ -312,7 +313,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
           { expected: expected.inputs.documentRevision, actual: cursor.revision });
       }
       const gate = check(codec.fromJS(gateFields(patch)));
-      if (gate.frame) command.frame = ['canvas', 'palette'].includes(gate.kind) ? null : gate.frame;
+      if (gate.frame) command.frame = ['canvas', 'palette', 'timeline'].includes(gate.kind) ? null : gate.frame;
       const conflict = codec.toJS(gate.conflict);
       if (conflict) throw Object.assign(new Error(conflict.message), { conflict });
       if (shot !== undefined) {
@@ -328,6 +329,7 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
         : gate.kind === 'canvas' ? applyCanvas(patch)
         : gate.kind === 'palette' ? applyPalette(patch)
         : gate.kind === 'guides' ? decodeEdit(guideEdit(codec.fromJS(patch.operation ?? null)))
+        : gate.kind === 'timeline' ? decodeEdit(timelineEdit(codec.fromJS(patch.operation ?? null)))
         : gate.kind === 'selections' ? editor.saveSelection(patch.operation, { frame: gate.frame })
         : editor.paint(patch.operation, { frame: gate.frame, cel: gate.cel.Some });
       target.destination = gate.destination;

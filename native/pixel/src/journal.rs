@@ -899,14 +899,14 @@ impl PixelCommandEditor {
             return Json::from_ink(&target.to_json(), Limits::default())
                 .and_then(|row| json_value(&row))
                 .map_err(invalid);
-        } else if kind == "palette" || kind == "guides" {
+        } else if matches!(kind, "palette" | "guides" | "timeline") {
             let encoded = compiled_json(operation, &|kind, scalar, flag, values, keys| {
                 self.editor.program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
             });
-            let result = if kind == "guides" {
-                self.editor.program.invoke_view_l_edit_pixel_editor_guides(encoded)
-            } else {
-                self.editor.program.invoke_view_l_edit_pixel_editor_palette(encoded, scoped)
+            let result = match kind {
+                "guides" => self.editor.program.invoke_view_l_edit_pixel_editor_guides(encoded),
+                "timeline" => self.editor.program.invoke_view_l_edit_pixel_editor_timeline(encoded),
+                _ => self.editor.program.invoke_view_l_edit_pixel_editor_palette(encoded, scoped),
             }.map_err(invalid)?.result;
             let decode = |output: &_| {
                 Json::from_ink(output, Limits::default()).and_then(|row| json_value(&row)).map_err(invalid)
@@ -1072,7 +1072,7 @@ impl PixelCommandEditor {
                 self.editor.program.invoke_view_l_resolve_pixel_edit(meta).map_err(invalid)?.result
             };
             if !gate.l_frame.is_empty() {
-                common["command"]["frame"] = if legacy.is_some() || matches!(gate.l_kind.as_str(), "canvas" | "palette") {
+                common["command"]["frame"] = if legacy.is_some() || matches!(gate.l_kind.as_str(), "canvas" | "palette" | "timeline") {
                     Value::Null
                 } else {
                     json!(&gate.l_frame)
@@ -1095,6 +1095,9 @@ impl PixelCommandEditor {
             }
             if legacy.is_some() && gate.l_kind == "palette" {
                 return Err(invalid("Upgrade the document to version 2 before editing the palette".into()));
+            }
+            if legacy.is_some() && gate.l_kind == "timeline" {
+                return Err(invalid("Upgrade to a version 2 document before editing the cel timeline".into()));
             }
             self.editor.program.begin_transaction().map_err(invalid)?;
             started = true;
