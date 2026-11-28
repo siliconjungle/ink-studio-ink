@@ -32,6 +32,7 @@ const still = {
   drawing: { mirrorX: true },
   notes: { reviewed: ['front', 'outline'] },
 };
+const knockoutOnly = { ...size, ...palette, rows: rowPixels, knockouts: [5, 16, 17, 29] };
 const strokeCommands = [
   { slot: 2, shape: { type: 'rect', rect: [-0.25, 1.15, 5.5, 2.4],
     falloff: { type: 'linear', from: [0, 1], to: [6, 1], opacity: [1, 0.4] } } },
@@ -104,6 +105,7 @@ async function verify(source) {
   return document;
 }
 const stillDocument = await verify(still);
+const knockoutOnlyDocument = await verify(knockoutOnly);
 assert.deepEqual(stillDocument.palette.outline, { color: '#112233', label: 'Night ink' });
 assert.deepEqual(stillDocument.palette.light, { color: '#5BFFAB', locked: true });
 assert.equal(stillDocument.frames[0].durationMs, 71);
@@ -125,7 +127,8 @@ for (const frame of layered.frames) {
 const edit = createPixelCommandEditor;
 const op = (action, fields = {}) => ({ format: 'ink-studio/pixel-command', version: 1, action, ...fields });
 for (const [source, document, target] of [
-  [still, stillDocument, 'image'], [animation, animated, 'image'], [deck, layered, 'paint'],
+  [still, stillDocument, 'image'], [knockoutOnly, knockoutOnlyDocument, 'image'],
+  [animation, animated, 'image'], [deck, layered, 'paint'],
 ]) {
   const editor = await edit(document);
   const frame = document.frames[0].id;

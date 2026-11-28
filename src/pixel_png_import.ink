@@ -135,8 +135,11 @@ fn foreign(layout: input.Layout, samples: input.Samples) -> Result<Decoded, Stri
 }
 
 fn slots_valid(slots: List<i32>, size: u32, count: u32) -> Bool {
+    let last = if count == 0 { -1 } else {
+        i32_from_f64(f64_from_u32(count - 1)).fold(fn(slot) => slot, fn(unit) => 2147483647)
+    };
     return length(slots) == size && fold_until(slots, true, fn(slot) => fn(ok) => !ok,
-        fn(slot) => fn(ok) => ok && (slot == -1 || (slot >= 0 && slot_word(slot) < count)));
+        fn(slot) => fn(ok) => slot >= -1 && slot <= last);
 }
 
 fn alpha_valid(alpha: List<u32>, size: u32) -> Bool {
@@ -233,9 +236,11 @@ fn place_span(keys: List<u32>, words: List<u32>, i: u32, out: Scatter) -> Scatte
 }
 
 fn packed_marks(width: u32, slots: List<i32>, alpha: List<u32>, knockouts: List<u32>) -> PackedMarks {
+    let count = if length(alpha) < length(slots) { length(alpha) } else { length(slots) };
+    if count == 0 && length(knockouts) == 0 { return PackedMarks { marks: [], spans: [] }; }
     let start = Runs { pending: Span { start: 0, length: 0, key: 256 }, words: Buffer.empty(), keys: Buffer.empty(),
         order: Buffer.empty(), counts: buffer_fill(256, 0) };
-    let alpha_runs: Runs = repeat_until(length(slots), start, fn(out) => false, fn(i) => fn(out) =>
+    let alpha_runs: Runs = repeat_until(count, start, fn(out) => false, fn(i) => fn(out) =>
         alpha_range(width, slots, alpha, i, out));
     let finished = foldl(knockouts, flush_span(width, alpha_runs), fn(p) => fn(out) => range_cell(width, p, 255, out));
     let ranges = flush_span(width, finished);

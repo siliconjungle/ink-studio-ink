@@ -69,6 +69,8 @@ fn site(pair: Pair, p: u32) -> Site {
 }
 
 record Side { cell: frame.Pixel, trace: u32, locked: Bool, inside: Bool, }
+record RawReview { before: frame.RawLayer, after: frame.RawLayer, before_colors: List<u32>, after_colors: List<u32>,
+    same_grid: Bool, same_pigments: Bool, }
 
 fn at_grid(grid: mask.Grid, point: Vec2<u32>) -> u32 {
     if point.x >= grid.width || point.y >= grid.height { return 4294967295; }
@@ -123,11 +125,11 @@ fn describe_raw(r: Raster, layer: u32, slot: i32, alpha: u32, clip: u32, rgb: u3
         rgb: rgb, alpha: Some(alpha), protected: false, knockout: slot == -2, clip: clip });
 }
 
-fn raw_pixel(pair: Pair, palette_a: List<u32>, palette_b: List<u32>, a: frame.RawLayer, b: frame.RawLayer,
-    p: u32, out: Scan) -> Scan {
-    let at = site(pair, p);
-    let src = at_grid(pair.before.grid, at.at);
-    let dst = at_grid(pair.after.grid, at.at);
+fn raw_pixel(pair: Pair, review: RawReview, p: u32, out: Scan) -> Scan {
+    let a = review.before;
+    let b = review.after;
+    let src = if review.same_grid { p } else { at_grid(pair.before.grid, site(pair, p).at) };
+    let dst = if review.same_grid { p } else { at_grid(pair.after.grid, site(pair, p).at) };
     let left = a.view.slots.at_or(src, -1);
     let right = b.view.slots.at_or(dst, -1);
     if left == -1 && right == -1 { return out; }
@@ -135,11 +137,12 @@ fn raw_pixel(pair: Pair, palette_a: List<u32>, palette_b: List<u32>, a: frame.Ra
     let alpha_b = if right < 0 { 0 } else { b.view.alpha.at_or(dst, 255) };
     let clip_a = a.view.clipping.at_or(src, 255);
     let clip_b = b.view.clipping.at_or(dst, 255);
-    let rgb_a = if left < 0 { 0 } else { frame.color_at(palette_a, left) };
-    let rgb_b = if right < 0 { 0 } else { frame.color_at(palette_b, right) };
+    if review.same_pigments && left == right && alpha_a == alpha_b && clip_a == clip_b { return out; }
+    let rgb_a = if left < 0 { 0 } else { frame.color_at(review.before_colors, left) };
+    let rgb_b = if right < 0 { 0 } else { frame.color_at(review.after_colors, right) };
     if (left >= 0 && right >= 0 || left == right) && alpha_a == alpha_b && clip_a == clip_b && rgb_a == rgb_b &&
         same_location(pair, a.owner, b.owner) && same_swatch(pair, left, right) { return out; }
-    let row = CellChange { site: at, layer: pair.after.layers.at_or(b.owner, ""),
+    let row = CellChange { site: site(pair, p), layer: pair.after.layers.at_or(b.owner, ""),
         before: describe_raw(pair.before, a.owner, left, alpha_a, clip_a, rgb_a),
         after: describe_raw(pair.after, b.owner, right, alpha_b, clip_b, rgb_b) };
     return Scan { ..out, cells: out.cells.push(row) };
@@ -149,9 +152,13 @@ fn scan_layer(pair: Pair, a: List<u32>, b: List<u32>, i: u32, out: Scan) -> Scan
     let empty = frame.RawLayer { owner: 0, view: frame.no_capture() };
     let left = pair.before.view.sources.at_or(i, empty);
     let right = pair.after.view.sources.at_or(i, empty);
-    if left == right && pair.same_owners && pair.same_swatches && a == b { return out; }
+    let same_palette = pair.same_swatches && a == b;
+    if left == right && pair.same_owners && same_palette { return out; }
+    let review = RawReview { before: left, after: right, before_colors: a, after_colors: b,
+        same_grid: pair.before.grid == pair.after.grid,
+        same_pigments: same_palette && same_location(pair, left.owner, right.owner) };
     return repeat_until(mask.size(pair.grid), out, fn(next) => false,
-        fn(p) => fn(next) => raw_pixel(pair, a, b, left, right, p, next));
+        fn(p) => fn(next) => raw_pixel(pair, review, p, next));
 }
 
 fn unchanged(before: frame.Artwork, after: frame.Artwork, id: String) -> Bool {

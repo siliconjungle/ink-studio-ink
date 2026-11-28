@@ -301,7 +301,13 @@ function restoreSlotPlanes(document, owners, pixels) {
   const frames = new Map(document.frames.map(frame => [frame.id, frame]));
   const ids = Object.keys(document.palette);
   for (const owner of owners) {
-    frames.get(owner.frame).cels[owner.layer].slots = Array.from(pixels(owner), slot => slot < 0 ? null : ids[slot]);
+    const plane = pixels(owner);
+    const slots = new Array(plane.length);
+    for (let i = 0; i < plane.length; i++) {
+      const slot = plane[i];
+      slots[i] = slot < 0 ? null : ids[slot];
+    }
+    frames.get(owner.frame).cels[owner.layer].slots = slots;
   }
 }
 
