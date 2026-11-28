@@ -270,3 +270,246 @@ pub(super) fn read_document(source: &str) -> Result<(Json, CelPlanes), String> {
     })?;
     Ok((document, input.planes))
 }
+
+#[derive(Default)]
+pub(super) struct StampInput {
+    slots: Vec<i32>,
+    alpha: Vec<u32>,
+    knockouts: Vec<u32>,
+}
+
+pub(super) fn compile_stamp<T>(
+    frames: Vec<Vec<StampInput>>,
+    make: impl Fn(Vec<i32>, Vec<u32>, Vec<u32>) -> T,
+) -> Vec<Vec<T>> {
+    frames
+        .into_iter()
+        .map(|frame| {
+            frame
+                .into_iter()
+                .map(|cel| make(cel.slots, cel.alpha, cel.knockouts))
+                .collect()
+        })
+        .collect()
+}
+
+fn stamp_word(value: f64, limit: u32) -> Option<u32> {
+    (value >= 0.0 && value <= f64::from(limit) && value.fract() == 0.0).then_some(value as u32)
+}
+
+fn read_stamp_cel(fields: Fields<'_>, inputs: &mut Vec<StampInput>) -> Result<Json, String> {
+    let mut input = StampInput::default();
+    let metadata = fields.read_object(|key, raw| {
+        if !raw.get().starts_with('[') {
+            return json(raw);
+        }
+        match key {
+            "slots" => {
+                let slots: Vec<Option<f64>> = parse(raw.get())?;
+                input.slots = slots
+                    .into_iter()
+                    .map(|slot| match slot {
+                        None => -1,
+                        Some(slot) => stamp_word(slot, 16777213).map_or(-3, |slot| slot as i32),
+                    })
+                    .collect();
+            }
+            "alpha" | "knockouts" => {
+                let values: Vec<f64> = parse(raw.get())?;
+                let limit = if key == "alpha" { 255 } else { 262143 };
+                let plane = if key == "alpha" {
+                    &mut input.alpha
+                } else {
+                    &mut input.knockouts
+                };
+                plane.extend(
+                    values
+                        .into_iter()
+                        .map(|n| stamp_word(n, limit).unwrap_or(u32::MAX)),
+                );
+            }
+            _ => return json(raw),
+        }
+        Ok(Json::Array(Vec::new()))
+    })?;
+    inputs.push(input);
+    Ok(metadata)
+}
+
+fn read_stamp_frame(
+    raw: &RawValue,
+    deck: bool,
+    inputs: &mut Vec<StampInput>,
+) -> Result<Json, String> {
+    let Some(fields) = Fields::read(raw)? else {
+        return json(raw);
+    };
+    if !deck {
+        return read_stamp_cel(fields, inputs);
+    }
+    fields.read_object(|key, raw| {
+        if key == "cels"
+            && let Some(cels) = Fields::read(raw)?
+        {
+            return cels.read_object(|_, cel| match Fields::read(cel)? {
+                Some(cel) => read_stamp_cel(cel, inputs),
+                None => json(cel),
+            });
+        }
+        json(raw)
+    })
+}
+
+pub(super) fn read_stamp(source: &str) -> Result<(Json, Vec<Vec<StampInput>>), String> {
+    let raw: &RawValue = parse(source)?;
+    let Some(fields) = Fields::read(raw)? else {
+        return Ok((json(raw)?, Vec::new()));
+    };
+    let deck = fields.get("format").map(json).transpose()?.is_some_and(
+        |data| matches!(data, Json::Text(name) if name == "ink-studio/pixel-layer-deck"),
+    );
+    let mut frames = Vec::new();
+    let header = if fields.get("frames").is_some() {
+        fields.read_object(|key, raw| {
+            if key == "frames" {
+                array(raw, |row| {
+                    let mut inputs = Vec::new();
+                    let frame = read_stamp_frame(row, deck, &mut inputs)?;
+                    frames.push(inputs);
+                    Ok(frame)
+                })
+            } else {
+                json(raw)
+            }
+        })?
+    } else {
+        let mut inputs = Vec::new();
+        let cel = read_stamp_cel(fields, &mut inputs)?;
+        frames.push(inputs);
+        cel
+    };
+    Ok((header, frames))
+}
+
+pub(super) struct StampPatch {
+    pub index: usize,
+    pub layer: String,
+    pub data: String,
+}
+
+fn write_field(out: &mut String, key: &str, first: &mut bool) -> Result<(), String> {
+    if !*first {
+        out.push(',');
+    }
+    *first = false;
+    out.push_str(&serde_json::to_string(key).map_err(|error| error.to_string())?);
+    out.push(':');
+    Ok(())
+}
+
+fn write_cels(
+    out: &mut String,
+    raw: Option<&RawValue>,
+    changes: &mut IndexMap<String, String>,
+) -> Result<(), String> {
+    out.push('{');
+    let mut first = true;
+    if let Some(raw) = raw {
+        let cels = Fields::read(raw)?.ok_or("A deck frame needs an object of cels")?;
+        for (layer, cel) in cels.0 {
+            write_field(out, &layer, &mut first)?;
+            if let Some(edited) = changes.shift_remove(&layer) {
+                out.push_str(&edited);
+            } else {
+                out.push_str(cel.get());
+            }
+        }
+    }
+    for (layer, cel) in changes.drain(..) {
+        write_field(out, &layer, &mut first)?;
+        out.push_str(&cel);
+    }
+    out.push('}');
+    Ok(())
+}
+
+fn write_deck_frame(
+    out: &mut String,
+    raw: &RawValue,
+    changes: &mut IndexMap<String, String>,
+) -> Result<(), String> {
+    let frame = Fields::read(raw)?.ok_or("Expected stamp frame objects")?;
+    let mut first = true;
+    out.push('{');
+    for (key, raw) in frame.0 {
+        write_field(out, &key, &mut first)?;
+        if key == "cels" {
+            write_cels(out, Some(raw), changes)?;
+        } else {
+            out.push_str(raw.get());
+        }
+    }
+    if !changes.is_empty() {
+        write_field(out, "cels", &mut first)?;
+        write_cels(out, None, changes)?;
+    }
+    out.push('}');
+    Ok(())
+}
+
+pub(super) fn write_stamp(source: &str, changes: Vec<StampPatch>) -> Result<String, String> {
+    if changes.is_empty() {
+        return Ok(source.into());
+    }
+    let original = Fields::read(parse(source)?)?.ok_or("Expected stamp artwork")?;
+    let Some(raw) = original.get("frames") else {
+        return changes
+            .into_iter()
+            .next()
+            .map(|patch| patch.data)
+            .ok_or("Missing stamp edit".into());
+    };
+    let deck = original.get("format").map(json).transpose()?.is_some_and(
+        |data| matches!(data, Json::Text(name) if name == "ink-studio/pixel-layer-deck"),
+    );
+    let frames: Vec<&RawValue> = parse(raw.get())?;
+    let mut edits = IndexMap::<usize, IndexMap<String, String>>::new();
+    for change in changes {
+        edits
+            .entry(change.index)
+            .or_default()
+            .insert(change.layer, change.data);
+    }
+    let mut out = String::with_capacity(source.len());
+    let mut first = true;
+    out.push('{');
+    for (key, raw) in original.0 {
+        write_field(&mut out, &key, &mut first)?;
+        if key != "frames" {
+            out.push_str(raw.get());
+            continue;
+        }
+        out.push('[');
+        for (index, frame) in frames.iter().enumerate() {
+            if index != 0 {
+                out.push(',');
+            }
+            if let Some(mut changes) = edits.shift_remove(&index) {
+                if deck {
+                    write_deck_frame(&mut out, frame, &mut changes)?;
+                } else {
+                    out.push_str(
+                        &changes
+                            .shift_remove("image")
+                            .ok_or("Missing flat stamp edit")?,
+                    );
+                }
+            } else {
+                out.push_str(frame.get());
+            }
+        }
+        out.push(']');
+    }
+    out.push('}');
+    Ok(out)
+}

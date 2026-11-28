@@ -10,7 +10,10 @@ pub use journal::{
 pub use png_import::{extract_png_palette, open_pixel_png};
 
 use compiled_state::{State, ValueWireLimits, Wire};
-use document_input::{CelPlanes, read_document};
+use document_input::{
+    CelPlanes, RunPlane, SlotPlane, StampPatch, compile_stamp, read_document, read_stamp,
+    write_stamp,
+};
 use indexmap::IndexMap;
 use ink_abi::{
     json_value::{Json, JsonCodec},
@@ -1800,14 +1803,39 @@ impl PixelEditor {
 }
 
 pub fn open_pixel_workshop_stamp(source: &str) -> Result<OpenedDocument, String> {
-    let OrderedJson(stamp) = serde_json::from_str(source).map_err(|error| error.to_string())?;
+    let (stamp, planes) = read_stamp(source)?;
     let program = State::new();
     let build = |kind, scalar, flag, values, keys| {
         program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
     };
-    let opened = program.function_l_open_pixel_workshop_stamp(compiled_json(stamp, &build))?;
+    let inputs = compile_stamp(planes, |slots, alpha, knockouts| {
+        program.function_l_pixel_stamp_plane(slots, alpha, knockouts)
+    });
+    let opened =
+        program.function_l_open_pixel_workshop_stamp(compiled_json(stamp, &build), inputs)?;
     let limits = Limits::default();
-    let document_json = Json::from_ink(&opened.to_json(), limits)?.stringify(limits)?;
+    let document = Json::from_ink(&opened.l_document.to_json(), limits)?;
+    let planes = CelPlanes {
+        slots: opened
+            .l_slots
+            .into_iter()
+            .map(|row| SlotPlane {
+                frame: row.l_frame,
+                layer: row.l_layer,
+                slots: row.l_pixels,
+            })
+            .collect(),
+        runs: opened
+            .l_runs
+            .into_iter()
+            .map(|row| RunPlane {
+                frame: row.l_frame,
+                layer: row.l_layer,
+                marks: row.l_marks,
+            })
+            .collect(),
+    };
+    let document_json = restore_cel_planes(&document, &planes, limits)?;
     Ok(OpenedDocument {
         revision: revision(&document_json),
         legacy_revision: None,
@@ -1816,17 +1844,107 @@ pub fn open_pixel_workshop_stamp(source: &str) -> Result<OpenedDocument, String>
 }
 
 pub fn export_pixel_workshop_stamp(source: &str, document: &str) -> Result<String, String> {
-    let OrderedJson(stamp) = serde_json::from_str(source).map_err(|error| error.to_string())?;
-    let OrderedJson(snapshot) = serde_json::from_str(document).map_err(|error| error.to_string())?;
+    let (stamp, planes) = read_stamp(source)?;
+    let (snapshot, authored) = read_document(document)?;
     let program = State::new();
     let build = |kind, scalar, flag, values, keys| {
         program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
     };
-    let exported = program.function_l_export_pixel_workshop_stamp(
-        compiled_json(stamp, &build), compiled_json(snapshot, &build),
+    let inputs = compile_stamp(planes, |slots, alpha, knockouts| {
+        program.function_l_pixel_stamp_plane(slots, alpha, knockouts)
+    });
+    let changes = program.function_l_export_pixel_workshop_stamp(
+        compiled_json(stamp, &build),
+        inputs,
+        compiled_json(snapshot, &build),
+        authored
+            .slots
+            .into_iter()
+            .map(|row| program.function_l_pixel_slot_plane(row.frame, row.layer, row.slots))
+            .collect(),
+        authored
+            .runs
+            .into_iter()
+            .map(|row| program.function_l_pixel_run_plane(row.frame, row.layer, row.marks))
+            .collect(),
     )?;
     let limits = Limits::default();
-    Json::from_ink(&exported.to_json(), limits)?.stringify(limits)
+    let mut edits = Vec::with_capacity(changes.len());
+    for change in changes {
+        let info = Json::from_ink(&change.l_info.to_json(), limits)?;
+        let pixels = change.l_pixels;
+        let data = stamp_raster_json(
+            info,
+            &pixels.l_slots,
+            &pixels.l_alpha,
+            &pixels.l_knockouts,
+            change.l_write_alpha,
+        )?;
+        edits.push(StampPatch {
+            index: change.l_index as usize,
+            layer: change.l_layer,
+            data,
+        });
+    }
+    write_stamp(source, edits)
+}
+
+fn stamp_raster_json(
+    info: Json,
+    slots: &[i32],
+    alpha: &[u32],
+    knockouts: &[u32],
+    write_alpha: bool,
+) -> Result<String, String> {
+    use std::fmt::Write;
+    let Json::Object(fields) = info else {
+        return Err("Expected stamp cel metadata".into());
+    };
+    let limits = Limits::default();
+    let mut out = String::new();
+    append_json_members(&mut out, &fields, |out, _, value| {
+        out.push_str(&value.stringify(limits)?);
+        Ok(())
+    })?;
+    out.pop();
+    if !fields.is_empty() {
+        out.push(',');
+    }
+    out.push_str(r#""slots":["#);
+    for (i, slot) in slots.iter().enumerate() {
+        if i != 0 {
+            out.push(',');
+        }
+        if *slot < 0 {
+            out.push_str("null");
+        } else {
+            write!(out, "{slot}").map_err(|error| error.to_string())?;
+        }
+    }
+    out.push(']');
+    if write_alpha {
+        out.push_str(r#","alpha":["#);
+        for i in 0..slots.len() {
+            if i != 0 {
+                out.push(',');
+            }
+            write!(out, "{}", alpha.get(i).copied().unwrap_or(255))
+                .map_err(|error| error.to_string())?;
+        }
+        out.push(']');
+    }
+    if !knockouts.is_empty() {
+        out.push_str(r#","knockouts":["#);
+        for (i, pixel) in knockouts.iter().enumerate() {
+            if i != 0 {
+                out.push(',');
+            }
+            write!(out, "{pixel}").map_err(|error| error.to_string())?;
+        }
+        out.push(']');
+    }
+    out.push('}');
+    Ok(out)
 }
 
 pub fn open_pixel_document(source: &str) -> Result<OpenedDocument, String> {

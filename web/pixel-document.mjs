@@ -1,5 +1,5 @@
 import { openPixelSessionStore } from './pixel-session-store.mjs';
-import { call, callOwned, compiledValues, createState, JsonCodec } from '../build/pixel_document.mjs';
+import { call, callOwned, compiledValues, createState, functions, JsonCodec } from '../build/pixel_document.mjs';
 import { openPixelJournal } from './pixel-journal.mjs';
 import { parsePixelSession } from './pixel-session.mjs';
 import { decodePixelPng, extractPngPalette } from './pixel-png-import.mjs';
@@ -40,14 +40,23 @@ export async function openPixelPng(bytes) {
 
 export async function openPixelWorkshopStamp(source) {
   const stamp = typeof source === 'string' ? JSON.parse(source) : source;
-  const document = codec.toJS(unwrap(callOwned('open_pixel_workshop_stamp', [codec.fromJS(stamp)])));
+  const { metadata, pixels } = packWorkshopStamp(stamp, typeof source === 'string');
+  const opened = unwrap(functions.open_pixel_workshop_stamp(codec.fromJS(metadata), pixels));
+  const document = codec.toJS(opened.document);
+  restoreSlotPlanes(document, opened.slots, plane => plane.pixels);
+  restoreRunPlanes(document, opened.runs, plane => plane.marks);
   return { document, revision: await revision(document), legacyRevision: null };
 }
 
 export function exportPixelWorkshopStamp(source, document) {
   const stamp = typeof source === 'string' ? JSON.parse(source) : source;
   const snapshot = typeof document === 'string' ? JSON.parse(document) : document;
-  return codec.toJS(unwrap(callOwned('export_pixel_workshop_stamp', [codec.fromJS(stamp), codec.fromJS(snapshot)])));
+  const { metadata, pixels } = packWorkshopStamp(stamp, typeof source === 'string');
+  const { document: description, planes, runs } = packCelPlanes(snapshot, typeof document === 'string');
+  const changes = unwrap(functions.export_pixel_workshop_stamp(
+    codec.fromJS(metadata), pixels, codec.fromJS(description), planes, runs,
+  ));
+  return applyWorkshopChanges(typeof source === 'string' ? stamp : structuredClone(stamp), changes);
 }
 
 export function extractPixelPngPalette(bytes, options = {}) {
@@ -280,6 +289,81 @@ function restoreRunPlanes(document, owners, drawing) {
 function packedArray(value) {
   return Array.isArray(value) && Object.getPrototypeOf(value) === Array.prototype &&
     Reflect.ownKeys(value).length === value.length + 1;
+}
+
+function packWorkshopStamp(stamp, fromText) {
+  function packCel(source) {
+    const input = { slots: [], alpha: [], knockouts: [] };
+    let metadata = source;
+    for (const channel of Object.keys(input)) {
+      const values = ownData(source, channel);
+      if (!Array.isArray(values) || (!fromText && !packedArray(values))) continue;
+      const limit = channel === 'slots' ? 16777213 : channel === 'alpha' ? 255 : 262143;
+      const target = channel === 'slots' ? new Int32Array(values.length) : new Uint32Array(values.length);
+      for (let i = 0; i < values.length; i++) {
+        const entry = fromText ? values[i] : ownData(values, i);
+        target[i] = channel === 'slots' && entry === null ? -1
+          : Number.isInteger(entry) && entry >= 0 && entry <= limit ? entry
+          : channel === 'slots' ? -3 : 0xffffffff;
+      }
+      input[channel] = target;
+      metadata = replacingDataField(metadata, channel, []);
+    }
+    return { metadata, input };
+  }
+  const frames = ownData(stamp, 'frames');
+  if (!packedArray(frames)) {
+    const { metadata, input } = packCel(stamp);
+    return { metadata, pixels: [[input]] };
+  }
+  const deck = ownData(stamp, 'format') === 'ink-studio/pixel-layer-deck';
+  const pixels = [];
+  const rows = [];
+  for (let i = 0; i < frames.length; i++) {
+    const row = ownData(frames, i);
+    if (!deck) {
+      const { metadata, input } = packCel(row);
+      pixels.push([input]);
+      rows.push(metadata);
+      continue;
+    }
+    const cels = ownData(row, 'cels');
+    const input = [];
+    let metadata = cels;
+    if (cels && typeof cels === 'object' && !Array.isArray(cels)) {
+      for (const layer of Object.keys(cels)) {
+        const cel = ownData(cels, layer);
+        const packed = packCel(cel);
+        input.push(packed.input);
+        if (packed.metadata !== cel) metadata = replacingDataField(metadata, layer, packed.metadata);
+      }
+    }
+    pixels.push(input);
+    rows.push(cels === metadata ? row : replacingDataField(row, 'cels', metadata));
+  }
+  return { metadata: replacingDataField(stamp, 'frames', rows), pixels };
+}
+
+function applyWorkshopChanges(stamp, changes) {
+  const deck = stamp.format === 'ink-studio/pixel-layer-deck';
+  for (const change of changes) {
+    const { slots, alpha, knockouts } = change.pixels;
+    const cel = codec.toJS(change.info);
+    cel.slots = Array.from(slots, slot => slot < 0 ? null : slot);
+    if (change.write_alpha) cel.alpha = alpha.length ? Array.from(alpha) : Array(slots.length).fill(255);
+    if (knockouts.length) cel.knockouts = Array.from(knockouts);
+    if (deck) {
+      const frame = stamp.frames[change.index];
+      Object.defineProperty(frame.cels ??= {}, change.layer, {
+        value: cel, enumerable: true, configurable: true, writable: true,
+      });
+    } else if (stamp.frames) {
+      stamp.frames[change.index] = cel;
+    } else {
+      return cel;
+    }
+  }
+  return stamp;
 }
 
 function packSpans(source, width, height, fromText) {

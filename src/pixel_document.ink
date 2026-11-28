@@ -484,21 +484,26 @@ pub fn open_pixel_document(document: json.Json) -> Result<Opened, String> {
     return Ok(Opened { document: if legacy { upgrade_legacy(items, layers) } else { document }, legacy: legacy });
 }
 
-pub fn open_pixel_workshop_stamp(source: json.Json) -> Result<json.Json, String> {
-    let converted = workshop.import_stamp(source)?;
-    let opened = open_pixel_document(converted)?;
+pub fn pixel_stamp_plane(slots: List<i32>, alpha: List<u32>, knockouts: List<u32>) -> workshop.Input {
+    return workshop.Input { slots: slots, alpha: alpha, knockouts: knockouts };
+}
+
+pub fn open_pixel_workshop_stamp(source: json.Json, input: List<List<workshop.Input>>) -> Result<workshop.Imported, String> {
+    let converted = workshop.import_stamp(source, input)?;
+    let opened = open_pixel_document(converted.document)?;
     let items = pixel_values.fields(opened.document);
     let g = mask.Grid { width: pixel_values.word(field(items, "width"), 512), height: pixel_values.word(field(items, "height"), 512) };
     let frames = pair(field(items, "frames")).map(fn(row) => frame_raster.frame_name(row));
     let validated = json.lookup(items, "selections").fold(fn(rows) =>
         read_named(rows, g, frames, []), fn(unit) => Ok(selection.no_named()))?;
-    return Ok(opened.document);
+    return Ok(workshop.Imported { ..converted, document: opened.document });
 }
 
-pub fn export_pixel_workshop_stamp(source: json.Json, document: json.Json) -> Result<json.Json, String> {
-    let baseline = open_pixel_workshop_stamp(source)?;
+pub fn export_pixel_workshop_stamp(source: json.Json, input: List<List<workshop.Input>>, document: json.Json,
+    slots: List<frame_raster.SlotPlane>, runs: List<frame_raster.RunPlane>) -> Result<List<workshop.Change>, String> {
+    let baseline = open_pixel_workshop_stamp(source, input)?;
     let edited = open_pixel_document(document)?;
-    return workshop.export_stamp(source, baseline, edited.document);
+    return workshop.export_stamp(source, baseline, edited.document, slots, runs);
 }
 
 record EditorDocument { source: json.Json, artwork: frame_raster.Artwork, named: selection.Named, }
