@@ -180,23 +180,27 @@ fn compare_frame(before: frame.Artwork, after: frame.Artwork, a: List<paint.Deta
     };
 }
 
-fn count_pixel(pair: Pair, p: u32, count: u32) -> u32 {
+fn composite_changed(pair: Pair, p: u32) -> Bool {
     let left = pair.before.view.pixels.at_or(p, frame.blank());
     let right = pair.after.view.pixels.at_or(p, frame.blank());
     let a = frame.owner(pair.before.view.trace.at_or(p, 0));
     let b = frame.owner(pair.after.view.trace.at_or(p, 0));
-    let changed = left.color != right.color || left.alpha != right.alpha || !same_location(pair, a, b) ||
+    return left.color != right.color || left.alpha != right.alpha || !same_location(pair, a, b) ||
         !same_swatch(pair, left.slot, right.slot) || protected(pair.before, p, left) != protected(pair.after, p, right);
-    return count + (if changed { 1 } else { 0 });
 }
 
 fn scan_composite(pair: Pair, settings: Settings, out: Scan) -> Scan {
     let size = mask.size(pair.grid);
-    // With equal grids both sides use the same flat index. Count-only reviews
-    // can compare their pixels directly without constructing sample records.
-    if !settings.exact && out.rows.len() >= settings.limit && pair.before.grid == pair.after.grid {
-        let count = repeat_until(size, out.count, fn(n) => false, fn(p) => fn(n) => count_pixel(pair, p, n));
-        return Scan { ..out, count: count };
+    // Equal grids share the flat index. Construct coordinates and sample
+    // records only for pixels that can appear in the report.
+    if pair.before.grid == pair.after.grid {
+        if !settings.exact && out.rows.len() >= settings.limit {
+            let count = repeat_until(size, out.count, fn(n) => false, fn(p) => fn(n) =>
+                n + (if composite_changed(pair, p) { 1 } else { 0 }));
+            return Scan { ..out, count: count };
+        }
+        return repeat_until(size, out, fn(next) => false, fn(p) => fn(next) =>
+            if composite_changed(pair, p) { scan_pixel(pair, settings, p, next) } else { next });
     }
     return repeat_until(size, out, fn(next) => false, fn(p) => fn(next) => scan_pixel(pair, settings, p, next));
 }

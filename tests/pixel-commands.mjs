@@ -316,6 +316,34 @@ export function commandCases(root) {
     assert.deepEqual(run(command('undo')).history, { undo: [], redo: ['Pixel edit batch'] });
   });
 
+  const flat = {
+    format: 'ink-studio/pixel-art', version: 2, width: 6, height: 5, pixelAspect: [1, 1], palette: design.palette,
+    layers: [{ id: 'ground' }, { id: 'middle' }, { id: 'ink' }, { id: 'hidden', visible: false }, { id: 'ref', kind: 'reference' }],
+    frames: [{ id: 'front', durationMs: 90, cels: {
+      ground: { id: 'base', marks: [{ swatch: 'brick', runs: [[0, 0, 6], [1, 0, 6]] }] },
+      middle: { marks: [{ swatch: 'glass', at: [0, 0] }, { swatch: null, at: [1, 1] }] },
+      ink: { marks: [{ swatch: 'glass', at: [4, 3] }] },
+      hidden: { marks: [{ swatch: 'brick', at: [0, 0] }] },
+      ref: { marks: [{ swatch: 'copper', at: [1, 1] }] },
+    } }, { id: 'back', durationMs: 120, cels: {
+      ground: { hold: 'base', offset: [1, 1] },
+      middle: { marks: [{ swatch: 'glass', at: [1, 1] }, { alpha: 100, runs: [[1, 1, 1]] }] },
+      ink: { marks: [{ swatch: 'brick', at: [5, 4] }] },
+    } }],
+  };
+  scenario('flat layers retain knockout ownership, raw captures and held cels', flat, (run, edit) => {
+    for (const options of [{}, { layer: 'hidden' }, { references: true }, { frame: 'back' }]) {
+      run(command('export', { artifact: 'stamp', options }));
+    }
+    const stroke = edit('draw', { tool: 'pencil', layer: 'ink', swatch: 'brick', points: [[0, 0], [1, 1], [5, 4]] });
+    const exact = run(command('preview', { edit: stroke, options: { exact: true, limit: 10 } }));
+    assert.ok(exact.valid);
+    assert.deepEqual(exact.diff.cells.filter(row => !row.layer).map(row => row.at), [[0, 0], [1, 1], [2, 2], [3, 3], [4, 3], [5, 4]]);
+    run(stroke);
+    run(command('export', { artifact: 'layer-deck' }));
+    run(command('undo'));
+    run(command('redo'));
+  });
   return cases;
 }
 

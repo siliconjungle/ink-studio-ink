@@ -36,6 +36,11 @@ record Scene { canvas: Canvas, ancestors: Buffer<Parked>, todo: Buffer<Job>,
     capture: Captured, sources: Buffer<RawLayer>, observations: Buffer<Observation>,
     spec: CaptureSpec, work: paint.Work, issue: String, }
 record Overlay { pixels: Buffer<Pixel>, coverage: Buffer<u32>, trace: Buffer<u32>, issue: String, }
+record CelImage { raw: paint.Raw, opacity: f64, }
+record FlatLayer { ordinal: u32, slots: List<i32>, }
+record FlatScene { images: Buffer<CelImage>, visible: Buffer<FlatLayer>, work: paint.Work, opaque: Bool, issue: String, }
+record FlatCapture { raw: Captured, layers: Buffer<RawLayer>, }
+record FlatPixel { pixel: Pixel, trace: u32, }
 enum Blend { Normal, Multiply, Screen, Overlay, Add, }
 record Style { id: String, opacity: f64, blend: Blend, kind: String, protect: Bool, owner: u32, }
 record Raster { width: u32, height: u32, frame: String, image: selection.Image, }
@@ -433,22 +438,127 @@ fn cel_raster(art: Artwork, source: Cel, work: paint.Work) -> paint.Raw {
     return paint.raster(art.grid, art.ids, source.fields, slots, runs, source.prepared, source.runs, work);
 }
 
+fn render_cel(art: Artwork, scope: Scope, ordinal: u32, layer: Layer, spec: CaptureSpec, work: paint.Work) -> CelImage {
+    let active = active_cel(art.cels, scope.frame, layer.id);
+    let place = placement(art.inputs.at_or(ordinal, json.null()), active);
+    let source = resolved_cel(art.cels, active);
+    let raster = cel_raster(art, source, work);
+    let raw = if spec.sample_only { translated_sample(art.grid, raster, place, spec.inspect) }
+        else { translated(art.grid, raster, place) };
+    return CelImage { raw: raw, opacity: layer.opacity * place.opacity };
+}
+
 fn step(art: Artwork, scope: Scope, scene: Scene) -> Scene {
     let job = scene.todo.at_or(scene.todo.len() - 1, Job { ordinal: 0, closing: false });
     let old = Scene { ..scene, todo: scene.todo.pop() };
     let layer = art.layers.at_or(job.ordinal, empty_layer());
     if job.closing { return close_group(art, scope, job.ordinal, layer, old); }
     if layer.kind == "group" { return open_group(art, job.ordinal, layer, old); }
-    let active = active_cel(art.cels, scope.frame, layer.id);
-    let place = placement(art.inputs.at_or(job.ordinal, json.null()), active);
-    let source = resolved_cel(art.cels, active);
-    let raster = cel_raster(art, source, old.work);
-    let raw = if old.spec.sample_only { translated_sample(art.grid, raster, place, old.spec.inspect) }
-        else { translated(art.grid, raster, place) };
+    let image = render_cel(art, scope, job.ordinal, layer, old.spec, old.work);
+    let raw = image.raw;
     if raw.issue != "" { return Scene { ..old, issue: raw.issue }; }
     let next = Scene { ..old, work: raw.work };
     let input = Source { raw: raw, group: [], trace: [], uses_alpha: false };
-    return apply_layer(art, scope, job.ordinal, layer, layer.opacity * place.opacity, input, false, next);
+    return apply_layer(art, scope, job.ordinal, layer, image.opacity, input, false, next);
+}
+
+fn flat_layer(layer: Layer) -> Bool {
+    return layer.parent == "" && layer.clip == "" && !layer.protect && layer.kind != "group" && layer.kind != "mask";
+}
+
+fn prepare_flat_layer(art: Artwork, scope: Scope, spec: CaptureSpec, ordinal: u32, plan: FlatScene) -> FlatScene {
+    let layer = art.layers.at_or(ordinal, empty_layer());
+    let image = render_cel(art, scope, ordinal, layer, spec, plan.work);
+    let raw = image.raw;
+    if raw.issue != "" { return FlatScene { ..plan, issue: raw.issue }; }
+    let images = plan.images.push(image);
+    if !visible(layer, true, image.opacity, spec.references) {
+        return FlatScene { ..plan, images: images, work: raw.work };
+    }
+    return FlatScene { images: images, visible: plan.visible.push(FlatLayer { ordinal: ordinal, slots: raw.slots }),
+        work: raw.work, opaque: plan.opaque && image.opacity == 1.0f64 && layer.blend == "normal" && length(raw.alpha) == 0,
+        issue: "" };
+}
+
+fn flat_capture(art: Artwork, scope: Scope, spec: CaptureSpec, images: List<CelImage>) -> FlatCapture {
+    let initial = FlatCapture { raw: no_capture(), layers: Buffer.empty() };
+    if !spec.layers && scope.layer == "" { return initial; }
+    return repeat_until(length(images), initial, fn(out) => false, fn(i) => fn(out) =>
+        capture_flat_layer(art.layers.at_or(i, empty_layer()), scope, spec.layers, images.at_or(i, empty_image()), i, out));
+}
+
+fn empty_image() -> CelImage {
+    return CelImage { raw: paint.Raw { slots: [], alpha: [], work: paint.untouched(), issue: "" }, opacity: 0.0f64 };
+}
+
+fn capture_flat_layer(layer: Layer, scope: Scope, all: Bool, image: CelImage, ordinal: u32, out: FlatCapture) -> FlatCapture {
+    let raw = Captured { found: true, slots: image.raw.slots, alpha: image.raw.alpha, clipping: [] };
+    return FlatCapture { raw: if layer.id == scope.layer { raw } else { out.raw },
+        layers: if all { out.layers.push(RawLayer { owner: ordinal + 1, view: raw }) } else { out.layers } };
+}
+
+fn flat_slot(rows: List<FlatLayer>, index: u32, p: u32) -> i32 {
+    let row = rows.at_or(index, FlatLayer { ordinal: 0, slots: [] });
+    return row.slots.at_or(p, -1);
+}
+
+// The stack is in paint order. For opaque artwork, a pixel only needs its front
+// entry and, for exact preview, the previous nonempty entry beneath it.
+fn front_layer(rows: List<FlatLayer>, p: u32, end: u32) -> u32 {
+    return repeat_until(end, 0, fn(ordinal) => ordinal != 0, fn(i) => fn(found) =>
+        if flat_slot(rows, end - 1 - i, p) != -1 { end - i } else { 0 });
+}
+
+fn flat_pixel(colors: List<u32>, rows: List<FlatLayer>, p: u32, owners: Bool) -> FlatPixel {
+    let front = front_layer(rows, p, length(rows));
+    if front == 0 { return FlatPixel { pixel: blank(), trace: 0 }; }
+    let slot = flat_slot(rows, front - 1, p);
+    let pixel = if slot == -2 { blank() } else {
+        Pixel { slot: slot, color: color_at(colors, slot), alpha: 255, locked: false }
+    };
+    let trace = if owners { flat_trace(rows, p, front) } else { 0 };
+    return FlatPixel { pixel: pixel, trace: trace };
+}
+
+fn flat_trace(rows: List<FlatLayer>, p: u32, front: u32) -> u32 {
+    let rear = front_layer(rows, p, front - 1);
+    let below = if rear == 0 { -1 } else { flat_slot(rows, rear - 1, p) };
+    let fallback = FlatLayer { ordinal: 0, slots: [] };
+    let owner = rows.at_or(front - 1, fallback).ordinal + 1;
+    let previous = if rear == 0 { 0 } else { rows.at_or(rear - 1, fallback).ordinal + 1 };
+    return pack_trace(owner, previous, if below == -2 { -1 } else { below });
+}
+
+fn draw_flat(art: Artwork, scope: Scope, initial: Scene) -> Scene {
+    let spec = initial.spec;
+    let start = FlatScene { images: Buffer.empty(), visible: Buffer.empty(), work: initial.work, opaque: true, issue: "" };
+    let plan = repeat_until(length(art.layers), start, fn(plan) => plan.issue != "" || !plan.opaque,
+        fn(i) => fn(plan) => prepare_flat_layer(art, scope, spec, i, plan));
+    if plan.issue != "" { return Scene { ..initial, issue: plan.issue }; }
+    let images = plan.images.freeze();
+    if !plan.opaque {
+        let prefix = repeat_until(length(images), initial, fn(scene) => scene.issue != "",
+            fn(i) => fn(scene) => composite_flat_layer(art, scope, i, images.at_or(i, empty_image()), scene));
+        return draw_tree(art, scope, prefix);
+    }
+    let capture = flat_capture(art, scope, spec, images);
+    let visible = plan.visible.freeze();
+    let canvas = if length(visible) == 0 { initial.canvas } else {
+        repeat_until(initial.canvas.pixels.len(), initial.canvas, fn(canvas) => false,
+            fn(p) => fn(canvas) => store_flat_pixel(canvas, flat_pixel(art.colors, visible, p, spec.owners), p, spec.owners))
+    };
+    return Scene { ..initial, canvas: canvas, capture: capture.raw, sources: capture.layers, work: plan.work };
+}
+
+fn composite_flat_layer(art: Artwork, scope: Scope, ordinal: u32, image: CelImage, scene: Scene) -> Scene {
+    let input = Source { raw: image.raw, group: [], trace: [], uses_alpha: false };
+    return apply_layer(art, scope, ordinal, art.layers.at_or(ordinal, empty_layer()), image.opacity,
+        input, false, Scene { ..scene, work: image.raw.work, todo: scene.todo.pop() });
+}
+
+fn store_flat_pixel(canvas: Canvas, result: FlatPixel, p: u32, owners: Bool) -> Canvas {
+    return Canvas { ..canvas, pixels: canvas.pixels.set(p, result.pixel),
+        trace: if owners { canvas.trace.set(p, result.trace) } else { canvas.trace } };
 }
 
 fn compose(art: Artwork, scope: Scope, spec: CaptureSpec) -> Scene {
@@ -457,6 +567,14 @@ fn compose(art: Artwork, scope: Scope, spec: CaptureSpec) -> Scene {
     let initial = Scene { canvas: empty_canvas(art, cells, true, spec.owners), ancestors: Buffer.empty(),
         todo: children(art.layers, "", todo), capture: no_capture(), sources: Buffer.empty(), observations: Buffer.empty(), spec: spec,
         work: paint.untouched(), issue: "" };
+    if spec.inspect == 4294967295 && !spec.sample_only &&
+        length(art.layers.filter(fn(layer) => !flat_layer(layer))) == 0 {
+        return draw_flat(art, scope, initial);
+    }
+    return draw_tree(art, scope, initial);
+}
+
+fn draw_tree(art: Artwork, scope: Scope, initial: Scene) -> Scene {
     return repeat_until(length(art.layers) * 2, initial, fn(scene) => scene.issue != "" || scene.todo.len() == 0,
         fn(i) => fn(scene) => step(art, scope, scene));
 }
