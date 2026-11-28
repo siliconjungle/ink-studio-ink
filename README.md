@@ -94,7 +94,9 @@ Use `{ type: 'recall', id }` to resolve a document's saved selection. An unscope
 
 Set `tool: 'cleanup'` with a `kind` of `stair`, `fragment`, `outline`, or `cluster`. Supply a named `selection` or native `pixels`. Cluster repairs take `mode: 'grow'` or `mode: 'shrink'`. The default budget is 64 changed pixels and can be set with `maxChanges` up to 256. Command previews and applied receipts identify each changed coordinate and its before and after swatch and coverage.
 
-After building, serve the repository from a local HTTP server and open `web/pixel-workshop.html` to try cleanup with the sample artwork or open a pixel-art document or PNG. The workshop shows a repair on the canvas before you apply it. You can cancel, undo, redo, and export the current artwork.
+After building, serve the repository from a local HTTP server and open `web/pixel-workshop.html` to try cleanup with the sample artwork. It opens pixel-art documents, PNGs, and original Workshop stamps and layer decks. The workshop shows a repair on the canvas before you apply it. You can cancel, undo, redo, and export the current artwork. Stamp and deck exports preserve their original format, timeline, palette metadata, and unedited cels.
+
+Use `openPixelWorkshopStamp(source)` and `exportPixelWorkshopStamp(source, document)` from `web/pixel-document.mjs` to round-trip raster edits using the original stamp and the edited version 2 document. For native use, `import-stamp STAMP` prints the editable document and revision, and `export-stamp STAMP DOCUMENT` prints the updated stamp JSON. Dense stamps can reach the current JSON exchange budget before reaching the original Workshop's size limit.
 
 Set `tool: 'replace-swatch'` with a saved `selection` and distinct `from` and `to` swatch IDs. Use `tool: 'rgba'` with a list of `{ at: [x, y], rgba: [r, g, b, a], swatch }` pixels for exact color edits. The swatch ID is optional. An RGBA byte tuple with zero alpha retains its pigment. Use `rgba: null` to clear the index at a pixel.
 

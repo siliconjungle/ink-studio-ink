@@ -1,4 +1,6 @@
-import { createPixelCommandEditor, openPixelPng, rasterizePixelFrame } from './pixel-document.mjs';
+import {
+  createPixelCommandEditor, exportPixelWorkshopStamp, openPixelPng, openPixelWorkshopStamp, rasterizePixelFrame,
+} from './pixel-document.mjs';
 
 const byId = name => document.getElementById(name);
 const canvas = byId('artwork');
@@ -24,6 +26,8 @@ let selection;
 let cursor = [0, 0];
 let history = { undo: [], redo: [] };
 let filename = 'staircase';
+let workshopStamp = null;
+let stampRevision = null;
 let busy = false;
 let serial = 0;
 
@@ -57,7 +61,10 @@ function options(control, rows, previous = '') {
 }
 function savedOptions(previous = '') {
   const names = (art.selections ?? []).filter(row => !row.frame || row.frame === frame.value);
-  options(saved, [['', 'Canvas selection'], ...names.map(row => [row.id, row.id])], previous);
+  const active = art.frames.findIndex(row => row.id === frame.value);
+  const original = workshopStamp?.frames?.[active] ?? workshopStamp;
+  const authored = [...(workshopStamp?.sharedSelections ?? []), ...(original?.selections ?? [])];
+  options(saved, [['', 'Canvas selection'], ...names.map((row, i) => [row.id, authored[i]?.id ?? row.id])], previous);
 }
 
 function pixelBytes(raster) {
@@ -150,17 +157,20 @@ function pixelMask(points) {
   return { points, occupied };
 }
 
-async function install(source, name) {
+async function install(source, name, stamp = null) {
   const next = await createPixelCommandEditor(source);
   const snapshot = await next.snapshot();
   editor = next;
   art = snapshot;
   filename = name;
+  workshopStamp = stamp;
+  stampRevision = stamp ? await next.revision() : null;
   selection = undefined;
   cursor = [0, 0];
   history = await editor.history();
-  options(frame, art.frames.map(row => [row.id, row.label ?? row.id]));
-  options(layer, art.layers.filter(row => row.kind !== 'group').map(row => [row.id, row.label ?? row.id]));
+  options(frame, art.frames.map((row, i) => [row.id, row.label ?? stamp?.frames?.[i]?.id ?? row.id]));
+  const preferred = stamp && art.layers.findLast(row => !row.kind || row.kind === 'paint' || row.kind === 'surface');
+  options(layer, art.layers.filter(row => row.kind !== 'group').map(row => [row.id, row.label ?? row.id]), preferred?.id);
   options(swatch, [['', 'Auto'], ...Object.keys(art.palette).map(id => [id, id])]);
   savedOptions();
   clearPreview();
@@ -291,11 +301,21 @@ byId('artwork-file').addEventListener('change', event => perform(async () => {
   const file = event.target.files[0];
   event.target.value = '';
   if (!file) return;
-  const input = /\.png$/i.test(file.name) ? (await openPixelPng(new Uint8Array(await file.arrayBuffer()))).document : await file.text();
-  await install(input, file.name);
+  if (/\.png$/i.test(file.name)) {
+    const input = await openPixelPng(new Uint8Array(await file.arrayBuffer()));
+    return install(input.document, file.name);
+  }
+  const source = JSON.parse(await file.text());
+  if (source?.format === 'ink-studio/pixel-art') return install(source, file.name);
+  const input = await openPixelWorkshopStamp(source);
+  return install(input.document, file.name, source);
 }));
 byId('export').addEventListener('click', () => perform(async () => {
-  const json = JSON.stringify(await editor.snapshot(), null, 2) + '\n';
+  const pristine = workshopStamp && stampRevision === await editor.revision();
+  const snapshot = pristine ? null : await editor.snapshot();
+  const artwork = pristine ? workshopStamp
+    : workshopStamp ? exportPixelWorkshopStamp(workshopStamp, snapshot) : snapshot;
+  const json = JSON.stringify(artwork, null, 2) + '\n';
   const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
   const link = document.createElement('a');
   link.href = url;

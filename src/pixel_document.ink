@@ -21,6 +21,7 @@ import "pixel_asset_export.ink" as assets;
 import "pixel_png.ink" as png;
 import "pixel_png_input.ink" as png_input;
 import "pixel_png_import.ink" as png_import;
+import "pixel_workshop_stamp.ink" as workshop;
 import "pixel_guarded_edit.ink" as guarded;
 import "pixel_inspect.ink" as inspection;
 import "pixel_guides.ink" as guides;
@@ -481,6 +482,23 @@ pub fn open_pixel_document(document: json.Json) -> Result<Opened, String> {
     let checked: Unit = frames?;
     if !valid_palette(palette, legacy) { return Err("Pixel palettes need 1–255 RGB swatches keyed by stable ID"); }
     return Ok(Opened { document: if legacy { upgrade_legacy(items, layers) } else { document }, legacy: legacy });
+}
+
+pub fn open_pixel_workshop_stamp(source: json.Json) -> Result<json.Json, String> {
+    let converted = workshop.import_stamp(source)?;
+    let opened = open_pixel_document(converted)?;
+    let items = pixel_values.fields(opened.document);
+    let g = mask.Grid { width: pixel_values.word(field(items, "width"), 512), height: pixel_values.word(field(items, "height"), 512) };
+    let frames = pair(field(items, "frames")).map(fn(row) => frame_raster.frame_name(row));
+    let validated = json.lookup(items, "selections").fold(fn(rows) =>
+        read_named(rows, g, frames, []), fn(unit) => Ok(selection.no_named()))?;
+    return Ok(opened.document);
+}
+
+pub fn export_pixel_workshop_stamp(source: json.Json, document: json.Json) -> Result<json.Json, String> {
+    let baseline = open_pixel_workshop_stamp(source)?;
+    let edited = open_pixel_document(document)?;
+    return workshop.export_stamp(source, baseline, edited.document);
 }
 
 record EditorDocument { source: json.Json, artwork: frame_raster.Artwork, named: selection.Named, }

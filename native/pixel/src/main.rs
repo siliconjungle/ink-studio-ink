@@ -9,8 +9,9 @@ mod slice_cli;
 mod tilemap_cli;
 
 use ink_studio_pixel::{
-    IndexedSelectionRaster, OpenedDocument, PixelEditor, PixelFileEditor, mask_pixels, open_pixel_document,
-    open_pixel_png, rasterize_pixel_frame, select_pixel_mask_with_raster,
+    IndexedSelectionRaster, OpenedDocument, PixelEditor, PixelFileEditor, export_pixel_workshop_stamp,
+    mask_pixels, open_pixel_document, open_pixel_png, open_pixel_workshop_stamp, rasterize_pixel_frame,
+    select_pixel_mask_with_raster,
 };
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -150,7 +151,7 @@ fn select(path: std::ffi::OsString, packed: bool) -> Result<(), String> {
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel timeline DOCUMENT | ink-studio-pixel import-png FILE | ink-studio-pixel select|select-mask|raster|select-document|paint-document|save-selection-document|capture-brush-document|copy-selection-document|journal-document|command-document REQUEST | ink-studio-pixel session ACTION DIRECTORY | ink-studio-pixel palette ACTION SOURCE --out OUTPUT | ink-studio-pixel edit|preview|replay DOCUMENT INPUT [--out OUTPUT]";
+    let usage = "Usage: ink-studio-pixel DOCUMENT | ink-studio-pixel timeline DOCUMENT | ink-studio-pixel import-png FILE | ink-studio-pixel import-stamp STAMP | ink-studio-pixel export-stamp STAMP DOCUMENT | ink-studio-pixel select|select-mask|raster|select-document|paint-document|save-selection-document|capture-brush-document|copy-selection-document|journal-document|command-document REQUEST | ink-studio-pixel session ACTION DIRECTORY | ink-studio-pixel palette ACTION SOURCE --out OUTPUT | ink-studio-pixel edit|preview|replay DOCUMENT INPUT [--out OUTPUT]";
     let path = args.next().ok_or(usage)?;
     if let Some(action @ ("edit" | "preview" | "replay")) = path.to_str() {
         return file_edit_cli::run(action, args);
@@ -159,6 +160,15 @@ fn run() -> Result<(), String> {
     if path == "palette" { return palette_cli::run(args); }
     if path == "slices" { return slice_cli::run(args); }
     if path == "tilemap" { return tilemap_cli::run(args); }
+    if path == "export-stamp" {
+        let source = args.next().ok_or(usage)?;
+        let document = args.next().ok_or(usage)?;
+        if args.next().is_some() { return Err(usage.into()); }
+        let original = std::fs::read_to_string(source).map_err(|error| error.to_string())?;
+        let snapshot = std::fs::read_to_string(document).map_err(|error| error.to_string())?;
+        println!("{}", export_pixel_workshop_stamp(&original, &snapshot)?);
+        return Ok(());
+    }
     if let Some(request) = args.next() {
         if args.next().is_some() {
             return Err(usage.into());
@@ -166,6 +176,10 @@ fn run() -> Result<(), String> {
         if path == "import-png" {
             let image = std::fs::read(request).map_err(|error| error.to_string())?;
             return print_opened(open_pixel_png(&image)?);
+        }
+        if path == "import-stamp" {
+            let source = std::fs::read_to_string(request).map_err(|error| error.to_string())?;
+            return print_opened(open_pixel_workshop_stamp(&source)?);
         }
         if path == "timeline" {
             let source = std::fs::read_to_string(request).map_err(|error| error.to_string())?;

@@ -489,9 +489,7 @@ fn color_alpha(text: String) -> u32 {
 }
 
 fn signed_slot(n: u32) -> i32 {
-    let low = word_and(n, 65535);
-    let x = if low >= 32768 { f64_from_u32(low) - 65536.0f64 } else { f64_from_u32(low) };
-    return i32_from_f64(x).fold(fn(slot) => slot, fn(unit) => -1);
+    return i32_from_f64(f64_from_u32(n)).fold(fn(slot) => slot, fn(unit) => -1);
 }
 
 fn line_box(g: mask.Grid, line: Line) -> Box {
@@ -797,4 +795,22 @@ fn raster(g: mask.Grid, ids: List<String>, content: List<json.Member>, packed: L
     } else { foldl(prepared, base, fn(row) => fn(out) => retained_runs(g, row, out)) } };
     let drawn = foldl(runs, authored, fn(row) => fn(out) => retained_runs(g, row, out));
     return Raw { slots: drawn.slots.freeze(), alpha: drawn.alpha.freeze(), work: drawn.work, issue: drawn.issue };
+}
+
+fn stamp_stroke(g: mask.Grid, row: json.Json, paint: Paint) -> Paint {
+    if paint.issue != "" { return paint; }
+    let fields = values.fields(row);
+    let ink = values.get(fields, "slot");
+    let id: i32 = if ink == json.null() && values.has(fields, "slot") { -1 }
+        else { values.integer(ink, 0, 16777213).fold(fn(n) => n, fn(unit) => -3) };
+    if id == -3 { return Paint { ..paint, issue: "Stamp strokes need an integer slot or null" }; }
+    return shape(g, values.get(fields, "shape"), id, 16777215, paint);
+}
+
+fn stamp_slots(g: mask.Grid, slots: List<i32>, strokes: List<json.Json>) -> Result<List<i32>, String> {
+    if length(strokes) == 0 { return Ok(slots); }
+    let paint = initial(g, [], [], slots, untouched());
+    let out = foldl(strokes, paint, fn(row) => fn(old) => stamp_stroke(g, row, old));
+    if out.issue != "" { return Err(out.issue); }
+    return Ok(out.slots.freeze());
 }

@@ -1799,6 +1799,36 @@ impl PixelEditor {
     }
 }
 
+pub fn open_pixel_workshop_stamp(source: &str) -> Result<OpenedDocument, String> {
+    let OrderedJson(stamp) = serde_json::from_str(source).map_err(|error| error.to_string())?;
+    let program = State::new();
+    let build = |kind, scalar, flag, values, keys| {
+        program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
+    };
+    let opened = program.function_l_open_pixel_workshop_stamp(compiled_json(stamp, &build))?;
+    let limits = Limits::default();
+    let document_json = Json::from_ink(&opened.to_json(), limits)?.stringify(limits)?;
+    Ok(OpenedDocument {
+        revision: revision(&document_json),
+        legacy_revision: None,
+        document_json,
+    })
+}
+
+pub fn export_pixel_workshop_stamp(source: &str, document: &str) -> Result<String, String> {
+    let OrderedJson(stamp) = serde_json::from_str(source).map_err(|error| error.to_string())?;
+    let OrderedJson(snapshot) = serde_json::from_str(document).map_err(|error| error.to_string())?;
+    let program = State::new();
+    let build = |kind, scalar, flag, values, keys| {
+        program.function_l_pixel_json_value(kind, scalar, flag, values, keys)
+    };
+    let exported = program.function_l_export_pixel_workshop_stamp(
+        compiled_json(stamp, &build), compiled_json(snapshot, &build),
+    )?;
+    let limits = Limits::default();
+    Json::from_ink(&exported.to_json(), limits)?.stringify(limits)
+}
+
 pub fn open_pixel_document(source: &str) -> Result<OpenedDocument, String> {
     let (input, planes) = read_document(source)?;
     let limits = Limits::default();

@@ -38,6 +38,18 @@ export async function openPixelPng(bytes) {
   return { document, revision: await revision(document), legacyRevision: null };
 }
 
+export async function openPixelWorkshopStamp(source) {
+  const stamp = typeof source === 'string' ? JSON.parse(source) : source;
+  const document = codec.toJS(unwrap(callOwned('open_pixel_workshop_stamp', [codec.fromJS(stamp)])));
+  return { document, revision: await revision(document), legacyRevision: null };
+}
+
+export function exportPixelWorkshopStamp(source, document) {
+  const stamp = typeof source === 'string' ? JSON.parse(source) : source;
+  const snapshot = typeof document === 'string' ? JSON.parse(document) : document;
+  return codec.toJS(unwrap(callOwned('export_pixel_workshop_stamp', [codec.fromJS(stamp), codec.fromJS(snapshot)])));
+}
+
 export function extractPixelPngPalette(bytes, options = {}) {
   return extractPngPalette(bytes, codec, options);
 }
