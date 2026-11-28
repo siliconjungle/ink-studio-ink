@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
-  createPixelCommandEditor, exportPixelWorkshopStamp, openPixelWorkshopStamp, rasterizePixelFrame,
+  createPixelCommandEditor, createPixelWorkshopEditor, exportPixelWorkshopStamp, openPixelWorkshopStamp, rasterizePixelFrame,
 } from '../web/pixel-document.mjs';
 
 const [original, native] = process.argv.slice(2);
@@ -154,6 +154,33 @@ for (const [source, document, target] of [
   await editor.redo();
   assert.deepEqual(exportPixelWorkshopStamp(source, await editor.snapshot()), saved);
   tests.find(row => row.source === source).edited = { snapshot, saved };
+
+  const { editor: retained } = await createPixelWorkshopEditor(JSON.stringify(source));
+  async function verifyRetainedRasters(expected) {
+    for (const { id: frame } of expected.frames) {
+      for (const layer of ['', ...expected.layers.filter(row => row.kind !== 'group').map(row => row.id)]) {
+        const scope = { frame, layer };
+        const actual = await retained.rasterize(scope);
+        const reference = rasterizePixelFrame(expected, scope);
+        assert.deepEqual(Uint32Array.from(actual.rgba), reference.rgba, frame + '/' + layer);
+        assert.deepEqual([actual.width, actual.height], [reference.width, reference.height]);
+      }
+    }
+  }
+  assert.equal(await retained.revision(), patch.revision);
+  const pristine = JSON.stringify(source, null, 2) + '\n';
+  assert.equal(await retained.exportWorkshopStamp(), pristine);
+  await verifyRetainedRasters(document);
+  await retained.execute(op('draw', { patch }));
+  assert.deepEqual(await retained.snapshot(), snapshot);
+  assert.deepEqual(JSON.parse(await retained.exportWorkshopStamp()), saved);
+  await verifyRetainedRasters(snapshot);
+  await retained.undo();
+  assert.equal(await retained.exportWorkshopStamp(), pristine);
+  await verifyRetainedRasters(document);
+  await retained.redo();
+  assert.deepEqual(JSON.parse(await retained.exportWorkshopStamp()), saved);
+  await verifyRetainedRasters(snapshot);
 }
 
 const rejected = [
@@ -167,7 +194,10 @@ const rejected = [
   { ...still, selections: [...still.selections, ...still.selections] },
   { ...still, selections: [{ id: 'outside', pixels: [[6, 5]] }] },
 ];
-for (const source of rejected) await assert.rejects(openPixelWorkshopStamp(source));
+for (const source of rejected) {
+  await assert.rejects(openPixelWorkshopStamp(source));
+  await assert.rejects(createPixelWorkshopEditor(JSON.stringify(source)));
+}
 assert.throws(() => exportPixelWorkshopStamp(still, { ...stillDocument, pixelAspect: [2, 1] }), /only accepts raster/);
 
 if (native) {

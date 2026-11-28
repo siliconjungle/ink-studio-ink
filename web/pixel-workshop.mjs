@@ -1,5 +1,5 @@
 import {
-  createPixelCommandEditor, exportPixelWorkshopStamp, openPixelPng, openPixelWorkshopStamp, rasterizePixelFrame,
+  createPixelCommandEditor, createPixelWorkshopEditor, openPixelPng,
 } from './pixel-document.mjs';
 
 const byId = name => document.getElementById(name);
@@ -27,7 +27,6 @@ let cursor = [0, 0];
 let history = { undo: [], redo: [] };
 let filename = 'staircase';
 let workshopStamp = null;
-let stampRevision = null;
 let busy = false;
 let serial = 0;
 
@@ -69,13 +68,8 @@ function savedOptions(previous = '') {
 
 function pixelBytes(raster) {
   const image = new ImageData(raster.width, raster.height);
-  for (const [index, packed] of raster.rgba.entries()) {
-    const offset = index * 4;
-    image.data[offset] = packed >>> 24;
-    image.data[offset + 1] = packed >>> 16 & 255;
-    image.data[offset + 2] = packed >>> 8 & 255;
-    image.data[offset + 3] = packed & 255;
-  }
+  const pixels = new DataView(image.data.buffer);
+  for (let i = 0; i < raster.rgba.length; i++) pixels.setUint32(i * 4, raster.rgba[i]);
   return image;
 }
 function hexBytes(color, alpha) {
@@ -94,11 +88,11 @@ function drawArtwork() {
   }
   context.putImageData(work, 0, 0);
 }
-function loadRaster() {
-  const raster = rasterizePixelFrame(art, { frame: frame.value, layer: view.value === 'layer' ? layer.value : '' });
+async function loadRaster() {
+  const raster = await editor.rasterize({ frame: frame.value, layer: view.value === 'layer' ? layer.value : '' });
   base = pixelBytes(raster);
-  canvas.width = raster.width;
-  canvas.height = raster.height;
+  if (canvas.width !== raster.width) canvas.width = raster.width;
+  if (canvas.height !== raster.height) canvas.height = raster.height;
   const ratio = art.width * art.pixelAspect[0] / (art.height * art.pixelAspect[1]);
   byId('grid').style.setProperty('--art-ratio', ratio);
   byId('grid').style.setProperty('--art-width', `min(620px, ${ratio * 55}vh)`);
@@ -157,14 +151,12 @@ function pixelMask(points) {
   return { points, occupied };
 }
 
-async function install(source, name, stamp = null) {
-  const next = await createPixelCommandEditor(source);
-  const snapshot = await next.snapshot();
+async function install(next, name, stamp = null) {
+  const metadata = await next.metadata();
   editor = next;
-  art = snapshot;
+  art = metadata;
   filename = name;
   workshopStamp = stamp;
-  stampRevision = stamp ? await next.revision() : null;
   selection = undefined;
   cursor = [0, 0];
   history = await editor.history();
@@ -174,7 +166,7 @@ async function install(source, name, stamp = null) {
   options(swatch, [['', 'Auto'], ...Object.keys(art.palette).map(id => [id, id])]);
   savedOptions();
   clearPreview();
-  loadRaster();
+  await loadRaster();
   status('Opened ' + name);
 }
 function label(pixel) {
@@ -223,10 +215,9 @@ async function previewCleanup() {
   showPreview();
 }
 async function refresh(message) {
-  art = await editor.snapshot();
   history = await editor.history();
   clearPreview();
-  loadRaster();
+  await loadRaster();
   status(message);
 }
 
@@ -303,19 +294,14 @@ byId('artwork-file').addEventListener('change', event => perform(async () => {
   if (!file) return;
   if (/\.png$/i.test(file.name)) {
     const input = await openPixelPng(new Uint8Array(await file.arrayBuffer()));
-    return install(input.document, file.name);
+    return install(await createPixelCommandEditor(input.document), file.name);
   }
-  const source = JSON.parse(await file.text());
-  if (source?.format === 'ink-studio/pixel-art') return install(source, file.name);
-  const input = await openPixelWorkshopStamp(source);
-  return install(input.document, file.name, source);
+  const { editor: next, stamp } = await createPixelWorkshopEditor(await file.text());
+  return install(next, file.name, stamp);
 }));
 byId('export').addEventListener('click', () => perform(async () => {
-  const pristine = workshopStamp && stampRevision === await editor.revision();
-  const snapshot = pristine ? null : await editor.snapshot();
-  const artwork = pristine ? workshopStamp
-    : workshopStamp ? exportPixelWorkshopStamp(workshopStamp, snapshot) : snapshot;
-  const json = JSON.stringify(artwork, null, 2) + '\n';
+  const json = editor.exportWorkshopStamp ? await editor.exportWorkshopStamp()
+    : JSON.stringify(await editor.snapshot(), null, 2) + '\n';
   const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
   const link = document.createElement('a');
   link.href = url;
@@ -323,13 +309,13 @@ byId('export').addEventListener('click', () => perform(async () => {
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }));
-frame.addEventListener('change', () => {
+frame.addEventListener('change', () => perform(async () => {
   savedOptions();
   selectCanvas();
-  loadRaster();
-});
-layer.addEventListener('change', () => { clearPreview(); loadRaster(); });
-view.addEventListener('change', loadRaster);
+  await loadRaster();
+}));
+layer.addEventListener('change', () => perform(async () => { clearPreview(); await loadRaster(); }));
+view.addEventListener('change', () => perform(loadRaster));
 saved.addEventListener('change', () => perform(async () => {
   clearPreview();
   selection = saved.value ? pixelMask((await editor.select({ type: 'recall', id: saved.value }, { frame: frame.value })).pixels) : undefined;
@@ -363,7 +349,7 @@ const sample = {
   }, { id: 'fragment', pixels: [[9, 7]] }],
 };
 await perform(async () => {
-  await install(sample, 'staircase');
+  await install(await createPixelCommandEditor(sample), 'staircase');
   saved.value = 'staircase';
   selection = pixelMask(sample.selections[0].pixels);
   drawSelection();

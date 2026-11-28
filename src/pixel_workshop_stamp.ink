@@ -348,7 +348,7 @@ fn saved_cel(save: Save, index: u32, id: String, row: json.Member, original: jso
     let before = frame.active_cel(save.baseline.cels, id, row.key);
     let now = frame.active_cel(save.edited.cels, id, row.key);
     let edited = value.fields(row.value);
-    if edited == before.fields && same_planes(save, before, now) { return out; }
+    if edited == before.fields && before.runs == now.runs && same_planes(save, before, now) { return out; }
     let keys: List<String> = ["slots", "marks"];
     let old_fields = without(before.fields, keys);
     let current_fields = without(edited, keys);
@@ -389,8 +389,15 @@ fn attach(document: json.Json, slots: List<frame.SlotPlane>, runs: List<frame.Ru
 
 fn export_stamp(source: json.Json, baseline: Imported, document: json.Json, slots: List<frame.SlotPlane>,
     runs: List<frame.RunPlane>) -> Result<List<Change>, String> {
+    let before = attach(baseline.document, baseline.slots, baseline.runs)?;
+    let after = attach(document, slots, runs)?;
+    return export_art(source, baseline.document, before, document, after);
+}
+
+fn export_art(source: json.Json, before_document: json.Json, before: frame.Artwork,
+    document: json.Json, after: frame.Artwork) -> Result<List<Change>, String> {
     let stamp = parse(source)?;
-    let original = value.fields(baseline.document);
+    let original = value.fields(before_document);
     let current = value.fields(document);
     let frames = value.items(value.get(current, "frames"));
     let prior = value.items(value.get(original, "frames"));
@@ -401,8 +408,6 @@ fn export_stamp(source: json.Json, baseline: Imported, document: json.Json, slot
     if stamp.deck && !fits_deck(current, frames, stamp.grid) {
         return Err("Layer deck exceeds the native pixel budget");
     }
-    let before = attach(baseline.document, baseline.slots, baseline.runs)?;
-    let after = attach(document, slots, runs)?;
     let save = Save { original: stamp, baseline: before, edited: after };
     let start = Changes { rows: Buffer.empty(), issue: "" };
     let saved = repeat_until(length(frames), start, fn(out) => out.issue != "", fn(i) => fn(out) =>

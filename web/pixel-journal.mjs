@@ -183,7 +183,7 @@ function previewReport(codec, changes, targets, conflicts, links, exact) {
   return report;
 }
 
-export async function openPixelJournal({ editor, state, codec, revision, revisionText, restoreSnapshot, setGrid, documentInputLimits }, input, historyLimit, checkpoint, storage) {
+export async function openPixelJournal({ editor, state, codec, revision, revisionText, restoreSnapshot, setGrid, documentInputLimits, workshopText }, input, historyLimit, checkpoint, storage) {
   const bind = (name, inputLimits) => state.bind(name, { resultOnly: true, inputLimits });
   const read = bind('pixel_journal'), begin = bind('begin_pixel_edit');
   const commit = bind('commit_pixel_edit'), cancel = bind('cancel_pixel_edit');
@@ -725,6 +725,11 @@ export async function openPixelJournal({ editor, state, codec, revision, revisio
       return true;
     }),
     receipts: () => enqueue(() => structuredClone(receiptChain())),
+    metadata: () => enqueue(editor.metadata),
+    rasterize({ frame = '', layer = '', cel = '' } = {}) {
+      return enqueue(() => editor.rasterize(frame, layer, cel));
+    },
+    ...(workshopText && { exportWorkshopStamp: () => enqueue(() => workshopText(read().cursor.revision === current)) }),
     snapshot: () => enqueue(editor.snapshot),
     select: (query, options) => enqueue(() => editor.select(query, options)),
     palette: () => enqueue(editor.palette),

@@ -614,6 +614,10 @@ fn authored_cels(source: json.Json, edited: List<frame.Cel>) -> json.Json {
     return json.object(replace(items, "frames", json.array(frames.map(fn(row) => saved_frame(row, exported)))));
 }
 
+fn edited_source(source: json.Json, art: frame.Artwork) -> json.Json {
+    return authored_cels(source, art.cels.filter(fn(cel) => length(cel.runs) != 0));
+}
+
 fn revised_palette(source: json.Json, added: List<brush.Swatch>) -> json.Json {
     if length(added) == 0 { return json.null(); }
     let items = value.fields(source);

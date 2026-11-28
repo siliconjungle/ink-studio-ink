@@ -48,6 +48,28 @@ export async function openPixelWorkshopStamp(source) {
   return { document, revision: await revision(document), legacyRevision: null };
 }
 
+export async function createPixelWorkshopEditor(text) {
+  const input = JSON.parse(text);
+  if (ownData(input, 'format') === 'ink-studio/pixel-art') {
+    const core = createPixelEditorCore(input, true);
+    const editor = await openPixelJournal({ ...core, codec, revision, revisionText }, input, 100);
+    return { editor, stamp: null };
+  }
+  const { metadata, pixels } = packWorkshopStamp(input, true);
+  const source = codec.fromJS(metadata);
+  const imported = unwrap(functions.open_pixel_workshop_stamp(source, pixels));
+  const document = codec.toJS(imported.document);
+  const core = createPixelEditorCore(document, true, imported);
+  core.state.bind('retain_pixel_workshop_stamp', { resultOnly: true, inputLimits: documentInputLimits })(source);
+  const changes = core.state.bind('export_retained_pixel_workshop_stamp', { resultOnly: true });
+  const workshopText = pristine => {
+    const stamp = pristine ? input : applyWorkshopChanges(input, unwrap(changes()));
+    return JSON.stringify(stamp, null, 2) + '\n';
+  };
+  const editor = await openPixelJournal({ ...core, codec, revision, revisionText, workshopText }, document, 100);
+  return { editor, stamp: codec.toJS(source) };
+}
+
 export function exportPixelWorkshopStamp(source, document) {
   const stamp = typeof source === 'string' ? JSON.parse(source) : source;
   const snapshot = typeof document === 'string' ? JSON.parse(document) : document;
@@ -139,12 +161,14 @@ function cleanupTarget({ kind, mode, maximum, changes }) {
   };
 }
 
-function createPixelEditorCore(source, fromText = false) {
+function createPixelEditorCore(source, fromText = false, imported) {
   const state = createState();
   const load = state.bind('load_pixel_editor', { resultOnly: true, inputLimits: documentInputLimits });
   const pick = state.bind('select_pixel_editor', { resultOnly: true });
   const draw = state.bind('paint_pixel_editor', { resultOnly: true });
   const read = state.bind('snapshot_pixel_editor', { resultOnly: true });
+  const readMetadata = state.bind('pixel_editor_metadata', { resultOnly: true });
+  const readRaster = state.bind('rasterize_pixel_editor', { resultOnly: true });
   const readPalette = state.bind('pixel_editor_palette', { resultOnly: true });
   const extractPalette = state.bind('extract_pixel_editor_palette', { resultOnly: true });
   const capture = state.bind('capture_pixel_editor_brush', { resultOnly: true });
@@ -255,9 +279,14 @@ function createPixelEditorCore(source, fromText = false) {
     }
     return document;
   }
-  if (fromText) installDocument(source, true);
+  if (imported) {
+    const named = packNamedPixels(source);
+    grid = unwrap(load(codec.fromJS(named.document), named.positions, imported.slots, imported.runs));
+  } else if (fromText) installDocument(source, true);
   else replaceDocument(source);
   return { state, restoreSnapshot, documentInputLimits, setGrid: restored => { grid = restored; }, editor: Object.freeze({ replaceDocument, select, saveSelection, paint, captureBrush,
+    metadata: () => codec.toJS(readMetadata()),
+    rasterize: (frame, layer, cel) => unwrap(readRaster(frame, layer, cel)),
     copySelection, snapshot: () => restoreSnapshot(read()), palette: () => codec.toJS(readPalette()),
     extractPalette: (options = {}) => codec.toJS(unwrap(extractPalette(codec.fromJS(options)))) }) };
 }
@@ -345,7 +374,10 @@ function packWorkshopStamp(stamp, fromText) {
 }
 
 function applyWorkshopChanges(stamp, changes) {
+  if (!changes.length) return stamp;
   const deck = stamp.format === 'ink-studio/pixel-layer-deck';
+  const frames = stamp.frames?.slice();
+  const copied = new Set();
   for (const change of changes) {
     const { slots, alpha, knockouts } = change.pixels;
     const cel = codec.toJS(change.info);
@@ -353,17 +385,21 @@ function applyWorkshopChanges(stamp, changes) {
     if (change.write_alpha) cel.alpha = alpha.length ? Array.from(alpha) : Array(slots.length).fill(255);
     if (knockouts.length) cel.knockouts = Array.from(knockouts);
     if (deck) {
-      const frame = stamp.frames[change.index];
-      Object.defineProperty(frame.cels ??= {}, change.layer, {
+      if (!copied.has(change.index)) {
+        const original = frames[change.index];
+        frames[change.index] = { ...original, cels: { ...original.cels } };
+        copied.add(change.index);
+      }
+      Object.defineProperty(frames[change.index].cels, change.layer, {
         value: cel, enumerable: true, configurable: true, writable: true,
       });
-    } else if (stamp.frames) {
-      stamp.frames[change.index] = cel;
+    } else if (frames) {
+      frames[change.index] = cel;
     } else {
       return cel;
     }
   }
-  return stamp;
+  return { ...stamp, frames };
 }
 
 function packSpans(source, width, height, fromText) {

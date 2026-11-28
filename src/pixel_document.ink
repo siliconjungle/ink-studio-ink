@@ -511,6 +511,7 @@ record EditorSelection { frame: String, grid: mask.Grid, words: List<u32>, }
 record EditorSnapshot { document: json.Json, positions: List<List<u32>>, edits: List<paint.SnapshotCel>,
     slot_owners: List<frame_raster.SlotOwner>, slot_planes: List<List<i32>>,
     run_owners: List<frame_raster.SlotOwner>, run_planes: List<List<List<u32>>>, }
+record EditorImageData { width: u32, height: u32, rgba: List<u32>, }
 record NamedBuild { ids: Buffer<String>, frames: Buffer<String>, packed: Buffer<Bool>, pixels: Buffer<List<u32>>,
     seen: Map<u64, List<String>>, issue: String, }
 record NamedPixels { seen: Buffer<u32>, indices: Buffer<u32>, packed: Bool, issue: String, }
@@ -521,6 +522,8 @@ state EditorScope: frame_raster.Scope = frame_raster.Scope { frame: "", layer: "
 state EditorImage: Option<selection.Image> = None;
 state EditorPaint: paint.CachedView = paint.empty_cache();
 state EditorSource: json.Json = json.null();
+state WorkshopStamp: json.Json = json.null();
+state WorkshopBaseline: preview.Page = preview.empty_page();
 state EditorPositions: List<List<u32>> = [];
 keep EditorTilemap: Result<tile_render.Layout, String> = tile_render.layout(EditorSource, EditorArtwork);
 
@@ -671,6 +674,31 @@ query pixel_editor_grid() -> mask.Grid reads(EditorArtwork) {
 
 query snapshot_pixel_editor() -> EditorSnapshot reads(EditorSource, EditorArtwork, EditorPositions) {
     return snapshot_editor(EditorSource, EditorArtwork, EditorPositions);
+}
+
+query pixel_editor_metadata() -> json.Json reads(EditorSource) { return EditorSource; }
+
+query rasterize_pixel_editor(frame: String, layer: String, cel: String) -> Result<EditorImageData, String>
+    reads(EditorArtwork, EditorPaint) {
+    let art = EditorArtwork;
+    let scope = frame_raster.resolve(art, frame_raster.optional_scope(frame),
+        frame_raster.optional_scope(layer), frame_raster.optional_scope(cel))?;
+    let rgba = paint.selection_image(art, EditorPaint, scope)?.rgba;
+    return Ok(EditorImageData { width: art.grid.width, height: art.grid.height, rgba: rgba });
+}
+
+change retain_pixel_workshop_stamp(source: json.Json) -> Unit reads(EditorSource, EditorArtwork)
+    writes(WorkshopStamp, WorkshopBaseline) {
+    WorkshopStamp = source;
+    WorkshopBaseline = preview.Page { source: EditorSource, art: EditorArtwork };
+    return ();
+}
+
+query export_retained_pixel_workshop_stamp() -> Result<List<workshop.Change>, String>
+    reads(WorkshopStamp, WorkshopBaseline, EditorSource, EditorArtwork) {
+    let edited = EditorArtwork;
+    let source = paint.edited_source(EditorSource, edited);
+    return workshop.export_art(WorkshopStamp, WorkshopBaseline.source, WorkshopBaseline.art, source, edited);
 }
 
 fn snapshot_editor(source: json.Json, art: frame_raster.Artwork, positions: List<List<u32>>) -> EditorSnapshot {
